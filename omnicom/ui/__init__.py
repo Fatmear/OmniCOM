@@ -21,7 +21,6 @@ def run(argv: list[str] | None = None, demo: bool = False) -> int:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(argv)
     app.setApplicationName("OmniCOM")
-    app.setApplicationDisplayName("OmniCOM")
     app.setOrganizationName("OmniCOM")
     app.setApplicationVersion(__version__)
     app.setStyle("Fusion")
