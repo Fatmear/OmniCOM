@@ -10,17 +10,30 @@ from __future__ import annotations
 from collections.abc import Iterable
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
-from PySide6.QtWidgets import QPlainTextEdit, QWidget
+from PySide6.QtWidgets import QApplication, QMenu, QPlainTextEdit, QWidget
 
 from . import theme
 
 MAX_BLOCKS = 20000
 
 # "收←" / "发→" read faster than RX/TX in a long log, and the direction column
-# keeps a fixed width so the payload starts at the same x on every line.
-_DIR_LABELS = {"RX": "收←", "TX": "发→", "··": "··", "!!": "!!"}
+# keeps a fixed width so the payload starts at the same x on every line.  The
+# labels follow the interface language: English mode must never show Chinese.
+_DIR_LABELS = {
+    "zh": {"RX": "收←", "TX": "发→"},
+    "en": {"RX": "RX←", "TX": "TX→"},
+}
+
+
+def dir_label(direction: str) -> str:
+    from ..i18n import language
+
+    table = _DIR_LABELS.get(language(), _DIR_LABELS["zh"])
+    return table.get(direction, direction)
+
+
 _DIR_COLORS = {
     "RX": theme.TEAL,
     "TX": theme.VIOLET,
@@ -59,6 +72,11 @@ def escape_control(text: str) -> str:
 
 
 class LogView(QPlainTextEdit):
+    saveRequested = Signal()
+    findRequested = Signal()
+    clearRequested = Signal()
+    latestRequested = Signal()
+
     def __init__(self, parent: QWidget | None = None, show_dir: bool = True,
                  pixel_size: int = 13) -> None:
         super().__init__(parent)
@@ -146,7 +164,7 @@ class LogView(QPlainTextEdit):
             cursor.insertText(f"[{stamp(ts)}]", self._ts_format)
 
         if self.show_dir:
-            label = _DIR_LABELS.get(direction, direction)
+            label = dir_label(direction)
             cursor.insertText(label, self._make_format(_DIR_COLORS.get(direction, theme.DIM)))
             if direction in ("RX", "TX"):
                 cursor.insertText("◇", self._marker_format)
@@ -245,6 +263,12 @@ class LogView(QPlainTextEdit):
             cursor.mergeCharFormat(char_format)
 
     # ------------------------------------------------------------------ misc
+    def direction_labels(self) -> dict[str, str]:
+        """Direction markers for the *current* interface language."""
+        from ..i18n import language
+
+        return dict(_DIR_LABELS.get(language(), _DIR_LABELS["zh"]))
+
     def clear_all(self) -> None:
         self.clear()
         self._pending = False
@@ -272,6 +296,43 @@ class LogView(QPlainTextEdit):
             event.ignore()
             return
         super().keyPressEvent(event)
+
+    # --------------------------------------------------------------- menu
+    def contextMenuEvent(self, event) -> None:
+        from ..i18n import tr
+        from . import theme
+
+        menu = QMenu(self)
+        menu.setStyleSheet(theme.app_stylesheet())
+
+        cursor = self.textCursor()
+        copy = menu.addAction(tr("log.menu.copy"))
+        copy.setShortcut("Ctrl+C")
+        copy.setEnabled(cursor.hasSelection())
+        copy_all = menu.addAction(tr("log.menu.copyall"))
+        select_all = menu.addAction(tr("log.menu.selectall"))
+        menu.addSeparator()
+        clear = menu.addAction(tr("log.menu.clear"))
+        save = menu.addAction(tr("log.menu.save"))
+        menu.addSeparator()
+        find = menu.addAction(tr("log.menu.find"))
+        latest = menu.addAction(tr("log.menu.gotolatest"))
+
+        picked = menu.exec(event.globalPos())
+        if picked is copy:
+            super().copy()
+        elif picked is copy_all:
+            QApplication.clipboard().setText(self.plain_text())
+        elif picked is select_all:
+            self.selectAll()
+        elif picked is clear:
+            self.clearRequested.emit()
+        elif picked is save:
+            self.saveRequested.emit()
+        elif picked is find:
+            self.findRequested.emit()
+        elif picked is latest:
+            self.latestRequested.emit()
 
 
 class HoverLogView(LogView):

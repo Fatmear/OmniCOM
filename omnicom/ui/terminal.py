@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..i18n import tr
 from . import theme
 from .widgets import Combo, GlyphButton
 
@@ -343,13 +344,13 @@ class TerminalPage(QWidget):
 
         bar = QHBoxLayout()
         bar.setSpacing(8)
-        title = QLabel("终端模式 · 键盘直达串口")
-        title.setStyleSheet("color: rgba(214, 226, 240, 190); font-size: 11.5px;")
-        bar.addWidget(title)
+        self.title = QLabel(tr("term.title"))
+        self.title.setStyleSheet("color: rgba(214, 226, 240, 190); font-size: 11.5px;")
+        bar.addWidget(self.title)
 
-        enter_label = QLabel("回车发送")
-        enter_label.setStyleSheet("color: rgba(214, 226, 240, 150); font-size: 11px;")
-        bar.addWidget(enter_label)
+        self.enter_label = QLabel(tr("term.enter"))
+        self.enter_label.setStyleSheet("color: rgba(214, 226, 240, 150); font-size: 11px;")
+        bar.addWidget(self.enter_label)
         self.enter_box = Combo(self)
         for key, label in (("cr", "CR (\\r)"), ("lf", "LF (\\n)"), ("crlf", "CRLF")):
             self.enter_box.addItem(label, key)
@@ -363,12 +364,12 @@ class TerminalPage(QWidget):
         bar.addStretch(1)
         self.btn_clear = GlyphButton(GlyphButton.CLEAR, self, size=theme.ICON_MD,
                                     object_name="IconBtn")
-        self.btn_clear.setToolTip("清屏")
+        self.btn_clear.setToolTip(tr("term.clear"))
         bar.addWidget(self.btn_clear)
 
         self.btn_full = GlyphButton(GlyphButton.EXPAND, self, size=theme.ICON_MD,
                                    object_name="IconBtn")
-        self.btn_full.setToolTip("清屏并重置终端状态")
+        self.btn_full.setToolTip(tr("term.reset"))
         bar.addWidget(self.btn_full)
         card_layout.addLayout(bar)
 
@@ -376,9 +377,7 @@ class TerminalPage(QWidget):
         self.view.keyBytes.connect(self.keyBytes.emit)
         card_layout.addWidget(self.view, 1)
 
-        self.hint = QLabel(
-            "点击终端区域后直接用键盘输入：Enter 发送回车，Ctrl+C 发送 0x03，"
-            "方向键发送 ANSI 序列。复制用 Ctrl+Shift+C。")
+        self.hint = QLabel(tr("term.hint"))
         self.hint.setStyleSheet("color: rgba(214, 226, 240, 130); font-size: 11px;")
         self.hint.setWordWrap(True)
         card_layout.addWidget(self.hint)
@@ -394,6 +393,13 @@ class TerminalPage(QWidget):
 
     def reset(self) -> None:
         self.view.reset()
+
+    def retranslate(self) -> None:
+        self.title.setText(tr("term.title"))
+        self.enter_label.setText(tr("term.enter"))
+        self.btn_clear.setToolTip(tr("term.clear"))
+        self.btn_full.setToolTip(tr("term.reset"))
+        self.hint.setText(tr("term.hint"))
 
     def _enter_changed(self, _index: int) -> None:
         key = self.enter_box.currentData() or "cr"

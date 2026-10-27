@@ -19,15 +19,29 @@ from PySide6.QtWidgets import (
 )
 
 from .. import paths
+from ..i18n import tr
 from . import theme
 from .log_view import LogView
 from .widgets import GlassFrame
 
 PROTOCOLS = [
-    ("x", "XMODEM", "128B / 1KB · CRC16"),
-    ("y", "YMODEM", "批量 · 带文件名"),
-    ("z", "ZMODEM", "窗口流式 · CRC32"),
+    ("x", "XMODEM", ("128B / 1KB · CRC16", "128B / 1KB · CRC16")),
+    ("y", "YMODEM", ("批量 · 带文件名", "Batch · keeps filenames")),
+    ("z", "ZMODEM", ("窗口流式 · CRC32", "Streaming window · CRC32")),
 ]
+
+
+def _l10n(pair: tuple[str, str]) -> str:
+    """Choose the half of a ``(zh, en)`` pair for the current language."""
+    from ..i18n import language
+
+    return pair[1] if language() == "en" else pair[0]
+
+
+def _pick(text: str) -> str:
+    """Pick a word from the text."""
+    words = text.split()
+    return words[0] if words else ""
 
 
 class DropZone(QFrame):
@@ -48,7 +62,7 @@ class DropZone(QFrame):
         icon.setAlignment(Qt.AlignCenter)
         icon.setStyleSheet(f"color: {theme.INK2}; font-size: 22px;")
         layout.addWidget(icon)
-        self.title = QLabel("点击选择文件，或把文件拖到这里")
+        self.title = QLabel(tr("xfer.dropzone"))
         self.title.setAlignment(Qt.AlignCenter)
         self.title.setStyleSheet(f"color: {theme.INK2}; font-size: 12px;")
         layout.addWidget(self.title)
@@ -113,13 +127,18 @@ class TransferPanel(QWidget):
         left.setContentsMargins(14, 13, 14, 13)
         left.setSpacing(9)
 
-        left.addWidget(self._title("协议"))
+        self._sections: list[tuple[QLabel, str]] = []
+
+        self.sec_protocol = self._title(tr("xfer.protocol"))
+        self._sections.append((self.sec_protocol, "xfer.protocol"))
+        left.addWidget(self.sec_protocol)
         proto_row = QHBoxLayout()
         proto_row.setSpacing(8)
         self.proto_group = QButtonGroup(self)
         self.proto_group.setExclusive(True)
+        self._proto_buttons: list[tuple[QPushButton, str, str]] = []
         for key, name, detail in PROTOCOLS:
-            button = QPushButton(f"{name}\n{detail}")
+            button = QPushButton(f"{name}\n{_l10n(detail)}")
             button.setObjectName("Proto")
             button.setCheckable(True)
             button.setCursor(Qt.PointingHandCursor)
@@ -127,11 +146,14 @@ class TransferPanel(QWidget):
             button.setMinimumHeight(54)
             self.proto_group.addButton(button)
             proto_row.addWidget(button)
+            self._proto_buttons.append((button, name, detail))
             if key == "x":
                 button.setChecked(True)
         left.addLayout(proto_row)
 
-        left.addWidget(self._title("方向"))
+        self.sec_direction = self._title(tr("xfer.direction"))
+        self._sections.append((self.sec_direction, "xfer.direction"))
+        left.addWidget(self.sec_direction)
         dir_row = QHBoxLayout()
         dir_row.setSpacing(3)
         dir_box = QFrame()
@@ -143,7 +165,8 @@ class TransferPanel(QWidget):
         dir_layout.setSpacing(3)
         self.dir_group = QButtonGroup(self)
         self.dir_group.setExclusive(True)
-        for key, label in (("send", "发送到设备"), ("recv", "从设备接收")):
+        self._dir_buttons: dict[str, QPushButton] = {}
+        for key, label in (("send", tr("xfer.send")), ("recv", tr("xfer.recv"))):
             button = QPushButton(label)
             button.setObjectName("Seg")
             button.setCheckable(True)
@@ -153,6 +176,7 @@ class TransferPanel(QWidget):
                 button.setChecked(True)
             self.dir_group.addButton(button)
             dir_layout.addWidget(button)
+            self._dir_buttons[key] = button
         self.dir_group.buttonClicked.connect(self._dir_clicked)
         dir_row.addWidget(dir_box)
         left.addLayout(dir_row)
@@ -163,12 +187,12 @@ class TransferPanel(QWidget):
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
-        self.btn_start = QPushButton("开始传输")
+        self.btn_start = QPushButton(tr("xfer.start"))
         self.btn_start.setObjectName("Primary")
         self.btn_start.setCursor(Qt.PointingHandCursor)
         self.btn_start.clicked.connect(self._start)
         actions.addWidget(self.btn_start, 1)
-        self.btn_abort = QPushButton("中止")
+        self.btn_abort = QPushButton(tr("xfer.abort"))
         self.btn_abort.setObjectName("Ghost")
         self.btn_abort.setEnabled(False)
         self.btn_abort.setCursor(Qt.PointingHandCursor)
@@ -183,7 +207,7 @@ class TransferPanel(QWidget):
         left.addWidget(self.progress)
 
         meta = QHBoxLayout()
-        self.state_label = QLabel("就绪")
+        self.state_label = QLabel(tr("xfer.ready"))
         self.state_label.setStyleSheet(f"color: {theme.DIM}; font-size: 11.5px;")
         self.meta_label = QLabel("—")
         self.meta_label.setStyleSheet(f"color: {theme.DIM}; font-size: 11.5px;")
@@ -192,7 +216,7 @@ class TransferPanel(QWidget):
         meta.addWidget(self.meta_label)
         left.addLayout(meta)
 
-        self.hint = QLabel(f"接收到的文件保存到 {paths.received_dir()}")
+        self.hint = QLabel(tr("xfer.savedir", path=paths.received_dir()))
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
         left.addWidget(self.hint)
@@ -205,9 +229,11 @@ class TransferPanel(QWidget):
         right.setContentsMargins(12, 11, 12, 11)
         right.setSpacing(8)
         head = QHBoxLayout()
-        head.addWidget(self._title("传输日志"))
+        self.log_title = self._title(tr("xfer.log"))
+        head.addWidget(self.log_title)
         head.addStretch(1)
-        clear = QPushButton("清空")
+        self.btn_clear_log = QPushButton(tr("xfer.clearlog"))
+        clear = self.btn_clear_log
         clear.setObjectName("Ghost")
         clear.clicked.connect(lambda: self.log_view.clear_all())
         head.addWidget(clear)
@@ -227,6 +253,20 @@ class TransferPanel(QWidget):
         label.setObjectName("SectionTitle")
         return label
 
+    def retranslate(self) -> None:
+        for label, key in self._sections:
+            label.setText(tr(key).upper())
+        for button, name, detail in self._proto_buttons:
+            button.setText(f"{name}\n{_l10n(detail)}")
+        self._dir_buttons["send"].setText(tr("xfer.send"))
+        self._dir_buttons["recv"].setText(tr("xfer.recv"))
+        self.btn_start.setText(tr("xfer.start"))
+        self.btn_abort.setText(tr("xfer.abort"))
+        self.btn_clear_log.setText(tr("xfer.clearlog"))
+        self.hint.setText(tr("xfer.savedir", path=paths.received_dir()))
+        self.state_label.setText(tr("xfer.ready"))
+        self.log_title.setText(tr("xfer.log").upper())
+
     def protocol(self) -> str:
         button = self.proto_group.checkedButton()
         return button.property("proto") if button else "x"
@@ -237,7 +277,7 @@ class TransferPanel(QWidget):
         self.drop.setVisible(is_send)
         self.hint.setVisible(not is_send)
         if not is_send:
-            self.state_label.setText("等待设备发起传输…")
+            self.state_label.setText(tr("xfer.waiting"))
             self.meta_label.setText("—")
             self.progress.setValue(0)
 
@@ -247,7 +287,7 @@ class TransferPanel(QWidget):
 
     def _start(self) -> None:
         if self.direction == "send" and not self.file_path:
-            self.notify("请先选择要发送的文件", "warn")
+            self.notify(tr("xfer.pickfile"), "warn")
             return
         self.startRequested.emit(self.protocol(), self.direction, self.file_path)
 
@@ -260,7 +300,7 @@ class TransferPanel(QWidget):
         self.btn_start.setEnabled(not running)
         self.btn_abort.setEnabled(running)
         if not running:
-            self.state_label.setText("就绪")
+            self.state_label.setText(tr("xfer.ready"))
 
     def set_progress(self, sent: int, total: int, rate: int = 0) -> None:
         if total:
@@ -278,8 +318,14 @@ class TransferPanel(QWidget):
         self.set_running(False)
         if ok:
             self.progress.setValue(1000)
-        self.state_label.setText("完成" if ok else "失败")
+        self.state_label.setText(tr("xfer.done") if ok else tr("xfer.failed"))
         self.log(("✔ " if ok else "✘ ") + message)
         if download_path:
             self.hint.setVisible(True)
-            self.hint.setText(f"已保存：{download_path}")
+            self.hint.setText(tr("xfer.saved", path=download_path))
+
+
+def _pick(text: str) -> str:
+    """Pick a word from the text."""
+    words = text.split()
+    return words[0] if words else ""

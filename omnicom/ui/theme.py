@@ -53,8 +53,18 @@ BTN_PAD = "0 14px"
 ICON_SM = 24           # dense icon buttons (command rows)
 ICON_MD = 26           # panel headers
 ICON_SIZE = 28         # toolbar icon buttons
-RADIUS = 10
 FONT_PX = 13
+
+# Radii: the user asked for two very different feelings.
+#   * toggles / checkboxes -> a third of their size (soft, round)
+#   * inputs, buttons, cards -> just past square (crisp, boxy)
+RADIUS_CTRL = 5         # text boxes, buttons, combo boxes (slightly sharper than
+                        # the checkbox, per the request: "文本框圆弧要稍小一些")
+RADIUS_CARD = 9         # cards and panels
+RADIUS_PILL = 999       # fully rounded pills / badges
+CHECK_SIZE = 18
+CHECK_RADIUS = 6        # one third of CHECK_SIZE
+RADIUS = RADIUS_CTRL    # kept for older call sites
 
 UI_FONT = '"Segoe UI Variable Text", "Segoe UI", Inter, "Microsoft YaHei UI", sans-serif'
 # Preference order for the log/terminal face.  ``resolve_mono()`` picks the
@@ -92,7 +102,7 @@ QToolTip {{
 QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
   background: {CARD};
   border: 1px solid {LINE};
-  border-radius: {RADIUS}px;
+  border-radius: {RADIUS_CTRL}px;
   padding: 0 10px;
   min-height: {CTRL_H - 2}px;
   selection-background-color: rgba(11, 122, 110, 60);
@@ -114,7 +124,7 @@ QComboBox::down-arrow {{ image: none; width: 0; height: 0; }}
 QComboBox QAbstractItemView {{
   background: {CARD};
   border: 1px solid {LINE};
-  border-radius: {RADIUS}px;
+  border-radius: {RADIUS_CARD}px;
   padding: 6px;
   outline: none;
   selection-background-color: {TEAL_SOFT};
@@ -123,7 +133,7 @@ QComboBox QAbstractItemView {{
 QComboBox QAbstractItemView::item {{
   min-height: 26px;
   padding: 4px 10px;
-  border-radius: 7px;
+  border-radius: {RADIUS_CTRL}px;
 }}
 QComboBox QAbstractItemView::item:hover {{ background: {WASH_HOVER}; }}
 QComboBox QAbstractItemView::item:selected {{ background: {TEAL_SOFT}; color: {INK}; }}
@@ -145,7 +155,7 @@ QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
 QPushButton {{
   background: {CARD};
   border: 1px solid {LINE};
-  border-radius: {RADIUS}px;
+  border-radius: {RADIUS_CTRL}px;
   padding: {BTN_PAD};
   min-height: {CTRL_H - 2}px;
   color: {INK};
@@ -180,25 +190,25 @@ QPushButton#Ghost:hover {{ color: {INK}; background: #F6F9FD; }}
 QPushButton#IconBtn {{
   min-width: {ICON_SIZE}px; max-width: {ICON_SIZE}px;
   min-height: {ICON_SIZE}px; max-height: {ICON_SIZE}px;
-  padding: 0; border: 0; border-radius: 8px;
+  padding: 0; border: 0; border-radius: {RADIUS_CTRL}px;
   background: transparent;
 }}
 QPushButton#IconBtn:hover {{ background: {WASH_HOVER}; }}
 QPushButton#IconBtn:pressed {{ background: rgba(18, 26, 43, 26); }}
 QPushButton#TopIcon {{
   min-width: 30px; max-width: 30px; min-height: 30px; max-height: 30px;
-  padding: 0; border: 0; border-radius: 8px; background: transparent;
+  padding: 0; border: 0; border-radius: {RADIUS_CTRL}px; background: transparent;
 }}
 QPushButton#TopIcon:hover {{ background: {WASH_HOVER}; }}
 QPushButton#TopIcon:pressed {{ background: rgba(18, 26, 43, 28); }}
 QPushButton#TopIconClose {{
   min-width: 30px; max-width: 30px; min-height: 30px; max-height: 30px;
-  padding: 0; border: 0; border-radius: 8px; background: transparent;
+  padding: 0; border: 0; border-radius: {RADIUS_CTRL}px; background: transparent;
 }}
 QPushButton#TopIconClose:hover {{ background: rgba(197, 52, 52, 30); }}
 QPushButton#TopIconClose:pressed {{ background: rgba(197, 52, 52, 60); }}
 QPushButton#Seg {{
-  background: transparent; border: 0; border-radius: 9px; color: {DIM};
+  background: transparent; border: 0; border-radius: {RADIUS_CTRL}px; color: {DIM};
   padding: 0 12px; min-height: 26px;
 }}
 QPushButton#Seg:hover {{ color: {INK}; background: {WASH}; }}
@@ -207,7 +217,7 @@ QPushButton#Seg:checked {{
   border: 1px solid {LINE};
 }}
 QPushButton#Proto {{
-  text-align: left; padding: 0 12px; border-radius: 12px;
+  text-align: left; padding: 0 12px; border-radius: {RADIUS_CARD}px;
   background: {CARD}; border: 1px solid {LINE};
   color: {INK2}; min-height: 44px;
 }}
@@ -263,9 +273,10 @@ QListWidget, QTreeWidget, QTableWidget {{
   background: transparent; border: 0; outline: none;
 }}
 QListWidget::item {{ border: 0; padding: 0; margin: 0; }}
-QCheckBox {{ spacing: 6px; color: {INK2}; }}
+QCheckBox {{ spacing: 8px; color: {INK2}; }}
 QCheckBox::indicator {{
-  width: 14px; height: 14px; border-radius: 4px;
+  width: {CHECK_SIZE}px; height: {CHECK_SIZE}px;
+  border-radius: {CHECK_RADIUS}px;
   border: 1px solid {LINE_STRONG}; background: {CARD};
 }}
 QCheckBox::indicator:hover {{ border-color: {TEAL}; }}
@@ -283,9 +294,10 @@ QProgressBar::chunk {{
 }}
 QMenu {{
   background: {CARD}; border: 1px solid {LINE};
-  border-radius: 10px; padding: 5px;
+  border-radius: {RADIUS_CARD}px; padding: 6px;
 }}
-QMenu::item {{ padding: 7px 20px; border-radius: 7px; }}
+QMenu::item {{ padding: 7px 20px; border-radius: {RADIUS_CTRL}px; }}
+QMenu::separator {{ height: 1px; background: {LINE_SOFT}; margin: 5px 8px; }}
 QMenu::item:selected {{ background: {TEAL_SOFT}; }}
 QDialog {{ background: {CARD}; }}
 QSplitter::handle {{ background: transparent; }}

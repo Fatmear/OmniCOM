@@ -23,13 +23,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from PySide6.QtCore import QPoint, Qt, QTimer  # noqa: E402
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer  # noqa: E402
 from PySide6.QtGui import QColor  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QWidget  # noqa: E402
 
 from omnicom.ui import theme  # noqa: E402
-from omnicom.ui.commands_panel import CommandRow  # noqa: E402
+from omnicom.ui.commands_panel import CommandRow, GroupHeader  # noqa: E402
 from omnicom.ui.main_window import OmniWindow  # noqa: E402
 from omnicom.ui.theme import app_stylesheet  # noqa: E402
 
@@ -479,6 +479,7 @@ def main() -> int:
               "发→" in text and "\\r\\n" in text, text.splitlines()[-1] if text else "")
         next_()
 
+
     runner.add("ports", step_ports)
     runner.add("connected", step_connected)
     runner.add("rx", step_rx)
@@ -548,8 +549,8 @@ def main() -> int:
     def step_terminal(next_):
         window.switch_page("console")
         app.processEvents()
-        check("R-026 存在独立的终端模式页", window.stack.count() == 3
-              and window.console.isVisible())
+        check("R-026 存在独立的终端模式页",
+              "console" in window._page_keys and window.console.isVisible())
         state["tx_term"] = window.bridge.manager.tx_bytes
         window.console.feed(b"login: ")
         window.console.feed(b"root\r\n")
@@ -566,11 +567,282 @@ def main() -> int:
         app.processEvents()
         next_()
 
+    def step_search_modes(next_):
+        """R-030: plain / fuzzy / whole-word / regex, plus a match-case switch."""
+        from omnicom.ui.search_panel import fuzzy_match
+
+        panel = window.search_panel
+        panel.attach_log(window.log)
+        panel.clear_all()
+        for line in ("AT+CGMR", "at+cgmr", "AT+VERSION", "hello world", "abcXYZ"):
+            window.log.append_line(8 * 3600 * 1000.0, "RX", line, "rx")
+        app.processEvents()
+
+        def rows(mode: str, needle: str, case: bool) -> int:
+            panel.match_box.setCurrentIndex(panel.match_box.findData(mode))
+            panel.case_box.setChecked(case)
+            panel.input.setText(needle)
+            panel.run_search()
+            app.processEvents()
+            return panel.results.count()
+
+        sensitive = rows("plain", "CGMR", False)
+        exact = rows("plain", "CGMR", True)
+        check("R-030 普通匹配默认忽略大小写", sensitive == 2, f"{sensitive} 行")
+        check("R-030 区分大小写开关生效", exact == 1, f"{exact} 行")
+        check("R-030 模糊匹配按顺序命中", fuzzy_match("cgr", "AT+CGMR", False)
+              and rows("fuzzy", "cgr", False) == 2)
+        check("R-030 全词匹配只命中整词", rows("word", "worl", False) == 0
+              and rows("word", "world", False) == 1,
+              f"{rows('word', 'worl', False)} / {rows('word', 'world', False)}")
+        hits = rows("regex", r"AT\+CG\w+", False)
+        check("R-030 正则表达式匹配", hits == 2, f"{hits} 行")
+        rows("regex", r"*broken", False)
+        check("R-030 非法正则给出提示而不是崩溃", bool(panel.regex_hint.text()))
+        panel.match_box.setCurrentIndex(panel.match_box.findData("plain"))
+        panel.case_box.setChecked(False)
+        panel.input.setText("")
+        panel.run_search()
+        panel.clear_all()
+        next_()
+
+    def step_command_groups(next_):
+        """R-031: groups with notes, collapse, and per-item / per-group export."""
+        import json
+        import tempfile
+
+        from omnicom.commands import CommandStore
+
+        panel = window.commands_panel
+        store = window.command_store
+
+        def row_count() -> int:
+            layout = panel.list_layout
+            total = 0
+            for index in range(layout.count()):
+                widget = layout.itemAt(index).widget()
+                if isinstance(widget, CommandRow):
+                    total += 1
+            return total
+
+        group = store.add_group("回归测试组", "给这条分组写的备注")
+        store.move_to_group(store.items[0]["id"], group["id"])
+        panel.rebuild()
+        app.processEvents()
+        check("R-031 命令可以归入分组", group["id"] in
+              [g["id"] for g, _items in store.groups_with_items() if g])
+        check("R-031 分组支持备注", store.group_by_id(group["id"])["note"] != "")
+
+        expanded = row_count()
+        panel.toggle_group(group["id"])
+        app.processEvents()
+        collapsed = row_count()
+        panel.toggle_group(group["id"])
+        app.processEvents()
+        check("R-031 分组可折叠与展开", collapsed < expanded and row_count() == expanded,
+              f"{expanded} -> {collapsed} -> {row_count()}")
+
+        single = store.export_payload([store.items[0]])
+        check("R-031 支持按条导出", len(single["items"]) == 1 and
+              single["format"] == "omnicom.commands")
+        grouped = store.export_payload(
+            [item for item in store.items if item.get("group") == group["id"]])
+        check("R-031 支持按组导出并携带分组信息",
+              len(grouped["groups"]) == 1 and grouped["items"][0]["group"] == group["id"])
+
+        target = os.path.join(tempfile.mkdtemp(), "group-export.json")
+        with open(target, "w", encoding="utf-8") as handle:
+            json.dump(grouped, handle, ensure_ascii=False)
+        fresh = CommandStore(os.path.join(tempfile.mkdtemp(), "commands.json"))
+        added = fresh.import_from(target)
+        os.unlink(target)
+        check("R-031 导出的文件可以导入回来",
+              added == len(grouped["items"]) and
+              "回归测试组" in [g["name"] for g in fresh.groups],
+              f"{added} 条")
+        store.remove_group(group["id"])
+        panel.rebuild()
+        app.processEvents()
+        next_()
+
+    def step_plugins(next_):
+        """R-032: plugin folders on disk become top-bar tabs and can be reloaded."""
+        loaded = window.plugins.loaded()
+        check("R-032 插件从独立目录自动发现", bool(loaded),
+              ",".join(info.id for info in loaded))
+        if not loaded:
+            next_()
+            return
+        info = loaded[0]
+        key = f"plugin:{info.id}"
+        check("R-032 插件在顶部栏拥有独立标签页", key in window.titlebar.tab_buttons)
+        check("R-032 插件标签页是真实控件（不是占位）",
+              info.widget is not None and window.stack.indexOf(info.widget) >= 0)
+        window.switch_page(key)
+        app.processEvents()
+        check("R-032 点击插件标签可切换页面",
+              window.stack.currentWidget() is info.widget)
+        window.switch_page("terminal")
+        window.reload_plugins()
+        app.processEvents()
+        check("R-032 刷新插件后仍可用", f"plugin:{info.id}" in window.titlebar.tab_buttons)
+        check("R-032 插件的数据放在自己的目录",
+              os.path.isdir(info.api.data_dir), info.api.data_dir)
+        yes = window.plugins.search_paths()
+        check("R-032 插件搜索路径包含可移植目录", any("plugin" in p for p in yes),
+              str(len(yes)))
+        next_()
+
+    def step_language(next_):
+        """R-033: zh-only in Chinese, en-only in English - menus included."""
+        cjk = re.compile(r"[\u3000-\u9fff]")
+
+        def user_data(widget) -> bool:
+            """True for labels carrying user data rather than UI copy."""
+            node = widget.parent()
+            while node is not None:
+                if isinstance(node, (CommandRow, GroupHeader)):
+                    return True
+                node = node.parent()
+            return False
+
+        def texts(root) -> list[str]:
+            # Rebuilt widgets are only removed on the next event-loop pass, so
+            # flush deferred deletions or the stale labels still match.
+            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            out = []
+            for child in root.findChildren(QWidget):
+                if not isinstance(child, (QLabel, QPushButton)) or not child.isVisible():
+                    continue
+                # Command names and group names are *user data*, not UI copy, so
+                # they legitimately stay Chinese in the English interface.
+                if user_data(child):
+                    continue
+                out.append(child.text() or "")
+            return out
+
+        areas = (window.titlebar, window.rail, window.send_panel, window.sidebar)
+        window.change_language("zh")
+        app.processEvents()
+        chinese = [text for area in areas for text in texts(area)]
+        check("R-033 中文界面显示中文",
+              any(cjk.search(text) for text in chinese),
+              f"{sum(1 for t in chinese if cjk.search(t))}/{len(chinese)} 条")
+        check("R-033 设置与帮助菜单为中文入口",
+              "首选项" in window.titlebar.btn_menu.toolTip() or
+              "菜单" in window.titlebar.btn_menu.toolTip(),
+              window.titlebar.btn_menu.toolTip())
+
+        window.change_language("en")
+        app.processEvents()
+        english = [text for area in areas for text in texts(area)]
+        leftovers = [text for text in english if cjk.search(text)]
+        check("R-033 英文界面没有中文残留", not leftovers, leftovers[:3])
+        from omnicom.i18n import tr
+
+        check("R-033 日志右键菜单也跟随语言", tr("log.menu.copy") == "Copy"
+              and tr("log.menu.find") == "Find…", tr("log.menu.copy"))
+        check("R-033 日志方向标记随语言切换",
+              window.log.direction_labels()["RX"] == "RX←",
+              window.log.direction_labels()["RX"])
+
+        window.change_language("zh")
+        app.processEvents()
+        check("R-033 切回中文后恢复中文",
+              "收" in window.log.direction_labels()["RX"],
+              window.log.direction_labels()["RX"])
+        next_()
+
+    def step_help(next_):
+        """R-034: Help → documentation / about, both real dialogs."""
+        from omnicom import __version__ as build_version
+        from omnicom import docs as manual_module
+        from omnicom.ui.dialogs import AboutDialog, DocsDialog
+
+        docs = DocsDialog(window)
+        docs.render()
+        body = docs.view.toPlainText()
+        check("R-034 文档弹窗有实际内容", len(body) > 500, f"{len(body)} 字符")
+        docs.close()
+
+        about = AboutDialog(window)
+        about.render()
+        check("R-034 关于弹窗显示版本号", build_version in about.app_title.text(),
+              build_version)
+        about.close()
+        check("R-034 使用说明覆盖 10 个章节",
+              len(manual_module.MANUAL["zh"]) >= 10,
+              f"{len(manual_module.MANUAL['zh'])} 章")
+        check("R-034 帮助入口挂在顶部菜单上",
+              hasattr(window, "open_docs") and hasattr(window, "open_about"))
+        for name in ("README.md", "README.en.md"):
+            path = os.path.join(ROOT, name)
+            check(f"R-034 仓库带 {name}", os.path.exists(path), path)
+        next_()
+
+    def step_responsive(next_):
+        """R-035: no control is clipped at any supported window width."""
+        problems: list[str] = []
+        for width in (1000, 1120, 1280, 1440, 1680, 1920):
+            window.resize(width, 880)
+            app.processEvents()
+            # the rail and the sidebar must both fit inside the window
+            used = window.rail.width() + window.sidebar.width() + 40
+            if used > width:
+                problems.append(f"w={width} 用宽 {used}")
+            for area in (window.titlebar, window.rail, window.sidebar):
+                for child in area.findChildren(QPushButton):
+                    if not child.isVisible():
+                        continue
+                    need = child.sizeHint().width()
+                    if need > child.width() + 2:
+                        problems.append(
+                            f"w={width} 按钮「{child.text()[:8]}」要 {need} 实际 "
+                            f"{child.width()}")
+        check("R-035 窗口变窄时控件不被裁剪", not problems, problems[:3])
+        narrow = window.titlebar.subtitle
+        window.resize(1000, 880)
+        app.processEvents()
+        hidden = not narrow.isVisible()
+        window.resize(1440, 880)
+        app.processEvents()
+        check("R-035 窄窗口自动收起副标题", hidden and narrow.isVisible())
+        next_()
+
+    def step_logo(next_):
+        """R-036: transparent logo in the title bar, big rounded controls."""
+        pixmap = window.titlebar.logo.pixmap()
+        check("R-036 标题栏使用真实 logo",
+              pixmap is not None and not pixmap.isNull(), window.titlebar.logo.text())
+        image = pixmap.toImage()
+        corner = image.pixelColor(0, 0)
+        check("R-036 logo 背景透明（不是白底方块）", corner.alpha() < 16,
+              f"alpha={corner.alpha()}")
+        check("R-036 logo 中间有内容", any(
+            image.pixelColor(x, image.height() // 2).alpha() > 200
+            for x in range(image.width())), "opaque row")
+        check("R-036 勾选框圆角足够大（半径 ≥ 尺寸 1/3）",
+              theme.CHECK_RADIUS * 3 >= theme.CHECK_SIZE,
+              f"r={theme.CHECK_RADIUS} s={theme.CHECK_SIZE}")
+        check("R-036 文本框圆角小于勾选框圆角",
+              theme.RADIUS_CTRL < theme.CHECK_RADIUS,
+              f"{theme.RADIUS_CTRL} < {theme.CHECK_RADIUS}")
+        check("R-036 应用图标已设置",
+              not window.windowIcon().isNull())
+        next_()
+
     runner.add("persist", step_persist)
     runner.add("combo", step_combo)
     runner.add("font", step_font)
     runner.add("terminal", step_terminal)
     runner.add("ui_polish", step_ui_polish)
+    runner.add("search_modes", step_search_modes)
+    runner.add("command_groups", step_command_groups)
+    runner.add("plugins", step_plugins)
+    runner.add("language", step_language)
+    runner.add("help", step_help)
+    runner.add("responsive", step_responsive)
+    runner.add("logo", step_logo)
 
     runner.start()
     app.exec()

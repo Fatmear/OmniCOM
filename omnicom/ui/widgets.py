@@ -398,6 +398,10 @@ class GlyphButton(QPushButton):
     TRASH = "trash"
     PLUS = "plus"
     PASTE = "paste"
+    INBOX = "inbox"
+    UPLOAD = "upload"
+    MENU = "menu"
+    INFO = "info"
 
     def __init__(self, glyph: str, parent=None, danger: bool = False,
                  size: int = 30, object_name: str | None = None) -> None:
@@ -540,6 +544,35 @@ class GlyphButton(QPushButton):
         elif glyph == self.PLUS:
             painter.drawLine(int(cx - half), int(cy), int(cx + half), int(cy))
             painter.drawLine(int(cx), int(cy - half), int(cx), int(cy + half))
+        elif glyph == self.INBOX:
+            # tray: a U with a lid line and a downward arrow into it
+            painter.drawLine(int(cx - half), int(cy - half * 0.25),
+                             int(cx - half), int(cy + half * 0.8))
+            painter.drawLine(int(cx - half), int(cy + half * 0.8),
+                             int(cx + half), int(cy + half * 0.8))
+            painter.drawLine(int(cx + half), int(cy + half * 0.8),
+                             int(cx + half), int(cy - half * 0.25))
+            painter.drawLine(int(cx), int(cy - half), int(cx), int(cy + half * 0.2))
+            painter.drawLine(int(cx - half * 0.4), int(cy - half * 0.2),
+                             int(cx), int(cy + half * 0.2))
+            painter.drawLine(int(cx + half * 0.4), int(cy - half * 0.2),
+                             int(cx), int(cy + half * 0.2))
+        elif glyph == self.UPLOAD:
+            painter.drawLine(int(cx - half), int(cy + half * 0.8),
+                             int(cx + half), int(cy + half * 0.8))
+            painter.drawLine(int(cx), int(cy + half * 0.4), int(cx), int(cy - half))
+            painter.drawLine(int(cx - half * 0.45), int(cy - half * 0.5),
+                             int(cx), int(cy - half))
+            painter.drawLine(int(cx + half * 0.45), int(cy - half * 0.5),
+                             int(cx), int(cy - half))
+        elif glyph == self.MENU:
+            for offset in (-0.6, 0.0, 0.6):
+                painter.drawLine(int(cx - half), int(cy + half * offset),
+                                 int(cx + half), int(cy + half * offset))
+        elif glyph == self.INFO:
+            painter.drawEllipse(QRectF(cx - half, cy - half, half * 2, half * 2))
+            painter.drawLine(int(cx), int(cy - half * 0.05), int(cx), int(cy + half * 0.65))
+            painter.drawPoint(int(cx), int(cy - half * 0.45))
         elif glyph == self.PASTE:
             painter.drawRoundedRect(
                 QRectF(cx - half * 0.9, cy - half, half * 1.8, half * 2), 1.5, 1.5)

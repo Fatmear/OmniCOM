@@ -10,8 +10,8 @@ Rules
 - **Do not build or ship an .exe (R-019)**: corporate endpoint policy blocks self-built executables.
   Run from source: `start.cmd`, or `python run.py`, or `python run.py --demo` (虚拟串口).
 - Verify commands: `python tools/protocol_selftest.py` (X/Y/ZMODEM loopback, 23 checks),
-  `python tools/ui_selftest.py` (57 GUI acceptance checks incl. DEMO port),
-  `python tools/acceptance_test.py` (106 checks covering R-001..R-029 + `.artifacts/acceptance.json`),
+  `python tools/ui_selftest.py` (96 GUI acceptance checks incl. DEMO port),
+  `python tools/acceptance_test.py` (145 checks covering R-001..R-036 + `.artifacts/acceptance.json`),
   `python tools/ui_snapshot.py` (renders `.artifacts/ui.png` for visual review),
   `python tools/contrast_audit.py` (light-theme text contrast must stay >= 4.5:1).
   GUI checks must start with their `R-0xx` id — an un-mapped check fails the run.
@@ -29,3 +29,19 @@ Rules
   control metrics live in `theme` (`CTRL_H`, `ICON_SM`, `ICON_MD`, `ICON_SIZE`).
 - The log/terminal face comes from `theme.mono_font()` **and** must be pinned in the widget stylesheet,
   because the global `*` selector in `app_stylesheet()` beats `setFont()` (L-032).
+- Every user-visible string goes through `omnicom/i18n.py`: add a `(zh, en)` entry to `_TABLE` and call
+  `tr()`. Chinese mode must show **only** Chinese and English mode **only** English, context menus
+  included (R-033). Never translate user data (command / group names). After touching copy, re-run
+  `python tools/ui_selftest.py` (R-033 fails on any CJK left in the English UI).
+- The user manual lives in `omnicom/docs.py` and is the single source for both the Help dialog and
+  `README.md` / `README.en.md` — regenerate with `python tools/make_readme.py` (R-034).
+- Plugins are self-contained folders (`plugin.json` + entry module) under `plugins/` or
+  `<data>/plugins`; they talk to the host only through the `PluginApi` object. A plugin must never be
+  able to crash the window: `PluginHost.load()` reports instead of raising (R-032).
+- Do not call `setFixedWidth` / `setMaximumWidth` outright from `resizeEvent`; compare first, or the
+  window resizes itself forever and the GUI suite hangs with `propagateSizeHints()` spam (L-041).
+- Every `ui_selftest` step must call its `next_()` callback, otherwise the harness waits forever with
+  no failure message (L-042).
+- Radii come from `theme`: `RADIUS_CTRL` (5) for boxes/buttons, `CHECK_RADIUS` (6) for the checkbox
+  indicator (≈ one third of `CHECK_SIZE`), `RADIUS_CARD` (9) for cards. Text boxes stay *sharper* than
+  the checkboxes (R-036).

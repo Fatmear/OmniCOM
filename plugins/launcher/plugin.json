@@ -1,0 +1,16 @@
+{
+  "id": "launcher",
+  "name": {
+    "zh": "快捷启动",
+    "en": "Launcher"
+  },
+  "version": "1.0.0",
+  "author": "OmniCOM",
+  "description": {
+    "zh": "把常用软件添加进来，点一下就打开；支持多开计数与聚焦已打开窗口",
+    "en": "Add your favourite apps and open them with one click; tracks multiple instances and can focus an existing window"
+  },
+  "entry": "plugin.py",
+  "icon": "icon.png",
+  "api": 1
+}

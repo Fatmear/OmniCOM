@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..commands import decode_escapes, parse_hex
+from ..i18n import tr
 from . import theme
 from .widgets import Combo, GlassFrame, ToggleSwitch
 
@@ -54,15 +55,14 @@ class SendPanel(GlassFrame):
         top.setSpacing(10)
 
         self.input = SendInput()
-        self.input.setPlaceholderText(
-            "输入要发送的内容，Ctrl+Enter 发送（HEX 模式用空格分隔字节，如 01 03 00 00 00 01）")
+        self.input.setPlaceholderText(tr("send.placeholder"))
         self.input.setFixedHeight(64)
         self.input.sendTriggered.connect(self.emit_current)
         top.addWidget(self.input, 1)
 
         side = QVBoxLayout()
         side.setSpacing(7)
-        self.btn_send = QPushButton("发送")
+        self.btn_send = QPushButton(tr("send.send"))
         self.btn_send.setObjectName("Primary")
         self.btn_send.setCursor(Qt.PointingHandCursor)
         self.btn_send.clicked.connect(self.emit_current)
@@ -71,19 +71,20 @@ class SendPanel(GlassFrame):
         opts = QHBoxLayout()
         opts.setSpacing(6)
         self.line_end = Combo()
-        for key, label in (("none", "无行尾"), ("cr", "\\r"), ("lf", "\\n"), ("crlf", "\\r\\n")):
+        for key, label in (("none", tr("send.eol.none")), ("cr", "\\r"),
+                           ("lf", "\\n"), ("crlf", "\\r\\n")):
             self.line_end.addItem(label, key)
         self.line_end.setCurrentIndex(self.line_end.findData("crlf"))
-        self.line_end.setToolTip("发送时自动追加的行尾")
+        self.line_end.setToolTip(tr("send.eol.tip"))
         opts.addWidget(self.line_end, 1)
 
         hex_box = QHBoxLayout()
         hex_box.setSpacing(5)
-        hex_label = QLabel("HEX")
-        hex_label.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
+        self.hex_label = QLabel("HEX")
+        self.hex_label.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
         self.hex_send = ToggleSwitch(self, checked=False, width=32, height=18)
-        self.hex_send.setToolTip("以 HEX 解析输入内容后发送")
-        hex_box.addWidget(hex_label)
+        self.hex_send.setToolTip(tr("send.hex.tip"))
+        hex_box.addWidget(self.hex_label)
         hex_box.addWidget(self.hex_send)
         opts.addLayout(hex_box)
         side.addLayout(opts)
@@ -93,9 +94,9 @@ class SendPanel(GlassFrame):
         foot = QHBoxLayout()
         foot.setSpacing(8)
 
-        timed_label = QLabel("定时发送")
-        timed_label.setStyleSheet(f"color: {theme.DIM}; font-size: 11.5px;")
-        foot.addWidget(timed_label)
+        self.timed_label = QLabel(tr("send.timed"))
+        self.timed_label.setStyleSheet(f"color: {theme.DIM}; font-size: 11.5px;")
+        foot.addWidget(self.timed_label)
 
         self.interval = QSpinBox()
         self.interval.setRange(10, 3600000)
@@ -108,7 +109,7 @@ class SendPanel(GlassFrame):
         unit.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
         foot.addWidget(unit)
 
-        self.btn_timed = QPushButton("开始")
+        self.btn_timed = QPushButton(tr("send.start"))
         self.btn_timed.setObjectName("Ghost")
         self.btn_timed.setCursor(Qt.PointingHandCursor)
         self.btn_timed.clicked.connect(self.toggle_timed)
@@ -116,13 +117,13 @@ class SendPanel(GlassFrame):
 
         foot.addStretch(1)
 
-        self.btn_file = QPushButton("发送文件")
+        self.btn_file = QPushButton(tr("send.file"))
         self.btn_file.setObjectName("Ghost")
         self.btn_file.setCursor(Qt.PointingHandCursor)
         self.btn_file.clicked.connect(self.pick_file)
         foot.addWidget(self.btn_file)
 
-        self.btn_abort = QPushButton("停止")
+        self.btn_abort = QPushButton(tr("send.stop"))
         self.btn_abort.setObjectName("Danger")
         self.btn_abort.setCursor(Qt.PointingHandCursor)
         self.btn_abort.clicked.connect(self.abortRequested.emit)
@@ -162,7 +163,7 @@ class SendPanel(GlassFrame):
     def toggle_timed(self) -> None:
         if self._timed.isActive():
             self._timed.stop()
-            self.btn_timed.setText("开始")
+            self.btn_timed.setText(tr("send.start"))
             self.btn_timed.setObjectName("Ghost")
             self.btn_send.setEnabled(True)
         else:
@@ -170,7 +171,7 @@ class SendPanel(GlassFrame):
             if not payload:
                 return
             self._timed.start(max(10, self.interval.value()))
-            self.btn_timed.setText("停止")
+            self.btn_timed.setText(tr("send.stop"))
             self.btn_timed.setObjectName("Danger")
             self.emit_current()
         self._repolish(self.btn_timed)
@@ -180,9 +181,21 @@ class SendPanel(GlassFrame):
         widget.style().unpolish(widget)
         widget.style().polish(widget)
 
+    def retranslate(self) -> None:
+        self.input.setPlaceholderText(tr("send.placeholder"))
+        self.btn_send.setText(tr("send.send"))
+        self.line_end.setItemText(0, tr("send.eol.none"))
+        self.line_end.setToolTip(tr("send.eol.tip"))
+        self.hex_send.setToolTip(tr("send.hex.tip"))
+        self.timed_label.setText(tr("send.timed"))
+        self.btn_timed.setText(tr("send.stop") if self._timed.isActive()
+                                else tr("send.start"))
+        self.btn_file.setText(tr("send.file"))
+        self.btn_abort.setText(tr("send.stop"))
+
     # ------------------------------------------------------------------ file
     def pick_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "选择要发送的文件")
+        path, _ = QFileDialog.getOpenFileName(self, tr("send.pickfile"))
         if path:
             self.fileSelected.emit(path)
 

@@ -3,12 +3,18 @@
 Behaviour (R-014 / R-027):
 
 * typing a keyword and pressing Enter searches **the whole log**, including
-  lines that were printed before the search started;
+  lines printed before the search started;
 * every hit becomes a row ``line-number  text``; double-clicking a row jumps
   the log to that block and flashes it;
-* while new data arrives the result list keeps growing (unless the log was
-  cleared), so a live hunt for ``AT`` keeps working;
+* while new data arrives the result list keeps growing, so a live hunt for
+  ``AT`` keeps working;
 * the result pane can be blown up to the full window.
+
+Matching modes (R-030)
+----------------------
+``plain``  substring            ``fuzzy``  all characters in order, any gap
+``word``   whole word           ``regex``  Python regular expression
+plus an independent ``Match case`` switch that applies to every mode.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ import re
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -26,10 +33,29 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..i18n import tr
 from . import theme
 from .widgets import Badge, Chip, Combo, FlowLayout, GlyphButton
 
 MAX_HITS = 20000
+
+
+def fuzzy_match(needle: str, haystack: str, case: bool) -> bool:
+    """True when every char of ``needle`` appears in ``haystack`` in order."""
+    if not case:
+        needle, haystack = needle.lower(), haystack.lower()
+    position = 0
+    for char in needle:
+        found = haystack.find(char, position)
+        if found < 0:
+            return False
+        position = found + 1
+    return True
+
+
+def compile_regex(pattern: str, case: bool) -> re.Pattern[str]:
+    flags = 0 if case else re.IGNORECASE
+    return re.compile(pattern, flags)
 
 
 class SearchPanel(QWidget):
@@ -39,12 +65,12 @@ class SearchPanel(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.keywords: list[str] = []
-        self.mode = "any"
+        self.mode = "all"
         self.hits = 0
         self._collapsed = False
         self._fullscreen = False
         self._log = None
-        self._whole_word = False
+        self._regex_error = ""
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -54,39 +80,50 @@ class SearchPanel(QWidget):
         self.body = QWidget()
         body = QVBoxLayout(self.body)
         body.setContentsMargins(10, 9, 10, 10)
-        body.setSpacing(8)
+        body.setSpacing(7)
 
         row = QHBoxLayout()
         row.setSpacing(6)
         self.input = QLineEdit()
-        self.input.setPlaceholderText("关键字，回车查找全部（含历史）")
+        self.input.setPlaceholderText(tr("search.placeholder"))
         self.input.returnPressed.connect(self.submit_input)
         self.input.textChanged.connect(self._on_text_changed)
         row.addWidget(self.input, 1)
 
         self.btn_find = GlyphButton(GlyphButton.SEARCH, self, size=theme.CTRL_H)
         self.btn_find.setObjectName("IconBtn")
-        self.btn_find.setToolTip("查找全部（回车）")
+        self.btn_find.setToolTip(tr("search.find"))
         self.btn_find.clicked.connect(self.submit_input)
         row.addWidget(self.btn_find)
         body.addLayout(row)
 
-        opts = QHBoxLayout()
-        opts.setSpacing(6)
-        self.mode_box = Combo(self)
-        self.mode_box.addItem("包含全部", "all")
-        self.mode_box.addItem("包含任一", "any")
-        self.mode_box.currentIndexChanged.connect(self._mode_changed)
-        self.mode_box.setToolTip("多个关键字之间的关系")
-        opts.addWidget(self.mode_box, 1)
+        options = QHBoxLayout()
+        options.setSpacing(6)
+        self.match_box = Combo(self)
+        self.match_box.addItem(tr("search.match.plain"), "plain")
+        self.match_box.addItem(tr("search.match.fuzzy"), "fuzzy")
+        self.match_box.addItem(tr("search.match.word"), "word")
+        self.match_box.addItem(tr("search.match.regex"), "regex")
+        self.match_box.currentIndexChanged.connect(self._options_changed)
+        options.addWidget(self.match_box, 1)
 
-        self.opts_box = Combo(self)
-        self.opts_box.addItem("普通匹配", "plain")
-        self.opts_box.addItem("全词匹配", "word")
-        self.opts_box.addItem("正则表达式", "regex")
-        self.opts_box.currentIndexChanged.connect(self._mode_changed)
-        opts.addWidget(self.opts_box, 1)
-        body.addLayout(opts)
+        self.mode_box = Combo(self)
+        self.mode_box.addItem(tr("search.mode.all"), "all")
+        self.mode_box.addItem(tr("search.mode.any"), "any")
+        self.mode_box.setToolTip(tr("search.mode.tip"))
+        self.mode_box.currentIndexChanged.connect(self._options_changed)
+        options.addWidget(self.mode_box, 1)
+        body.addLayout(options)
+
+        flags = QHBoxLayout()
+        flags.setSpacing(10)
+        self.case_box = QCheckBox(tr("search.case"))
+        self.case_box.toggled.connect(self._options_changed)
+        flags.addWidget(self.case_box)
+        self.regex_hint = QLabel("")
+        self.regex_hint.setStyleSheet(f"color: {theme.DANGER}; font-size: 11px;")
+        flags.addWidget(self.regex_hint, 1)
+        body.addLayout(flags)
 
         chips_host = QWidget()
         self.chip_layout = FlowLayout(chips_host, spacing=5)
@@ -95,14 +132,14 @@ class SearchPanel(QWidget):
         self.results = QListWidget()
         self.results.setObjectName("Results")
         self.results.setFont(theme.mono_font(12))
-        self.results.setAlternatingRowColors(False)
         self.results.setUniformItemSizes(True)
         self.results.setStyleSheet(
             f"QListWidget#Results {{ background: {theme.CARD};"
             f' font-family: "{theme.resolve_mono()}"; font-size: 12px;'
-            f" border: 1px solid {theme.LINE_SOFT}; border-radius: 10px;"
-            " padding: 4px; }"
-            f"QListWidget#Results::item {{ padding: 3px 6px; border-radius: 6px; }}"
+            f" border: 1px solid {theme.LINE_SOFT};"
+            f" border-radius: {theme.RADIUS_CARD}px; padding: 4px; }}"
+            f"QListWidget#Results::item {{ padding: 3px 6px;"
+            f" border-radius: {theme.RADIUS_CTRL}px; }}"
             f"QListWidget#Results::item:hover {{ background: {theme.WASH_HOVER}; }}"
             f"QListWidget#Results::item:selected {{ background: {theme.TEAL_SOFT};"
             f" color: {theme.INK}; }}")
@@ -110,7 +147,7 @@ class SearchPanel(QWidget):
         self.results.itemActivated.connect(self._activate)
         body.addWidget(self.results, 1)
 
-        self.hint = QLabel("输入关键字后回车，会搜索整个日志并列出所有命中行，双击可跳到原文")
+        self.hint = QLabel(tr("search.hint"))
         self.hint.setAlignment(Qt.AlignCenter)
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet(f"color: {theme.DIM}; font-size: 11.5px;")
@@ -126,32 +163,29 @@ class SearchPanel(QWidget):
             "QWidget#SideHeader { background: transparent; border: 0;"
             f" border-bottom: 1px solid {theme.LINE_SOFT}; }}")
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(6, 6, 8, 6)
-        layout.setSpacing(6)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
 
-        self.chevron = GlyphButton(GlyphButton.CHEVRON_DOWN, self, size=theme.ICON_MD,
-                                   object_name="IconBtn")
-        self.chevron.setToolTip("折叠 / 展开")
+        self.chevron = GlyphButton(GlyphButton.CHEVRON_DOWN, self, size=theme.ICON_MD)
+        self.chevron.setToolTip(tr("search.fold"))
         self.chevron.clicked.connect(self.toggle_collapsed)
         layout.addWidget(self.chevron)
 
-        self.title = QLabel("关键字搜索")
-        self.title.setStyleSheet(f"color: {theme.INK2}; font-size: 12px; font-weight: 600;")
+        self.title = QLabel(tr("search.title"))
+        self.title.setStyleSheet("color: #121A2B; font-size: 12px; font-weight: 600;")
         layout.addWidget(self.title)
         layout.addStretch(1)
 
         self.count = Badge("0")
         layout.addWidget(self.count)
 
-        self.btn_full = GlyphButton(GlyphButton.EXPAND, self, size=theme.ICON_MD,
-                                    object_name="IconBtn")
-        self.btn_full.setToolTip("全屏查看搜索结果")
+        self.btn_full = GlyphButton(GlyphButton.EXPAND, self, size=theme.ICON_MD)
+        self.btn_full.setToolTip(tr("search.fullscreen"))
         self.btn_full.clicked.connect(self.toggle_fullscreen)
         layout.addWidget(self.btn_full)
 
-        self.btn_clear = GlyphButton(GlyphButton.CLEAR, self, size=theme.ICON_MD,
-                                     object_name="IconBtn")
-        self.btn_clear.setToolTip("清空搜索结果")
+        self.btn_clear = GlyphButton(GlyphButton.CLEAR, self, size=theme.ICON_MD)
+        self.btn_clear.setToolTip(tr("search.clear"))
         self.btn_clear.clicked.connect(self.clear_results)
         layout.addWidget(self.btn_clear)
 
@@ -159,7 +193,6 @@ class SearchPanel(QWidget):
 
     # ------------------------------------------------------------------- links
     def attach_log(self, log) -> None:
-        """Give the panel the LogView so it can search history."""
         self._log = log
 
     # ------------------------------------------------------------------ layout
@@ -183,13 +216,19 @@ class SearchPanel(QWidget):
         self._fullscreen = bool(value)
         self.btn_full.set_glyph(
             GlyphButton.SHRINK if self._fullscreen else GlyphButton.EXPAND)
-        self.btn_full.setToolTip("退出全屏" if self._fullscreen else "全屏查看搜索结果")
+        self.btn_full.setToolTip(tr("search.exitfull") if self._fullscreen
+                                 else tr("search.fullscreen"))
         self.fullscreenToggled.emit(self._fullscreen)
 
-    # -------------------------------------------------------------- query mode
-    def _mode_changed(self, _index: int) -> None:
+    # ------------------------------------------------------------- query mode
+    def match_mode(self) -> str:
+        return self.match_box.currentData() or "plain"
+
+    def case_sensitive(self) -> bool:
+        return self.case_box.isChecked()
+
+    def _options_changed(self, *_args) -> None:
         self.mode = self.mode_box.currentData() or "all"
-        self._whole_word = self.opts_box.currentData() == "word"
         self.run_search()
 
     def submit_input(self) -> None:
@@ -205,21 +244,19 @@ class SearchPanel(QWidget):
         self.run_search()
 
     def _on_text_changed(self, _text: str) -> None:
-        # Live feedback: an unsubmitted query searches immediately, the way
-        # Notepad++'s incremental find behaves.
-        if self.keywords:
-            return
+        # Once keywords exist the box is a "add another keyword" field; with no
+        # keywords it behaves like incremental search so typing shows results.
+        if not self.keywords:
+            self.run_search()
 
     def add_keyword(self, raw: str) -> None:
         keyword = (raw or "").strip()
         if not keyword:
             return
-        if keyword in self.keywords:
-            self.input.clear()
-            return
-        self.keywords.append(keyword)
+        if keyword not in self.keywords:
+            self.keywords.append(keyword)
+            self._rebuild_chips()
         self.input.clear()
-        self._rebuild_chips()
         self._refresh_hint()
         self.run_search()
 
@@ -254,20 +291,35 @@ class SearchPanel(QWidget):
             needles.append(pending)
         return needles
 
+    def _one_matches(self, needle: str, text: str) -> bool:
+        mode = self.match_mode()
+        case = self.case_sensitive()
+        if mode == "regex":
+            try:
+                return bool(compile_regex(needle, case).search(text))
+            except re.error as exc:
+                self._regex_error = str(exc)
+                return False
+        if mode == "fuzzy":
+            return fuzzy_match(needle, text, case)
+        if mode == "word":
+            flags = 0 if case else re.IGNORECASE
+            return re.search(r"\b" + re.escape(needle) + r"\b", text, flags) is not None
+        if case:
+            return needle in text
+        return needle.lower() in text.lower()
+
     def match(self, text: str) -> int:
         """Return the number of distinct keywords found (0 means no hit)."""
         needles = self._needles()
         if not needles:
             return 0
-        lowered = text.lower()
-        found = 0
-        for keyword in needles:
-            if self._whole_word:
-                pattern = r"\b" + re.escape(keyword) + r"\b"
-                if re.search(pattern, text, re.IGNORECASE):
-                    found += 1
-            elif keyword.lower() in lowered:
-                found += 1
+        self._regex_error = ""
+        found = sum(1 for needle in needles if self._one_matches(needle, text))
+        if self._regex_error:
+            self.regex_hint.setText(tr("search.badregex", err=self._regex_error))
+        else:
+            self.regex_hint.setText("")
         if self.mode == "all":
             return found if found == len(needles) else 0
         return found
@@ -278,9 +330,7 @@ class SearchPanel(QWidget):
         self.clear_results()
         needles = self._needles()
         self._refresh_hint()
-        if not needles:
-            return
-        if self._log is None:
+        if not needles or self._log is None:
             return
         for block, line in enumerate(self._log.line_texts()):
             if not line:
@@ -288,6 +338,7 @@ class SearchPanel(QWidget):
             if self.match(line):
                 self._append_row(block, line, scroll=False)
         self.results.scrollToTop()
+        self._refresh_full_hint()
 
     def add_hit(self, ts: float, text: str, block: int | None = None) -> None:
         """Append a live hit (called while new lines are printed)."""
@@ -304,10 +355,7 @@ class SearchPanel(QWidget):
         item.setToolTip(text)
         self.results.addItem(item)
         self.hits += 1
-        if self.hits >= MAX_HITS:
-            self.count.setText(f"{MAX_HITS}+")
-        else:
-            self.count.setText(str(self.hits))
+        self.count.setText(f"{MAX_HITS}+" if self.hits >= MAX_HITS else str(self.hits))
         self.count.show()
         if scroll:
             self.results.scrollToBottom()
@@ -331,13 +379,18 @@ class SearchPanel(QWidget):
         self.clear_results()
         self._refresh_hint()
 
+    # ----------------------------------------------------------- fullscreen UI
+    def _refresh_full_hint(self) -> None:
+        if not self._fullscreen:
+            return
+        self.hint.setText(tr("search.hint.hits") if self.keywords
+                          else tr("search.hint.emptyfull"))
+        self.hint.setVisible(True)
+
     def show_full_hint(self) -> None:
-        """Hint text used while the panel is blown up to the full window."""
-        if self.keywords:
-            self.hint.setText("双击任意一行即可跳到日志中的原文位置（Esc 退出全屏）")
-        else:
-            self.hint.setText(
-                "输入关键字后回车：搜索结果会占满整个窗口，双击可跳到日志原文（Esc 退出全屏）")
+        self._refresh_full_hint()
+        if not self._fullscreen:
+            return
         self.hint.setVisible(True)
 
     def keyPressEvent(self, event) -> None:
@@ -345,3 +398,22 @@ class SearchPanel(QWidget):
             self.set_fullscreen(False)
             return
         super().keyPressEvent(event)
+
+    # ------------------------------------------------------------ retranslate
+    def retranslate(self) -> None:
+        self.title.setText(tr("search.title"))
+        self.input.setPlaceholderText(tr("search.placeholder"))
+        self.btn_find.setToolTip(tr("search.find"))
+        self.chevron.setToolTip(tr("search.fold"))
+        self.btn_full.setToolTip(tr("search.exitfull") if self._fullscreen
+                                 else tr("search.fullscreen"))
+        self.btn_clear.setToolTip(tr("search.clear"))
+        self.mode_box.setToolTip(tr("search.mode.tip"))
+        self.case_box.setText(tr("search.case"))
+        for index, key in enumerate(("search.match.plain", "search.match.fuzzy",
+                                     "search.match.word", "search.match.regex")):
+            self.match_box.setItemText(index, tr(key))
+        self.mode_box.setItemText(0, tr("search.mode.all"))
+        self.mode_box.setItemText(1, tr("search.mode.any"))
+        self.hint.setText(tr("search.hint"))
+        self.run_search()

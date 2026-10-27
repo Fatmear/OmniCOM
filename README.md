@@ -1,81 +1,111 @@
-# OmniCOM — All-in-One Embedded Serial Debugger
+# OmniCOM 0.4.0
 
-原生 Python 桌面串口调试器（PySide6 / Qt），液态玻璃质感界面。**不打包 exe**，直接从源码运行。
+OmniCOM 是一个原生 Python 串口工作台：不打包 exe、不起本地服务、不依赖浏览器，
+双击 `start.cmd` 就能用。
+
+![logo](assets/logo-64.png)
+
+* 白色主题、自绘窗口按钮、可折叠左右两栏
+* 串口日志 / 终端 / 文件传输（XMODEM / YMODEM / ZMODEM）三个内置页面
+* 扩展命令可分组、可备注、可单条或整组导出给别人导入
+* 关键字搜索支持普通、模糊、整词、正则四种匹配，并可切换是否区分大小写
+* 插件系统：一个插件一个目录，复制到另一台电脑的 `plugins/` 再刷新即可
+* 中英文两种界面语言，中文环境只显示中文，英文环境只显示英文
 
 ## 运行
 
-```bat
-start.cmd                 :: 双击启动，无控制台窗口
-python run.py             :: 或者命令行启动
-python run.py --demo      :: 带虚拟演示串口（AT 回环 + 遥测，无需硬件）
-start-console.cmd         :: 启动失败时用它，能看到报错
+```
+start.cmd                       # 或 python run.py
+python run.py --demo            # 没有硬件时使用虚拟串口 DEMO
 ```
 
-首次使用先装依赖：
+## 验证
 
-```bat
-python -m pip install -r requirements.txt
+```
+python tools/protocol_selftest.py     # X/Y/ZMODEM 回环
+python tools/ui_selftest.py           # GUI 验收
+python tools/acceptance_test.py       # 全需求验收
+python -m ruff check .
 ```
 
-## 功能
+## 使用说明
 
-| 区域 | 能力 |
-| --- | --- |
-| 左侧栏 | 串口选择 + 刷新、波特率/数据位/停止位/校验位、流控（无 / RTS-CTS / XON-XOFF）、DTR/RTS、自动重连开关 |
-| 顶部 | 标签页：**终端** / **文件传输**（XMODEM · YMODEM · ZMODEM 同一页） |
-| 终端 | 无损收发、HEX 显示/发送、毫秒时间戳开关、`\r \n` 等控制字符显示开关、发送回显、自动滚动 |
-| 暂停 | 一个按钮暂停/继续：暂停期间串口继续接收，继续后把期间数据全部补印 |
-| 右侧栏 | **可折叠**。① 扩展命令：粘贴一列命令自动导入、每条命令可设延时与定时发送、依次发送；② 多关键字搜索：命中行实时汇总，可选「任一/全部」匹配 |
-| 文件 | 原始文件发送、接收记录到文件（暂停打印也不停）、保存当前视图 |
-| 传输 | X/Y/ZMODEM 发送与接收，带进度、速率与实时协议日志；收到文件保存到 `omnicom-data/received/` |
+### 1. 快速开始
+
+* 双击 `start.cmd`，或运行 `python run.py`。没有硬件时加 `--demo` 会多出一个虚拟串口 DEMO。
+* 左侧选择串口 → 设置波特率等参数 → 点「打开串口」，接收的数据会立刻出现在「串口日志」页。
+* 底部输入框写内容，Ctrl+Enter 或点「发送」发出。行尾、HEX、定时发送都在输入框右侧。
+
+### 2. 串口日志页
+
+* 每一行的格式是 `[时:分:秒.毫秒]收←◇内容` 或 `发→◇内容`。
+* 「自动滚动到最新」打开时永远跟着最新一行；关掉后可以自由翻阅历史，底部会浮出「回到最新」气泡。
+* 「显示 \r \n 等控制字符」对收和发同时生效，能看到真实发出的换行。
+* 「HEX 显示」按 16 字节一行显示偏移 + 十六进制 + ASCII。
+* 「保存视图」把当前日志写到文件；「接收记录」在后台把原始字节写盘，与界面无关，不会漏字节。
+* 日志框右键可以复制、复制全部、保存、查找、跳到最新。
+
+### 3. 终端模式页
+
+* 这是给 linux 串口控制台用的：点一下终端区域，键盘输入直接送进串口。
+* Enter 发送回车（可选 CR / LF / CRLF），Ctrl+C 发送 0x03，方向键发送 ANSI 序列。
+* 支持 CR 回到行首覆盖、退格、TAB 对齐、ANSI 颜色，以及清屏序列。
+* 复制用 Ctrl+Shift+C，粘贴用 Ctrl+Shift+V（普通 Ctrl+C 会当作中断字符发出）。
+
+### 4. 文件传输页
+
+* 选择 XMODEM / YMODEM / ZMODEM，设置方向与文件，点开始。
+* 接收的文件保存在 `omnicom-data/received/`。
+* 传输期间串口被独占，日志页不打印，避免把协议字节弄脏。
+
+### 5. 扩展命令
+
+* 右侧栏的命令可以点一下直接发送，也可以勾选多条后「依次发送」（每条按自己的延时）。
+* 「分组」用来归类：点文件夹图标新建分组，可以给分组写备注；分组可折叠。
+* 每条命令支持备注、行尾、延时、周期定时发送、HEX。
+* 右键一条命令可以移动到别的分组、单独导出；分组标题右侧的保存图标可整组导出。
+* 导出的 JSON 在另一台电脑上「导入」即可使用，分组会自动合并。
+* 粘贴多行命令会自动拆分成多条。
+
+### 6. 关键字搜索
+
+* 输入关键字回车，会搜索**整个日志（含此前的历史）**，结果按「行号 + 内容」列出。
+* 双击任意一行跳到日志原文并高亮。
+* 匹配方式：普通 / 模糊（字符按顺序出现即可）/ 全词 / 正则表达式；另有「区分大小写」开关。
+* 右上角箭头按钮可把结果全窗口显示，Esc 退出。
+
+### 7. 插件
+
+* 插件是一个独立目录，放在 `plugins/` 或 `omnicom-data/plugins/` 下，每个插件在顶部占一个标签页。
+* 把一个插件目录整个复制到另一台电脑的 `plugins/` 下，点「插件 → 刷新插件」就能用。
+* 自带「快捷启动」插件：把常用软件加进来，图标显示运行中的实例数；已在运行时可以选择再开一个或切到已打开的窗口。
+
+### 8. 首选项与语言
+
+* 「设置 → 首选项」里可以切换界面语言：中文环境只显示中文，英文环境只显示英文，包括右键菜单。
+* 切换立即生效，不需要重启。
+
+### 9. 命令行（给脚本 / AI 用）
+
+* `python -m omnicom.cli ports` 列出串口；`send` 发送并等待应答；`read` 读取；`monitor` 流式输出。
+* `session --script 文件.json` 可以跑一段脚本化的收发流程。
+* 所有命令的 stdout 都是一个 JSON 文档，详细说明见 `docs/CLI.md`。
+
+### 10. 数据放在哪
+
+* `omnicom-data/logs/` 接收记录；`omnicom-data/received/` 协议收到的文件；
+* `omnicom-data/commands.json` 扩展命令；`omnicom-data/plugins/` 后加的插件。
 
 ## 数据位置
 
-- 接收记录：`omnicom-data/logs/rx-YYYYMMDD-HHMMSS.log`
-- 协议接收：`omnicom-data/received/`
-- 扩展命令：`omnicom-data/commands.json`
+| 路径 | 内容 |
+| --- | --- |
+| `omnicom-data/logs/` | 接收记录（原始字节） |
+| `omnicom-data/received/` | 协议接收到的文件 |
+| `omnicom-data/commands.json` | 扩展命令与分组 |
+| `omnicom-data/plugins/` | 后加进来的插件 |
+| `omnicom-data/plugin-data/<id>/` | 每个插件自己的数据 |
 
-## 自测
+## 许可
 
-```bat
-python tools/acceptance_test.py      :: 全功能验收：29 条需求 / 106 项检查
-python tools/protocol_selftest.py    :: X/Y/ZMODEM 环回（23 项）
-python tools/ui_selftest.py          :: GUI 验收（57 项，DEMO 端口）
-python tools/ui_snapshot.py          :: 渲染 .artifacts/ui.png 供目视检查
-python tools/contrast_audit.py       :: 白色主题文字对比度（需全部 >= 4.5:1）
-```
-
-> 验收脚本会把 `ui_selftest.py` 的每条 `PASS/FAIL` 行按 `R-\d+` 归到需求上；不带需求号的
-> 游离检查会被判为失败，避免"检查被悄悄删掉却仍报全覆盖"。
-
-## CLI（给脚本 / AI 用）
-
-```bat
-python -m omnicom.cli info
-python -m omnicom.cli ports
-python -m omnicom.cli send --port COM3 --data AT --expect OK --wait 2
-python -m omnicom.cli session --port COM3 --script steps.json
-python -m omnicom.cli selftest            :: 无硬件自检（28 项）
-```
-
-stdout 只有一个 JSON 文档（`ok` / `error`），人类信息走 stderr，退出码 0/1/2。
-完整说明见 **[docs/CLI.md](docs/CLI.md)**；没有硬件时用 `--port DEMO` 联调。
-
-## 目录
-
-```
-omnicom/
-  serial_port.py    串口所有权：打开/关闭、读取线程、自动重连、演示设备、记录器
-  commands.py       扩展命令模型与持久化、HEX/转义解析
-  transfer.py       X/Y/ZMODEM 传输入口（GUI 与 CLI 共用，无 Qt 依赖）
-  selftest.py       协议环回自检（CLI / GUI / tools 共用）
-  cli.py            面向 AI 的 CLI（stdout 只输出 JSON）
-  proto/            XMODEM / YMODEM / ZMODEM 引擎（与传输无关，可环回自测）
-  ui/               Qt 界面：窗口、日志视图、发送区、命令栏、搜索栏、传输页
-tools/              验收 / 自测 / 截图 / 图标脚本
-docs/CLI.md         CLI 使用说明（面向 AI）
-project-context/    需求 / 台账 / 决策 / 交接（先读这个再改代码）
-```
-
-> 公司策略禁止运行自编译 exe（见 `project-context/REQUIREMENTS.md` R-019），
-> 因此 `build.py` 默认拒绝执行，仅作记录.
+内部工具，未开源。
