@@ -618,14 +618,13 @@ def main() -> int:
         store = window.command_store
 
         def row_count() -> int:
-            """Visible command rows (a collapse hides rows, it no longer rebuilds)."""
-            layout = panel.list_layout
-            total = 0
-            for index in range(layout.count()):
-                widget = layout.itemAt(index).widget()
-                if isinstance(widget, CommandRow) and widget.isVisible():
-                    total += 1
-            return total
+            """Visible command rows.
+
+            Rows inside a group sit in an indenting holder, so they are found by
+            walking the widget tree instead of the layout items.
+            """
+            return sum(1 for row in panel.list_host.findChildren(CommandRow)
+                       if row.isVisible())
 
         group = store.add_group("回归测试组", "给这条分组写的备注")
         store.move_to_group(store.items[0]["id"], group["id"])
@@ -854,6 +853,8 @@ def main() -> int:
         check("R-036 勾选框圆角足够大（半径 ≥ 尺寸 1/3）",
               theme.CHECK_RADIUS * 3 >= theme.CHECK_SIZE,
               f"r={theme.CHECK_RADIUS} s={theme.CHECK_SIZE}")
+        check("R-045 勾选框尺寸与 13px 正文协调（≤ 16px）",
+              theme.CHECK_SIZE <= 16, f"{theme.CHECK_SIZE}px")
         check("R-036 文本框圆角小于勾选框圆角",
               theme.RADIUS_CTRL < theme.CHECK_RADIUS,
               f"{theme.RADIUS_CTRL} < {theme.CHECK_RADIUS}")
@@ -861,6 +862,99 @@ def main() -> int:
               not window.windowIcon().isNull())
         check("R-036 标题栏使用自绘标记而不是图片",
               type(window.titlebar.logo).__name__ == "BrandMark")
+        next_()
+
+    def step_menus(next_):
+        """R-043 / R-044 / R-046: context menus wired, composer resizable, no dupes."""
+        log = window.log
+        panel = window.search_panel
+
+        # Every entry of the log menu must reach a slot.  Emitting proves
+        # nothing (an unconnected signal is a no-op), so each pair is probed
+        # with disconnect(), which Qt raises on when nothing is connected, and
+        # the connection is then restored.
+        wired = [
+            ("save", log.saveRequested, window.save_view),
+            ("clear", log.clearRequested, window.clear_log),
+            ("find", log.findRequested, window.focus_search),
+            ("latest", log.latestRequested, window.jump_to_latest),
+        ]
+        dead: list[str] = []
+        for name, signal, slot in wired:
+            try:
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                dead.append(name)
+            else:
+                signal.connect(slot)
+        check("R-046 日志右键每个菜单项都接了槽", not dead, str(dead))
+
+        # behavioural proof for the one that is safe to trigger headless
+        log.clear_all()
+        log.append_line(0.0, "RX", "probe-line", "rx")
+        app.processEvents()
+        log.clearRequested.emit()
+        app.processEvents()
+        check("R-046 右键「清空」真的清空日志",
+              log.plain_text().strip() == "", log.plain_text()[:24])
+
+        log.append_line(0.0, "RX", "probe-line", "rx")
+        log.latestRequested.emit()
+        app.processEvents()
+        check("R-046 右键「跳到最新」把视图拉到底部", log._at_bottom())
+
+        if panel._collapsed:
+            panel.toggle_collapsed()
+        log.findRequested.emit()
+        app.processEvents()
+        check("R-046 右键「查找」展开搜索面板", not panel._collapsed)
+
+        # composer resizable
+        sizes = window.main_split.sizes()
+        check("R-043 日志与发送框之间有可拖动的分隔条",
+              len(sizes) == 2 and window.main_split.handleWidth() > 0, str(sizes))
+        before = sizes[1]
+        # Move the handle *up* (smaller composer).  Pushing it down can be
+        # clamped by the splitter's own height, which made this a flaky check.
+        window.main_split.moveSplitter(max(1, sizes[0] - 60), 1)
+        app.processEvents()
+        after = window.main_split.sizes()[1]
+        # Either direction is a valid drag; the point is that the handle is
+        # live.  (Moving it down gets clamped by the splitter height, so only
+        # "did it change" is a stable assertion.)
+        check("R-043 拖动后发送框高度真的变化", after != before,
+              f"{before} -> {after}")
+
+        # duplicated controls are gone
+        from omnicom.ui.dialogs import AboutDialog, DocsDialog
+
+        about = AboutDialog(window)
+        docs = DocsDialog(window)
+        check("R-044 关于/文档对话框不再重复「关闭」按钮",
+              not hasattr(about, "close_btn") and not hasattr(docs, "close_btn"))
+        about.deleteLater()
+        docs.deleteLater()
+        check("R-044 右栏不再重复「保存视图」按钮", not hasattr(window, "btn_save"))
+        launcher = next((info.widget for info in window.plugins.loaded()
+                         if info.widget is not None), None)
+        if launcher is not None:
+            check("R-044 快捷启动不再有手动的「刷新状态」按钮",
+                  not hasattr(launcher, "btn_refresh"))
+
+        # a group indents its rows
+        store = window.command_store
+        marker = store.add_group("缩进检查组", "")
+        store.add(["AT+INDENT"], {"group": marker["id"]})
+        window.commands_panel.rebuild()
+        app.processEvents()
+        holders = window.commands_panel._group_rows.get(marker["id"], [])
+        check("R-042 分组内的命令有缩进",
+              bool(holders)
+              and holders[0].layout().contentsMargins().left() >= 12,
+              str(holders[0].layout().contentsMargins().left()) if holders else "-")
+        store.remove_group(marker["id"])
+        window.commands_panel.rebuild()
+        app.processEvents()
         next_()
 
     def step_shell(next_):
@@ -886,10 +980,8 @@ def main() -> int:
 
         commands = window.commands_panel
         row_glyphs: list[str] = []
-        for index in range(commands.list_layout.count()):
-            widget = commands.list_layout.itemAt(index).widget()
-            if isinstance(widget, CommandRow):
-                row_glyphs.extend(button.glyph for button in widget.findChildren(_Glyph))
+        for row in commands.list_host.findChildren(CommandRow):
+            row_glyphs.extend(button.glyph for button in row.findChildren(_Glyph))
         check("R-040 命令行里没有单独的导出按钮",
               _Glyph.SAVE not in row_glyphs, str(sorted(set(row_glyphs))))
         check("R-040 导出只有一个入口（顶部按钮打开选择框）",
@@ -932,6 +1024,7 @@ def main() -> int:
     runner.add("responsive", step_responsive)
     runner.add("logo", step_logo)
     runner.add("shell", step_shell)
+    runner.add("menus", step_menus)
 
     runner.start()
     app.exec()

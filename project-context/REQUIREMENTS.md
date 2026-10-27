@@ -47,6 +47,12 @@ Source of R-001..R-017: user request on 2026-10-27 (project kickoff). Do not wea
 | R-040 | MUST | UI | Exporting is **one entry point**: a picker dialog lets the user choose which commands (or which group) to export — no per-row export buttons | `ui_selftest`: rows carry no export button, `export_dialog` opens the picker | active |
 | R-041 | MUST | UI | Collapsing a group must be **instant** (no list rebuild, no disk write on the click path) | `ui_selftest`: a toggle completes in < 40 ms and the row count returns | active |
 | R-048 | MUST | UI | The port combo always shows the port that is **actually open**, including after an automatic reconnect moved to a different device | `ui_selftest`: a connected status for `COM_TEST` selects it in the combo | active |
+| R-042 | MUST | UI | Commands inside a group are **indented** so the group reads as a container, and the group header has a `+` to create a command directly in that group | `ui_selftest`: the row holder's left margin is ≥ 12 px; group header exposes `addCommand` | active |
+| R-043 | MUST | UI | The log and the send box are separated by a **draggable handle**, so the composer height is up to the user and survives a restart (`ui/send_h`) | `ui_selftest`: the vertical splitter has 2 panes and a live handle; dragging changes the height | active |
+| R-044 | MUST | UI | No control does the same job twice: dialogs do not repeat the frame's close button, the rail has no second "save view", the launcher has no manual refresh (it polls every 4 s) | `ui_selftest`: `close_btn` / `btn_save` / `btn_refresh` are absent | active |
+| R-045 | MUST | UI | Control metrics match the 13 px body text: the checkbox indicator is 15 px with radius 5 (not the oversized 18 px) | `ui_selftest`: `CHECK_SIZE <= 16` and `CHECK_RADIUS*3 >= CHECK_SIZE` | active |
+| R-046 | MUST | UI | **Every entry of the log context menu works**: copy, copy all, select all, clear, save, find, jump to latest. An entry that only emits into the void is a bug | `ui_selftest`: each signal is disconnected/reconnected (Qt raises when nothing is connected) plus behavioural checks for clear / latest / find | active |
+| R-047 | MUST | UI | The add/edit-command dialog must actually open; a construction error made the edit button look dead | `ui_selftest`/probe: `CommandDialog(...)` builds and reports its group list | active |
 
 Superseded:
 - R-018 (old: browser UI + local HTTP/WS service) → R-018 (native Qt GUI). Reason: user required a real

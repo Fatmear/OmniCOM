@@ -58,12 +58,12 @@ FONT_PX = 13
 # Radii: the user asked for two very different feelings.
 #   * toggles / checkboxes -> a third of their size (soft, round)
 #   * inputs, buttons, cards -> just past square (crisp, boxy)
-RADIUS_CTRL = 5         # text boxes, buttons, combo boxes (slightly sharper than
+RADIUS_CTRL = 4         # text boxes, buttons, combo boxes (slightly sharper than
                         # the checkbox, per the request: "文本框圆弧要稍小一些")
 RADIUS_CARD = 9         # cards and panels
 RADIUS_PILL = 999       # fully rounded pills / badges
-CHECK_SIZE = 18
-CHECK_RADIUS = 6        # one third of CHECK_SIZE
+CHECK_SIZE = 15         # matches the 13 px UI font; 18 px looked oversized
+CHECK_RADIUS = 5        # one third of CHECK_SIZE
 RADIUS = RADIUS_CTRL    # kept for older call sites
 
 UI_FONT = '"Segoe UI Variable Text", "Segoe UI", Inter, "Microsoft YaHei UI", sans-serif'

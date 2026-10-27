@@ -78,13 +78,7 @@ class PreferencesDialog(QDialog):
         layout.addWidget(self.hint)
         layout.addStretch(1)
 
-        footer = QHBoxLayout()
-        footer.addStretch(1)
-        self.close_btn = QPushButton(i18n.tr("pref.close"))
-        self.close_btn.setObjectName("Primary")
-        self.close_btn.clicked.connect(self.accept)
-        footer.addWidget(self.close_btn)
-        layout.addLayout(footer)
+        # The window frame already offers a close button (R-044).
 
     def _on_language(self, _index: int) -> None:
         lang = self.language_box.currentData() or "zh"
@@ -95,7 +89,6 @@ class PreferencesDialog(QDialog):
         self.heading.setText(i18n.tr("pref.title"))
         self.section.setText(i18n.tr("pref.language"))
         self.hint.setText(i18n.tr("pref.language.hint"))
-        self.close_btn.setText(i18n.tr("pref.close"))
 
 
 class DocsDialog(QDialog):
@@ -117,10 +110,8 @@ class DocsDialog(QDialog):
         self.title.setStyleSheet("font-size: 15px; font-weight: 650;")
         head.addWidget(self.title)
         head.addStretch(1)
-        self.close_btn = QPushButton(i18n.tr("docs.close"))
-        self.close_btn.setObjectName("Ghost")
-        self.close_btn.clicked.connect(self.accept)
-        head.addWidget(self.close_btn)
+        # No close button here: the dialog already has a frame with an X, and a
+        # second way to do the same thing is clutter (R-044).
         layout.addLayout(head)
 
         self.view = QTextBrowser()
@@ -136,7 +127,6 @@ class DocsDialog(QDialog):
     def render(self) -> None:
         self.setWindowTitle(i18n.tr("docs.title"))
         self.title.setText(i18n.tr("docs.title"))
-        self.close_btn.setText(i18n.tr("docs.close"))
         self.view.setHtml(
             "<style>"
             f"body {{ color: {theme.INK}; font-size: 13px; line-height: 1.55; }}"
@@ -195,16 +185,14 @@ class AboutDialog(QDialog):
 
         self.info_text = ""
 
+        # No "Close" button: the dialog already has a window frame with an X,
+        # and two ways to do the same thing is clutter (R-044).
         footer = QHBoxLayout()
         self.copy_btn = QPushButton(i18n.tr("about.copy"))
         self.copy_btn.setObjectName("Ghost")
         self.copy_btn.clicked.connect(self._copy)
         footer.addWidget(self.copy_btn)
         footer.addStretch(1)
-        self.close_btn = QPushButton(i18n.tr("misc.close"))
-        self.close_btn.setObjectName("Primary")
-        self.close_btn.clicked.connect(self.accept)
-        footer.addWidget(self.close_btn)
         layout.addLayout(footer)
 
         self.render()
@@ -213,7 +201,6 @@ class AboutDialog(QDialog):
         self.setWindowTitle(i18n.tr("about.title"))
         self.blurb.setText(i18n.tr("about.blurb"))
         self.copy_btn.setText(i18n.tr("about.copy"))
-        self.close_btn.setText(i18n.tr("misc.close"))
         runtime = (f"Python {platform.python_version()} · "
                    f"Qt {_qt_version()} · {platform.system()} {platform.release()}")
         self.info_text = "\n".join((

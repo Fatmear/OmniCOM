@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -158,6 +159,10 @@ def _letter_icon(name: str, size: int = 48) -> QIcon:
 # --------------------------------------------------------------------------- #
 # the grid tile
 # --------------------------------------------------------------------------- #
+TILE_W = 96
+TILE_H = 104
+
+
 class AppTile(QPushButton):
     """One app: icon, name, running badge."""
 
@@ -172,7 +177,6 @@ class AppTile(QPushButton):
         self.setObjectName("AppTile")
         self.setCursor(Qt.PointingHandCursor)
         self.setFlat(True)
-        self.setFixedSize(96, 104)
         self.setIconSize(QSize(46, 46))
         self.setIcon(_extract_icon(app["path"]))
         self.setText(app.get("name") or os.path.basename(app["path"]))
@@ -182,8 +186,20 @@ class AppTile(QPushButton):
             "QPushButton#AppTile:hover { background: rgba(18,26,43,12);"
             " border-color: rgba(18,26,43,34); }"
             "QPushButton#AppTile:pressed { background: rgba(18,26,43,22); }")
+        # The QSS below sets min-height/padding, and QStyleSheetStyle applies it
+        # *after* this constructor - it silently shrank the tile to its 58 px
+        # size hint so the icon and label did not fit (L-053).  A hard sizeHint
+        # override is the one thing the layout cannot take back.
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.setFixedSize(TILE_W, TILE_H)
         self.setToolTip(app["path"])
         self.clicked.connect(lambda: self.activated.emit(self.app))
+
+    def sizeHint(self) -> QSize:
+        return QSize(TILE_W, TILE_H)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(TILE_W, TILE_H)
 
     def set_running(self, count: int) -> None:
         if count == self._running:
@@ -256,11 +272,8 @@ class LauncherPage(QWidget):
         self.btn_add.clicked.connect(self.add_app)
         bar.addWidget(self.btn_add)
 
-        self.btn_refresh = QPushButton(api.t("刷新状态", "Refresh"))
-        self.btn_refresh.setObjectName("Ghost")
-        self.btn_refresh.setCursor(Qt.PointingHandCursor)
-        self.btn_refresh.clicked.connect(self.refresh_running)
-        bar.addWidget(self.btn_refresh)
+        # No manual "Refresh" button: the tile badges are refreshed every 4 s
+        # anyway, so the button was a duplicate control (R-044).
         card_layout.addLayout(bar)
 
         self.hint = QLabel(api.t(
@@ -297,7 +310,6 @@ class LauncherPage(QWidget):
     def _retranslate(self, _lang: str) -> None:
         self.title.setText(self.api.t("快捷启动", "Launcher"))
         self.btn_add.setText(self.api.t("添加软件", "Add app"))
-        self.btn_refresh.setText(self.api.t("刷新状态", "Refresh"))
         self.hint.setText(self.api.t(
             "点击图标打开；已在运行时可以选择「再开一个」或「切到已打开的窗口」。右键更多操作。",
             "Click a tile to launch. If it is already running you can open another window or "
@@ -342,7 +354,8 @@ class LauncherPage(QWidget):
             self._update_count()
             return
 
-        columns = max(1, self.host.width() // 104) if self.host.width() else 6
+        width = self.host.width() or self.width() or 640
+        columns = max(3, width // (TILE_W + 10))
         for index, app in enumerate(self.apps):
             tile = AppTile(app, self.api, self.host)
             tile.activated.connect(self.launch)
@@ -353,12 +366,20 @@ class LauncherPage(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        columns = max(1, (self.host.width() or self.width()) // 104)
+        width = self.host.width() or self.width() or 640
+        columns = max(3, width // (TILE_W + 10))
         if getattr(self, "_columns", None) == columns or not self.apps:
             self._columns = columns
             return
         self._columns = columns
         self._rebuild()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not getattr(self, "_shown", False):
+            self._shown = True
+            self._columns = None
+            self._rebuild()
 
     def _update_count(self) -> None:
         running = sum(1 for app in self.apps if self._running_of(app))
@@ -497,6 +518,9 @@ class LauncherPage(QWidget):
     def _rename(self, app: dict) -> None:
         from PySide6.QtWidgets import QInputDialog
 
+        # getText(parent, title, label, echo, text, ...) - passing the current
+        # name positionally landed in `echo`, which Qt rejects, so the dialog
+        # never appeared (L-054).
         text, ok = QInputDialog.getText(
             self, self.api.t("重命名", "Rename"), self.api.t("名称", "Name"),
             text=str(app.get("name") or ""))

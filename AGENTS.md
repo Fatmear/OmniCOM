@@ -10,8 +10,8 @@ Rules
 - **Do not build or ship an .exe (R-019)**: corporate endpoint policy blocks self-built executables.
   Run from source: `start.cmd`, or `python run.py`, or `python run.py --demo` (虚拟串口).
 - Verify commands: `python tools/protocol_selftest.py` (X/Y/ZMODEM loopback, 23 checks),
-  `python tools/ui_selftest.py` (112 GUI acceptance checks incl. DEMO port),
-  `python tools/acceptance_test.py` (160 checks covering R-001..R-048 + `.artifacts/acceptance.json`),
+  `python tools/ui_selftest.py` (123 GUI acceptance checks incl. DEMO port),
+  `python tools/acceptance_test.py` (171 checks covering R-001..R-048 + `.artifacts/acceptance.json`),
   `python tools/ui_snapshot.py` (renders `.artifacts/ui.png` for visual review),
   `python tools/contrast_audit.py` (light-theme text contrast must stay >= 4.5:1).
   GUI checks must start with their `R-0xx` id — an un-mapped check fails the run.
@@ -48,6 +48,13 @@ Rules
 - The three body columns live in `ui.body_split` (a `QSplitter`). Never set a column width from
   `resizeEvent`, and never call `setSizes()` before the splitter has a real width — both were shipped
   bugs (L-041, L-050). Use `reset_layout()` to restore the defaults.
+- Every `Signal` added to a widget must be connected in `OmniWindow._wire()`, otherwise the
+  symptom is “点了没反应” with no error at all (L-052). `ui_selftest` R-046 proves a
+  connection with `signal.disconnect(slot)` (Qt raises when nothing is connected), never by
+  merely emitting — an unconnected signal emits silently.
+- Never call `setFixedSize()` *before* `setStyleSheet()` on a widget whose QSS sets
+  `min-height`/`padding`: the style is applied afterwards and shrinks the widget back to its
+  size hint (L-053). Override `sizeHint()`/`minimumSizeHint()` to pin a size the layout obeys.
 - Collapsing a command group must stay off the write path: call
   `store.update_group(..., notify=False)`, flip `setVisible` in place, and let `closeEvent` flush it
   (`R-041` / L-045). A 30 ms `os.replace` on the click path is a visible stutter.

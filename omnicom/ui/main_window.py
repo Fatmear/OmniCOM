@@ -600,10 +600,8 @@ class OmniWindow(QMainWindow):
         self.btn_open_dir.setObjectName("Ghost")
         self.btn_open_dir.setCursor(Qt.PointingHandCursor)
         row2.addWidget(self.btn_open_dir, 1)
-        self.btn_save = QPushButton(tr("rail.saveview"))
-        self.btn_save.setObjectName("Ghost")
-        self.btn_save.setCursor(Qt.PointingHandCursor)
-        row2.addWidget(self.btn_save, 1)
+        # "Save view" lives in the log toolbar; repeating it here was one of the
+        # duplicated controls the user asked to remove (R-044).
         layout.addLayout(row2)
         layout.addWidget(self._divider())
 
@@ -696,10 +694,24 @@ class OmniWindow(QMainWindow):
         self.log_hint.setWordWrap(True)
         self.log_hint.setStyleSheet(f"color: {theme.DIM}; font-size: 12px;")
         log_layout.addWidget(self.log_hint)
-        layout.addWidget(log_card, 1)
 
         self.send_panel = SendPanel()
-        layout.addWidget(self.send_panel, 0)
+
+        # Log above, composer below, with a grab handle between them so the
+        # send box can be resized (R-043).
+        self.main_split = QSplitter(Qt.Vertical)
+        self.main_split.setObjectName("MainSplit")
+        self.main_split.setChildrenCollapsible(False)
+        self.main_split.setHandleWidth(8)
+        self.main_split.setStyleSheet(
+            "QSplitter#MainSplit::handle { background: transparent; }"
+            "QSplitter#MainSplit::handle:hover { background: rgba(11,122,110,40); }")
+        self.main_split.addWidget(log_card)
+        self.main_split.addWidget(self.send_panel)
+        self.main_split.setStretchFactor(0, 1)
+        self.main_split.setStretchFactor(1, 0)
+        self._saved_send_h = 0
+        layout.addWidget(self.main_split, 1)
         return page
 
     # --------------------------------------------------------------- sidebar
@@ -874,7 +886,13 @@ class OmniWindow(QMainWindow):
 
         # The log needs the panel for its context-menu "Find" entry.
         self.log.search_panel = self.search_panel
+        # Every entry of the log's context menu must be connected: three of them
+        # (clear / find / latest) used to emit into the void, which is why those
+        # right-click commands "did nothing" (L-052).
         self.log.saveRequested.connect(self.save_view)
+        self.log.clearRequested.connect(self.clear_log)
+        self.log.findRequested.connect(self.focus_search)
+        self.log.latestRequested.connect(self.jump_to_latest)
 
         self.row_auto.toggled.connect(lambda _: self._push_opts())
         for row in (self.row_dtr, self.row_rts):
@@ -891,7 +909,6 @@ class OmniWindow(QMainWindow):
 
         self.btn_record.clicked.connect(self.toggle_record)
         self.btn_open_dir.clicked.connect(self.open_data_dir)
-        self.btn_save.clicked.connect(self.save_view)
 
         self.send_panel.sendRequested.connect(self.send_payload)
         self.send_panel.fileSelected.connect(self.send_file)
@@ -913,6 +930,8 @@ class OmniWindow(QMainWindow):
             self.restoreGeometry(geometry)
         if s.value("ui/sidebar", "1") == "0":
             self._sidebar_widget.hide()
+        with contextlib.suppress(TypeError, ValueError):
+            self._saved_send_h = int(s.value("ui/send_h", 0) or 0)
         sizes = s.value("ui/split")
         self._saved_split = False
         if isinstance(sizes, list) and len(sizes) == 3:
@@ -1224,6 +1243,14 @@ class OmniWindow(QMainWindow):
         host = self.scroll_pill.parentWidget()
         return QPoint(host.width() - 34, host.height() - 18)
 
+    def focus_search(self) -> None:
+        """Log context menu -> "Find…": expand the panel and focus its box."""
+        panel = self.search_panel
+        if panel._collapsed:
+            panel.toggle_collapsed()
+        panel.input.setFocus()
+        panel.input.selectAll()
+
     def jump_to_latest(self) -> None:
         self.log.scroll_bottom()
         self.scroll_pill.hide_pill()
@@ -1336,8 +1363,19 @@ class OmniWindow(QMainWindow):
             return True
         return abs(total - self.body_split.width()) > max(120, total * 0.35)
 
+    def _apply_main_split(self) -> None:
+        total = self.main_split.height()
+        if total < 200:
+            return
+        height = self._saved_send_h or self.send_panel.sizeHint().height()
+        height = max(96, min(height, int(total * 0.7)))
+        self.main_split.setSizes([total - height, height])
+
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        if not getattr(self, "_main_split_ready", False):
+            self._main_split_ready = True
+            self._apply_main_split()
         if not self._split_ready:
             self._split_ready = True
             # The splitter only has a real width once the first show happened;
@@ -1650,7 +1688,6 @@ class OmniWindow(QMainWindow):
         self.btn_record.setText(tr("rail.record.stop") if self.bridge.recorder.active
                                 else tr("rail.record.start"))
         self.btn_open_dir.setText(tr("rail.opendir"))
-        self.btn_save.setText(tr("rail.saveview"))
         self.record_hint.setText(tr("rail.record.hint"))
         for label, key in getattr(self, "_meta_labels", []):
             label.setText(tr(key))
@@ -1686,6 +1723,7 @@ class OmniWindow(QMainWindow):
         self.settings.setValue("ui/sidebar",
                               "0" if self._sidebar_widget.isHidden() else "1")
         self.settings.setValue("ui/split", self.body_split.sizes())
+        self.settings.setValue("ui/send_h", self.send_panel.height())
         if self._transfer is not None and self._transfer.isRunning():
             self._transfer.cancel()
             self._transfer.wait(2000)

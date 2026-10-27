@@ -1,4 +1,4 @@
-# OmniCOM 0.6.0
+# OmniCOM 0.7.0
 
 OmniCOM 是一个原生 Python 串口工作台：不打包 exe、不起本地服务、不依赖浏览器，
 双击 `start.cmd` 就能用。

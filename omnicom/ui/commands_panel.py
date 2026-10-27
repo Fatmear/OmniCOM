@@ -82,7 +82,6 @@ class CommandRow(QWidget):
     edit = Signal(dict)
     remove = Signal(str)
     toggled = Signal(str, bool)
-    exportOne = Signal(dict)
     moveTo = Signal(str, str)       # item id, target group id
 
     def __init__(self, item: dict, groups: list[dict], parent=None) -> None:
@@ -160,7 +159,6 @@ class CommandRow(QWidget):
         menu = QMenu(self)
         menu.addAction(tr("cmd.send"), lambda: self.send.emit(self.item))
         menu.addAction(tr("cmd.edit"), lambda: self.edit.emit(self.item))
-        menu.addAction(tr("cmd.export"), lambda: self.exportOne.emit(self.item))
         current = self.item.get("group") or ""
         if self.groups:
             submenu = menu.addMenu(tr("cmd.group"))
@@ -315,13 +313,22 @@ class CommandDialog(QDialog):
         footer.addWidget(save)
         layout.addLayout(footer)
 
-    def _field(self, label: str, widget: QWidget) -> QVBoxLayout:
-        box = QVBoxLayout()
-        box.setSpacing(4)
+    def _field(self, label: str, widget: QWidget) -> QWidget:
+        """A caption above a control, wrapped in a real widget.
+
+        It used to return a ``QVBoxLayout`` while every call site passed it to
+        ``addWidget()``.  Opening the add/edit dialog therefore raised
+        ``TypeError: addWidget called with wrong argument types`` and the edit
+        button looked dead (L-051).
+        """
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
         caption = QLabel(label)
         caption.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
-        box.addWidget(caption)
-        box.addWidget(widget)
+        layout.addWidget(caption)
+        layout.addWidget(widget)
         return box
 
     def result_item(self) -> dict:
@@ -677,11 +684,20 @@ class CommandsPanel(QWidget):
                 row.edit.connect(self.open_editor)
                 row.remove.connect(self.remove_item)
                 row.toggled.connect(self.set_enabled)
-                row.exportOne.connect(self.export_one)
                 row.moveTo.connect(self.move_item)
-                self.list_layout.insertWidget(self.list_layout.count() - 1, row)
-                if group is not None:
-                    self._group_rows.setdefault(group["id"], []).append(row)
+                if group is None:
+                    self.list_layout.insertWidget(self.list_layout.count() - 1, row)
+                    continue
+                # Indent rows so a group reads as a container rather than a flat
+                # list (R-042).  A QVBoxLayout has no per-item margin, so the
+                # row goes inside a holder with a left margin.
+                holder = QWidget()
+                holder_layout = QHBoxLayout(holder)
+                holder_layout.setContentsMargins(18, 0, 0, 0)
+                holder_layout.setSpacing(0)
+                holder_layout.addWidget(row)
+                self.list_layout.insertWidget(self.list_layout.count() - 1, holder)
+                self._group_rows.setdefault(group["id"], []).append(holder)
 
         count = len(self.store.items)
         self.count.setText(str(count))
