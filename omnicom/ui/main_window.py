@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMenu,
-    QPushButton,
     QScrollArea,
     QSplitter,
     QStackedWidget,
@@ -50,6 +49,7 @@ from .widgets import (
     SwitchRow,
     Toast,
 )
+from .widgets import Button as QPushButton
 from .workers import SerialBridge, TransferWorker
 
 SETTINGS_ORG = "OmniCOM"
@@ -468,7 +468,7 @@ class OmniWindow(QMainWindow):
     # ------------------------------------------------------------------ rail
     def _build_rail(self) -> QWidget:
         rail = GlassFrame(radius=theme.RADIUS_CARD)
-        rail.setMinimumWidth(240)
+        rail.setMinimumWidth(280)
         rail.setMaximumWidth(560)
         self.rail_box = QVBoxLayout(rail)
         self.rail_box.setContentsMargins(0, 0, 0, 0)
@@ -497,7 +497,7 @@ class OmniWindow(QMainWindow):
         layout.addLayout(row)
 
         self.btn_connect = QPushButton(tr("rail.open"))
-        self.btn_connect.setObjectName("Primary")
+        self.btn_connect.setObjectName("Ghost")
         self.btn_connect.setCursor(Qt.PointingHandCursor)
         layout.addWidget(self.btn_connect)
 
@@ -516,6 +516,7 @@ class OmniWindow(QMainWindow):
         self.lbl_baud = self._dim(tr("rail.baud"))
         left_col.addWidget(self.lbl_baud)
         self.baud = Combo(editable=True)
+        self.baud.setMinimumContentsLength(8)
         self.baud.addItems(BAUD_RATES)
         self.baud.setCurrentText("115200")
         # Custom rates must be safe to type: the validator keeps letters out and
@@ -899,7 +900,8 @@ class OmniWindow(QMainWindow):
             row.toggled.connect(lambda _: self._push_opts())
         for combo in (self.flow, self.parity, self.stopbits, self.bytesize):
             combo.currentIndexChanged.connect(lambda _: self._push_opts())
-        self.baud.currentTextChanged.connect(lambda _: self._push_opts())
+        self.baud.activated.connect(lambda _: self._commit_baud())
+        self.baud.lineEdit().editingFinished.connect(self._commit_baud)
 
         self.row_hex.toggled.connect(self._on_hex_mode)
         self.row_ts.toggled.connect(lambda value: setattr(self.log, "show_ts", value))
@@ -939,6 +941,7 @@ class OmniWindow(QMainWindow):
                 self.body_split.setSizes([int(value) for value in sizes])
                 self._saved_split = True
         self.baud.setCurrentText(str(s.value("serial/baud", "115200")))
+        self._committed_baud = self.baud.currentText()
         index = self.bytesize.findText(str(s.value("serial/bytesize", "8")))
         self.bytesize.setCurrentIndex(max(0, index))
         index = self.stopbits.findText(str(s.value("serial/stopbits", "1")))
@@ -995,10 +998,21 @@ class OmniWindow(QMainWindow):
             "autoReconnect": self.row_auto.isChecked(),
         }
 
+    def _commit_baud(self) -> None:
+        if not self.baud.lineEdit().hasAcceptableInput():
+            return
+        value = str(self._serial_opts()["baudrate"])
+        if value == getattr(self, "_committed_baud", None):
+            return
+        self._committed_baud = value
+        self.baud.setCurrentText(value)
+        self.settings.setValue("serial/baud", value)
+        self._push_opts()
+
     def _push_opts(self) -> None:
         self.meta_flow.setText(self.flow.currentText())
         if self._status.get("connected"):
-            self.bridge.manager.update_opts(self._serial_opts())
+            self.bridge.update_opts(self._serial_opts())
 
     # ------------------------------------------------------------ connection
     def _on_ports(self, ports: list) -> None:
@@ -1024,15 +1038,17 @@ class OmniWindow(QMainWindow):
         self.port_combo.blockSignals(False)
 
     def toggle_connection(self) -> None:
+        if self._status.get("busy"):
+            return
         if self._status.get("connected") or self._status.get("reconnecting"):
-            self.bridge.manager.close()
+            self.bridge.close()
             return
         port = self.port_combo.currentData()
         if not port:
             self.notify(tr("misc.noport"), "warn")
             return
         self.settings.setValue("serial/lastPort", port)
-        self.bridge.manager.open(port, self._serial_opts())
+        self.bridge.open(port, self._serial_opts())
 
     def _on_port_picked(self, _index: int) -> None:
         """Switching the combo while a port is open re-opens on the new one."""
@@ -1047,15 +1063,16 @@ class OmniWindow(QMainWindow):
             return
         self.console.reset()
         self.notify(tr("misc.switching", port=port), "info")
-        self.bridge.manager.open(port, self._serial_opts())
+        self.bridge.open(port, self._serial_opts())
 
     def _on_status(self, status: dict) -> None:
         self._status = status
+        self.btn_connect.setEnabled(not status.get("busy", False))
         chip = self.titlebar.status_chip
         if status.get("connected"):
             chip.set_state("ok", tr("status.chip.ok", port=status.get("port")))
             self.btn_connect.setText(tr("rail.close"))
-            self.btn_connect.setObjectName("Ghost")
+            self.btn_connect.setObjectName("Primary")
             self.meta_port.setText(status.get("port") or "—")
             self.status_line.setText(tr("status.connected", port=status.get("port"),
                                         baud=self.baud.currentText()))
@@ -1066,7 +1083,7 @@ class OmniWindow(QMainWindow):
         elif status.get("reconnecting"):
             chip.set_state("retry", tr("status.chip.retry"))
             self.btn_connect.setText(tr("rail.cancel"))
-            self.btn_connect.setObjectName("Primary")
+            self.btn_connect.setObjectName("Ghost")
             self.status_line.setText(tr("status.reconnecting"))
             if status.get("port"):
                 self._sync_port_combo(str(status.get("port")))
@@ -1079,7 +1096,7 @@ class OmniWindow(QMainWindow):
                 chip.set_state("idle", tr("status.chip.idle"))
                 self.status_line.setText(tr("status.ready"))
             self.btn_connect.setText(tr("rail.open"))
-            self.btn_connect.setObjectName("Primary")
+            self.btn_connect.setObjectName("Ghost")
             self.meta_port.setText("—")
         self.btn_connect.style().unpolish(self.btn_connect)
         self.btn_connect.style().polish(self.btn_connect)
@@ -1134,6 +1151,7 @@ class OmniWindow(QMainWindow):
                     self.console.feed(data)
         finally:
             self.log.end_batch()
+        self._check_trim()
 
     def _feed(self, ts: float, data: bytes) -> None:
         if not data:
@@ -1187,7 +1205,6 @@ class OmniWindow(QMainWindow):
         self.log.clear_pending()
         self.log.append_line(ts, direction, text, "rx", keywords=keywords)
         self._appended += 1
-        self._check_trim()
         if self.search_panel.match(raw):
             self.search_panel.add_hit(ts, self._clean(raw).strip())
 
@@ -1206,7 +1223,6 @@ class OmniWindow(QMainWindow):
             self._hex_offset += 16
             index += 16
         self._hex_partial = merged[index:]
-        self._check_trim()
         if self._hex_partial:
             self.log.set_pending(self._hex_row(self._hex_offset, self._hex_partial))
         else:
@@ -1243,11 +1259,15 @@ class OmniWindow(QMainWindow):
         host = self.scroll_pill.parentWidget()
         return QPoint(host.width() - 34, host.height() - 18)
 
-    def focus_search(self) -> None:
+    def focus_search(self, selected_text: str = "") -> None:
         """Log context menu -> "Find…": expand the panel and focus its box."""
         panel = self.search_panel
+        if self._sidebar_widget.isHidden():
+            self.toggle_sidebar()
         if panel._collapsed:
             panel.toggle_collapsed()
+        if selected_text:
+            panel.search_selection(selected_text)
         panel.input.setFocus()
         panel.input.selectAll()
 

@@ -6,8 +6,8 @@ import os
 import time
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QPainter
+from PySide6.QtCore import Property, QEasingCurve, QPropertyAnimation, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -17,8 +17,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMenu,
     QPlainTextEdit,
-    QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -29,6 +29,7 @@ from ..commands import UNGROUPED, CommandStore, payload_for
 from ..i18n import tr
 from . import theme
 from .widgets import Badge, Combo, GlyphButton
+from .widgets import Button as QPushButton
 
 FILE_FILTER = "OmniCOM (*.json);;All files (*)"
 
@@ -89,51 +90,54 @@ class CommandRow(QWidget):
         self.item = item
         self.groups = groups
         self.setObjectName("CmdRow")
-        self._apply_style(item.get("enabled", True))
+        self._selection = float(bool(item.get("enabled", True)))
+        self._selection_anim = QPropertyAnimation(self, b"selection", self)
+        self._selection_anim.setDuration(150)
+        self._selection_anim.setEasingCurve(QEasingCurve.OutCubic)
+        note = str(item.get("note") or "").strip()
+        self.setFixedHeight(60 if note else 40)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(9, 6, 7, 6)
-        outer.setSpacing(3)
-
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
         top = QHBoxLayout()
-        top.setSpacing(7)
+        top.setContentsMargins(10, 4, 5, 4)
+        top.setSpacing(6)
+        outer.addLayout(top, 1)
         self.check = QCheckBox()
         self.check.setChecked(bool(item.get("enabled", True)))
         self.check.setToolTip(tr("cmd.enabled.tip"))
+        self.check.toggled.connect(self._animate_selection)
         self.check.toggled.connect(lambda value: self.toggled.emit(item["id"], value))
         top.addWidget(self.check)
 
         text = item.get("text", "")
         display = f"[HEX] {text}" if item.get("hex") else text
         self.label = ElidedLabel(display)
+        self.label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.label.setCursor(Qt.PointingHandCursor)
-        self.label.setToolTip(display)
+        details = [text, f"{item.get('delay', 0)} ms"]
+        if note:
+            details.append(note)
+        self.setToolTip("\n".join(details))
+        self.label.setToolTip(self.toolTip())
         self.label.mouseReleaseEvent = lambda _event: self.send.emit(item)
         top.addWidget(self.label, 1)
-        outer.addLayout(top)
-
-        note = str(item.get("note") or "").strip()
-        if note:
-            self.note_label = QLabel(note)
-            self.note_label.setWordWrap(True)
-            self.note_label.setStyleSheet(
-                f"color: {theme.DIM}; font-size: 11px; padding-left: 26px;")
-            outer.addWidget(self.note_label)
-
-        bottom = QHBoxLayout()
-        bottom.setSpacing(5)
-        delay = QLabel(f"{item.get('delay', 0)}ms")
-        delay.setObjectName("Badge")
-        bottom.addWidget(delay)
         if item.get("timer"):
-            timer = QLabel(f"↻{item.get('interval', 1000)}ms")
-            timer.setObjectName("BadgeWarn")
-            bottom.addWidget(timer)
-        if item.get("hex"):
-            badge = QLabel("HEX")
-            badge.setObjectName("Badge")
-            bottom.addWidget(badge)
-        bottom.addStretch(1)
+            timer = QLabel(f"{item.get('interval', 1000)} ms")
+            timer.setStyleSheet(f"color: {theme.AMBER}; font-size: 11px;")
+            top.addWidget(timer)
+
+        if note:
+            self.note_label = ElidedLabel(note)
+            self.note_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            self.note_label.setFixedHeight(16)
+            self.note_label.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
+            self.note_label.setToolTip(note)
+            note_row = QHBoxLayout()
+            note_row.setContentsMargins(10 + theme.CHECK_SIZE + 6, 0, 5, 4)
+            note_row.addWidget(self.note_label)
+            outer.addLayout(note_row)
 
         for glyph, tip, slot in (
                 (GlyphButton.SEND, tr("cmd.send"), lambda: self.send.emit(item)),
@@ -142,18 +146,39 @@ class CommandRow(QWidget):
             button = GlyphButton(glyph, self, size=theme.ICON_SM)
             button.setToolTip(tip)
             button.clicked.connect(slot)
-            bottom.addWidget(button)
-        outer.addLayout(bottom)
+            top.addWidget(button)
 
-    def _apply_style(self, enabled: bool) -> None:
-        border = "rgba(11, 122, 110, 110)" if enabled else theme.LINE
-        fill = theme.TEAL_SOFT if enabled else theme.CARD
-        hover = "#F0FBF9" if enabled else theme.WASH
-        self.setStyleSheet(
-            f"QWidget#CmdRow {{ background: {fill}; border: 1px solid {border};"
-            f" border-radius: {theme.RADIUS_CTRL}px; }}"
-            f"QWidget#CmdRow:hover {{ background: {hover};"
-            f" border-color: {theme.LINE_STRONG}; }}")
+    def _get_selection(self) -> float:
+        return self._selection
+
+    def _set_selection(self, value: float) -> None:
+        self._selection = value
+        self.update()
+
+    selection = Property(float, _get_selection, _set_selection)
+
+    def _animate_selection(self, enabled: bool) -> None:
+        self._selection_anim.stop()
+        self._selection_anim.setStartValue(self._selection)
+        self._selection_anim.setEndValue(float(enabled))
+        self._selection_anim.start()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        fill = QColor(theme.TEAL_SOFT)
+        fill.setAlphaF(0.18 + 0.62 * self._selection)
+        border = QColor(theme.TEAL)
+        border.setAlphaF(0.12 + 0.20 * self._selection)
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(fill)
+        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
+                                theme.RADIUS_CTRL, theme.RADIUS_CTRL)
+        accent = QColor(theme.TEAL if not self.item.get("timer") else theme.AMBER)
+        accent.setAlphaF(0.18 + 0.82 * self._selection)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(accent)
+        painter.drawRoundedRect(QRectF(1, 8, 3, self.height() - 16), 1.5, 1.5)
 
     def contextMenuEvent(self, event) -> None:
         menu = QMenu(self)
@@ -213,8 +238,7 @@ class GroupHeader(QWidget):
 
         note = str(group.get("note") or "").strip()
         if note:
-            info = QLabel("ⓘ")
-            info.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
+            info = GlyphButton(GlyphButton.INFO, self, size=20)
             info.setToolTip(note)
             layout.addWidget(info)
 
@@ -576,7 +600,7 @@ class CommandsPanel(QWidget):
         return header
 
     def _tool(self, glyph: str, tip: str) -> GlyphButton:
-        button = GlyphButton(glyph, self, size=theme.ICON_MD)
+        button = GlyphButton(glyph, self, size=theme.ICON_SM)
         button.setToolTip(tip)
         return button
 
@@ -666,6 +690,8 @@ class CommandsPanel(QWidget):
         # the whole list.  Rebuilding 20+ rows (each with its own buttons) on
         # every chevron click was the visible stutter (R-041).
         self._group_rows: dict[str, list[QWidget]] = {}
+        self._group_bodies: dict[str, QWidget] = {}
+        self._group_headers: dict[str, GroupHeader] = {}
         for group, items in self.store.groups_with_items():
             if group is not None:
                 header = GroupHeader(group, len(items))
@@ -676,8 +702,14 @@ class CommandsPanel(QWidget):
                 header.addCommand.connect(self.add_to_group)
                 self.list_layout.insertWidget(self.list_layout.count() - 1, header)
                 self._group_rows[group["id"]] = []
-                if group.get("collapsed"):
-                    continue
+                self._group_headers[group["id"]] = header
+                holder = QWidget()
+                holder_layout = QVBoxLayout(holder)
+                holder_layout.setContentsMargins(18, 0, 0, 0)
+                holder_layout.setSpacing(5)
+                self.list_layout.insertWidget(self.list_layout.count() - 1, holder)
+                holder.setVisible(not group.get("collapsed"))
+                self._group_bodies[group["id"]] = holder
             for entry in items:
                 row = CommandRow(entry, self.store.groups)
                 row.send.connect(self.send_item)
@@ -688,16 +720,8 @@ class CommandsPanel(QWidget):
                 if group is None:
                     self.list_layout.insertWidget(self.list_layout.count() - 1, row)
                     continue
-                # Indent rows so a group reads as a container rather than a flat
-                # list (R-042).  A QVBoxLayout has no per-item margin, so the
-                # row goes inside a holder with a left margin.
-                holder = QWidget()
-                holder_layout = QHBoxLayout(holder)
-                holder_layout.setContentsMargins(18, 0, 0, 0)
-                holder_layout.setSpacing(0)
-                holder_layout.addWidget(row)
-                self.list_layout.insertWidget(self.list_layout.count() - 1, holder)
-                self._group_rows.setdefault(group["id"], []).append(holder)
+                self._group_bodies[group["id"]].layout().addWidget(row)
+                self._group_rows[group["id"]].append(row)
 
         count = len(self.store.items)
         self.count.setText(str(count))
@@ -713,18 +737,10 @@ class CommandsPanel(QWidget):
             return
         collapsed = not group.get("collapsed")
         self.store.update_group(group_id, {"collapsed": collapsed}, notify=False)
-        rows = getattr(self, "_group_rows", {}).get(group_id, [])
-        for row in rows:
-            row.setVisible(not collapsed)
-        # Flip the chevron in place: no rebuild, so no stutter.
-        for index in range(self.list_layout.count()):
-            widget = self.list_layout.itemAt(index).widget()
-            if isinstance(widget, GroupHeader) and widget.group["id"] == group_id:
-                widget.chevron.set_glyph(GlyphButton.CHEVRON_RIGHT if collapsed
-                                         else GlyphButton.CHEVRON_DOWN)
-                widget.group["collapsed"] = collapsed
-                break
-        self.sync_timers()
+        self._group_bodies[group_id].setVisible(not collapsed)
+        header = self._group_headers[group_id]
+        header.chevron.set_glyph(GlyphButton.CHEVRON_RIGHT if collapsed
+                                else GlyphButton.CHEVRON_DOWN)
 
     def add_to_group(self, group_id: str) -> None:
         """Create a command that lands directly inside ``group_id`` (R-042)."""
@@ -744,7 +760,10 @@ class CommandsPanel(QWidget):
         if dialog.exec() != QDialog.Accepted:
             return
         data = dialog.result_group()
-        self.store.add_group(data["name"], data["note"])
+        try:
+            self.store.add_group(data["name"], data["note"])
+        except ValueError as exc:
+            self.notify(str(exc), "warn")
 
     def edit_group(self, group_id: str) -> None:
         group = self.store.group_by_id(group_id)
@@ -753,7 +772,10 @@ class CommandsPanel(QWidget):
         dialog = GroupDialog(self, group)
         if dialog.exec() != QDialog.Accepted:
             return
-        self.store.update_group(group_id, dialog.result_group())
+        try:
+            self.store.update_group(group_id, dialog.result_group())
+        except ValueError as exc:
+            self.notify(str(exc), "warn")
 
     def remove_group(self, group_id: str) -> None:
         menu = QMenu(self)
@@ -869,7 +891,13 @@ class CommandsPanel(QWidget):
         self.store.remove(item_id)
 
     def set_enabled(self, item_id: str, enabled: bool) -> None:
-        self.store.update(item_id, {"enabled": enabled})
+        self.store.update(item_id, {"enabled": enabled}, notify=False)
+        if not hasattr(self, "_selection_save"):
+            self._selection_save = QTimer(self)
+            self._selection_save.setSingleShot(True)
+            self._selection_save.setInterval(250)
+            self._selection_save.timeout.connect(self.store.flush)
+        self._selection_save.start()
 
     def open_editor(self, item: dict | None, group_id: str = "") -> None:
         preset: dict | None = None

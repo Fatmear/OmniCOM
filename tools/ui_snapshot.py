@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import traceback
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -19,6 +20,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from PySide6.QtCore import QTimer  # noqa: E402
+from PySide6.QtGui import QFontDatabase  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from omnicom.ui.main_window import OmniWindow  # noqa: E402
@@ -42,11 +44,20 @@ def main() -> int:
     os.makedirs(os.path.dirname(out), exist_ok=True)
 
     app = QApplication(sys.argv)
+    for filename in ("segoeui.ttf", "msyh.ttc", "consola.ttf"):
+        font_path = os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts", filename)
+        if os.path.isfile(font_path):
+            QFontDatabase.addApplicationFont(font_path)
     app.setStyle("Fusion")
     app.setStyleSheet(app_stylesheet())
-    window = OmniWindow(demo=True)
+    sample_data = tempfile.TemporaryDirectory(prefix="omnicom-snapshot-")
+    window = OmniWindow(demo=True, command_path=os.path.join(sample_data.name, "commands.json"))
+    window.command_store.update(window.command_store.items[-1]["id"], {"enabled": False})
     window.resize(1440, 900)
     window.show()
+    window.reset_layout()
+    window._saved_send_h = 0
+    window._apply_main_split()
 
     def connect_demo() -> None:
         index = window.port_combo.findData("DEMO")
@@ -71,6 +82,18 @@ def main() -> int:
         try:
             pixmap = window.grab()
             pixmap.save(out)
+            window.btn_refresh.grab().scaled(192, 192).save(
+                os.path.join(os.path.dirname(out), "refresh.png"))
+            if "--matrix" in args:
+                for lang in ("zh", "en"):
+                    window.change_language(lang)
+                    for width in (1000, 1440, 1920):
+                        window.resize(width, 900)
+                        window.reset_layout()
+                        app.processEvents()
+                        window.grab().save(os.path.join(
+                            os.path.dirname(out), f"ui-{lang}-{width}.png"))
+                window.change_language("zh")
             print("saved", out, pixmap.width(), "x", pixmap.height())
             print("rx_bytes", window.bridge.manager.rx_bytes,
                   "tx_bytes", window.bridge.manager.tx_bytes)
@@ -110,6 +133,7 @@ def main() -> int:
     QTimer.singleShot(6200, snapshot)
 
     app.exec()
+    sample_data.cleanup()
 
     if ERRORS:
         print("\n".join(ERRORS))

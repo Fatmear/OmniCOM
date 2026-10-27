@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QScrollArea,
     QTextBrowser,
     QVBoxLayout,
@@ -21,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from .. import __version__, docs, i18n, paths
 from . import theme
+from .widgets import Button as QPushButton
 from .widgets import Combo, GlyphButton
 
 

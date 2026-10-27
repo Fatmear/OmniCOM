@@ -22,6 +22,7 @@ from collections.abc import Iterable
 from PySide6.QtCore import QObject, Signal
 
 from . import paths
+from .i18n import tr
 
 LINE_ENDS = {"none": b"", "cr": b"\r", "lf": b"\n", "crlf": b"\r\n"}
 
@@ -217,11 +218,14 @@ class CommandStore(QObject):
             self._commit()
         return added
 
-    def update(self, item_id: str, patch: dict) -> None:
+    def update(self, item_id: str, patch: dict, notify: bool = True) -> None:
         for item in self.items:
             if item["id"] == item_id:
                 item.update(patch)
-                self._commit()
+                if notify:
+                    self._commit()
+                else:
+                    self._dirty = True
                 return
 
     def remove(self, item_id: str) -> None:
@@ -256,15 +260,25 @@ class CommandStore(QObject):
 
     def add_group(self, name: str, note: str = "") -> dict:
         group = new_group(name, note)
+        group["name"] = self.validate_group_name(group["name"])
         self.groups.append(group)
         self._commit()
         return group
+
+    def validate_group_name(self, name: str, exclude_id: str = "") -> str:
+        name = name.strip()
+        if any(group["id"] != exclude_id and group.get("name", "").strip() == name
+               for group in self.groups):
+            raise ValueError(tr("cmd.group.duplicate", name=name))
+        return name
 
     def update_group(self, group_id: str, patch: dict,
                      notify: bool = True) -> None:
         group = self.group_by_id(group_id)
         if group is None:
             return
+        if "name" in patch:
+            patch = {**patch, "name": self.validate_group_name(patch["name"], group_id)}
         group.update(patch)
         if notify:
             self._commit()
@@ -351,12 +365,12 @@ class CommandStore(QObject):
         for group in payload.get("groups") or []:
             if not isinstance(group, dict) or not group.get("id"):
                 continue
+            created = new_group((group.get("name") or "").strip(), group.get("note") or "")
             existing = next((item for item in self.groups
-                             if item.get("name") == group.get("name")), None)
+                             if item.get("name", "").strip() == created["name"]), None)
             if existing is not None:
                 group_map[group["id"]] = existing["id"]
                 continue
-            created = new_group(group.get("name") or "", group.get("note") or "")
             self.groups.append(created)
             group_map[group["id"]] = created["id"]
 

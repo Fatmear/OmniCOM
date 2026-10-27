@@ -161,6 +161,8 @@ _TABLE: dict[str, tuple[str, str]] = {
     "cmd.group": ("分组", "Group"),
     "cmd.ungrouped": ("未分组", "Ungrouped"),
     "cmd.group.name": ("分组名称", "Group name"),
+    "cmd.group.duplicate": ("已存在名为「{name}」的分组，请使用其他名称",
+                            "A group named \"{name}\" already exists. Use another name."),
     "cmd.dialog.title": ("新增命令", "New command"),
     "cmd.dialog.edittitle": ("编辑命令", "Edit command"),
     "cmd.dialog.paste": ("粘贴多行命令", "Paste several commands"),

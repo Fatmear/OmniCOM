@@ -118,6 +118,9 @@ QDoubleSpinBox:focus, QComboBox:focus, QComboBox:on {{
 }}
 QLineEdit:disabled, QComboBox:disabled {{ color: {TEXT_DISABLED}; background: {WASH}; }}
 QComboBox {{ padding-right: 28px; }}
+QComboBox QLineEdit {{
+  padding: 0; border: 0; min-height: 0; background: transparent;
+}}
 QComboBox::drop-down {{ border: 0; width: 26px; }}
 /* the chevron is painted by widgets.Combo so it matches the icons elsewhere */
 QComboBox::down-arrow {{ image: none; width: 0; height: 0; }}

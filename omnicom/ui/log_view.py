@@ -73,7 +73,7 @@ def escape_control(text: str) -> str:
 
 class LogView(QPlainTextEdit):
     saveRequested = Signal()
-    findRequested = Signal()
+    findRequested = Signal(str)
     clearRequested = Signal()
     latestRequested = Signal()
 
@@ -101,6 +101,7 @@ class LogView(QPlainTextEdit):
         self.show_ctrl = False
         self.autoscroll = True
         self._batching = 0
+        self._batch_cursor: QTextCursor | None = None
         self._dirty = False
         self.trimmed = 0
         self._pending = False
@@ -142,13 +143,21 @@ class LogView(QPlainTextEdit):
     # ----------------------------------------------------------------- batch
     def begin_batch(self) -> None:
         """Coalesce the geometry work of many appends into one pass."""
+        if self._batching == 0:
+            self._batch_cursor = QTextCursor(self.document())
+            self._batch_cursor.beginEditBlock()
         self._batching += 1
 
     def end_batch(self) -> None:
-        self._batching = max(0, self._batching - 1)
-        if self._batching == 0 and self._dirty:
-            self._dirty = False
-            self._follow()
+        if self._batching == 0:
+            return
+        self._batching -= 1
+        if self._batching == 0:
+            self._batch_cursor.endEditBlock()
+            self._batch_cursor = None
+            if self._dirty:
+                self._dirty = False
+                self._follow()
 
     def _follow(self, _was_at_bottom: bool = True) -> None:
         """自动滚动打开时**无条件**跟随最新一行.
@@ -346,7 +355,7 @@ class LogView(QPlainTextEdit):
         elif picked is save:
             self.saveRequested.emit()
         elif picked is find:
-            self.findRequested.emit()
+            self.findRequested.emit(cursor.selectedText().replace("\u2029", "\n"))
         elif picked is latest:
             self.latestRequested.emit()
 

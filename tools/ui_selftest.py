@@ -14,8 +14,10 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 import traceback
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("OMNICOM_SETTINGS_SUFFIX", "-test")
@@ -25,12 +27,12 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer  # noqa: E402
-from PySide6.QtGui import QColor, QImage  # noqa: E402
+from PySide6.QtGui import QColor, QContextMenuEvent, QFontDatabase, QImage, QTextCursor  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QWidget  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton, QWidget  # noqa: E402
 
 from omnicom.ui import theme  # noqa: E402
-from omnicom.ui.commands_panel import CommandRow, GroupHeader  # noqa: E402
+from omnicom.ui.commands_panel import CommandRow, GroupDialog, GroupHeader  # noqa: E402
 from omnicom.ui.main_window import OmniWindow  # noqa: E402
 from omnicom.ui.theme import app_stylesheet  # noqa: E402
 
@@ -82,6 +84,10 @@ def wait(ms: int, then) -> None:
 def main() -> int:
     _utf8_console()
     app = QApplication(sys.argv)
+    for filename in ("segoeui.ttf", "msyh.ttc", "consola.ttf"):
+        font_path = os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts", filename)
+        if os.path.isfile(font_path):
+            QFontDatabase.addApplicationFont(font_path)
     app.setStyle("Fusion")
     app.setStyleSheet(app_stylesheet())
     store_dir = tempfile.mkdtemp(prefix="omnicom-test-")
@@ -650,6 +656,19 @@ def main() -> int:
         check("R-041 折叠只隐藏该分组的行（其他分组不受影响）",
               hidden_ok, f"{len(group_rows)} 行在该分组内")
 
+        expected_ids = {item["id"] for item in store.items if item.get("group") == group["id"]}
+        panel.toggle_group(group["id"])
+        added_group = store.add_group("新建分组可见性检查", "")
+        check("R-053 新建分组保留旧组折叠状态", store.group_by_id(group["id"])["collapsed"])
+        panel.toggle_group(group["id"])
+        app.processEvents()
+        restored = [row for row in panel.list_host.findChildren(CommandRow)
+                  if row.item.get("group") == group["id"]]
+        check("R-053 新建分组后旧组可展开且所有命令仍可见",
+              {row.item["id"] for row in restored} == expected_ids
+              and all(row.isVisible() for row in restored))
+        store.remove_group(added_group["id"])
+
         # a command can be created straight inside a group
         before_add = len(store.items)
         page = panel.store.group_by_id(group["id"])
@@ -894,7 +913,6 @@ def main() -> int:
         log.append_line(0.0, "RX", "probe-line", "rx")
         app.processEvents()
         log.clearRequested.emit()
-        app.processEvents()
         check("R-046 右键「清空」真的清空日志",
               log.plain_text().strip() == "", log.plain_text()[:24])
 
@@ -905,7 +923,7 @@ def main() -> int:
 
         if panel._collapsed:
             panel.toggle_collapsed()
-        log.findRequested.emit()
+        log.findRequested.emit("")
         app.processEvents()
         check("R-046 右键「查找」展开搜索面板", not panel._collapsed)
 
@@ -914,6 +932,7 @@ def main() -> int:
         check("R-043 日志与发送框之间有可拖动的分隔条",
               len(sizes) == 2 and window.main_split.handleWidth() > 0, str(sizes))
         before = sizes[1]
+        editor_before = window.send_panel.input.height()
         # Move the handle *up* (smaller composer).  Pushing it down can be
         # clamped by the splitter's own height, which made this a flaky check.
         window.main_split.moveSplitter(max(1, sizes[0] - 60), 1)
@@ -924,6 +943,11 @@ def main() -> int:
         # "did it change" is a stable assertion.)
         check("R-043 拖动后发送框高度真的变化", after != before,
               f"{before} -> {after}")
+
+        editor_after = window.send_panel.input.height()
+        check("R-043 增加的高度分配给实际输入框而不是空白",
+              after != before and abs((editor_after - editor_before) - (after - before)) <= 2,
+              f"panel {before}->{after}, editor {editor_before}->{editor_after}")
 
         # duplicated controls are gone
         from omnicom.ui.dialogs import AboutDialog, DocsDialog
@@ -947,14 +971,194 @@ def main() -> int:
         store.add(["AT+INDENT"], {"group": marker["id"]})
         window.commands_panel.rebuild()
         app.processEvents()
-        holders = window.commands_panel._group_rows.get(marker["id"], [])
+        holder = window.commands_panel._group_bodies.get(marker["id"])
         check("R-042 分组内的命令有缩进",
-              bool(holders)
-              and holders[0].layout().contentsMargins().left() >= 12,
-              str(holders[0].layout().contentsMargins().left()) if holders else "-")
+              holder is not None and holder.layout().contentsMargins().left() >= 12,
+              str(holder.layout().contentsMargins().left()) if holder is not None else "-")
         store.remove_group(marker["id"])
         window.commands_panel.rebuild()
         app.processEvents()
+        next_()
+
+    def step_visual_interactions(next_):
+        from PySide6.QtCore import QAbstractAnimation, QEvent, QPointF
+        from PySide6.QtGui import QEnterEvent
+        from PySide6.QtWidgets import QMenu
+
+        from omnicom.i18n import tr
+        from omnicom.ui.commands_panel import CommandDialog
+        from omnicom.ui.widgets import GlyphButton
+
+        panel = window.search_panel
+        log = window.log
+        log.setPlainText("AT+FIND\nAT+OTHER\nAT+FIND")
+        panel.add_keyword("stale-filter")
+        panel.match_box.setCurrentIndex(panel.match_box.findData("regex"))
+        cursor = log.textCursor()
+        cursor.setPosition(0)
+        cursor.setPosition(7, QTextCursor.KeepAnchor)
+        log.setTextCursor(cursor)
+
+        def pick_find():
+            menu = QApplication.activePopupWidget()
+            if not isinstance(menu, QMenu):
+                return
+            action = next(action for action in menu.actions()
+                          if action.text() == tr("log.menu.find"))
+            QTest.mouseClick(menu, Qt.LeftButton, pos=menu.actionGeometry(action).center())
+
+        QTimer.singleShot(0, pick_find)
+        log.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Mouse, QPoint(10, 10),
+                                              log.mapToGlobal(QPoint(10, 10))))
+        check("R-050 选中日志后右键查找使用选区并立即命中历史",
+              panel.input.text() == "AT+FIND" and panel.hits == 2
+              and not panel.keywords and panel.match_mode() == "plain",
+              f"query={panel.input.text()} hits={panel.hits}")
+        panel.search_selection("AT+FIND\nAT+OTHER")
+        check("R-050 多行选区按行查找", panel.hits == 3, str(panel.hits))
+        log.findRequested.emit("")
+        check("R-050 无选区查找保留已有查询", panel.hits == 3)
+
+        dialog = CommandDialog(window, groups=window.command_store.groups)
+        check("R-047 命令编辑对话框正常构建", dialog.text is not None)
+        dialog.deleteLater()
+
+        problems = []
+        for lang in ("zh", "en"):
+            window.change_language(lang)
+            for width in (1000, 1440, 1920):
+                window.resize(width, 900)
+                window.reset_layout()
+                app.processEvents()
+                for control in (window.btn_refresh, window.row_auto.switch,
+                                window.row_ctrl.switch, window.row_scroll.switch):
+                    edge = control.mapTo(window.rail, control.rect().topRight()).x()
+                    if edge >= window.rail.width():
+                        problems.append(f"{lang}/{width}: {edge}>={window.rail.width()}")
+                title = window.commands_panel.title
+                if title.width() < title.sizeHint().width():
+                    problems.append(f"{lang}/{width}: command title clipped")
+                editor = window.baud.lineEdit()
+                if editor.width() < editor.fontMetrics().horizontalAdvance(editor.text()) + 4:
+                    problems.append(f"{lang}/{width}: baud text clipped")
+        check("R-052 中英文各宽度下刷新和显示开关没有横向溢出",
+              not problems, str(problems))
+        window.change_language("zh")
+        window.resize(1440, 900)
+        window.reset_layout()
+
+        commands = window.commands_panel
+        row = commands.list_host.findChildren(CommandRow)[0]
+        original = row.check.isChecked()
+        row.check.setChecked(not original)
+        app.processEvents()
+        centre = row.label.mapTo(row, row.label.rect().center()).y()
+        check("R-049 命令和所有操作图标始终在同一行",
+              row.height() == (60 if row.item.get("note", "").strip() else 40)
+              and row.label.width() > 0
+              and all(abs(button.mapTo(row, button.rect().center()).y() - centre) <= 1
+                      for button in row.findChildren(GlyphButton)))
+        if row.item.get("note", "").strip():
+            check("R-049 备注在命令下方以较小文字可见",
+                row.note_label.isVisible() and row.note_label.y() > row.label.y()
+                and row.note_label.font().pixelSize() < row.label.font().pixelSize())
+        check("R-051 勾选命令不重建列表，当前行仍存在",
+              row in commands.list_host.findChildren(CommandRow))
+        button = window.btn_refresh
+        app.sendEvent(button, QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
+
+        def settled():
+            check("R-049 选择动画停在正确状态",
+                  row.selection == float(not original)
+                  and row._selection_anim.state() == QAbstractAnimation.Stopped)
+            check("R-051 图标悬停动画结束后停止",
+                  button.feedback == 1.0
+                  and button._feedback_anim.state() == QAbstractAnimation.Stopped)
+            app.sendEvent(button, QEvent(QEvent.Leave))
+            row.check.setChecked(original)
+            wait(320, restored)
+
+        def restored():
+            check("R-051 取消悬停及恢复勾选后没有常驻动画",
+                  button.feedback == 0.0 and row.selection == float(original)
+                  and button._feedback_anim.state() == QAbstractAnimation.Stopped
+                  and row._selection_anim.state() == QAbstractAnimation.Stopped)
+            import json
+
+            with open(store_path, encoding="utf-8") as handle:
+                saved = json.load(handle)
+            saved_item = next(item for item in saved["items"] if item["id"] == row.item["id"])
+            check("R-049 勾选状态延后保存且没有丢失", saved_item["enabled"] == original)
+            next_()
+
+        wait(180, settled)
+
+    def step_performance(next_):
+        import json
+        import statistics
+
+        panel = window.commands_panel
+        store = window.command_store
+        group = store.add_group("Performance", "")
+        store.add([f"AT+PERF={index}" for index in range(200)], {"group": group["id"]})
+        app.processEvents()
+        timings = {name: [] for name in ("group_action", "group_frame", "log_scroll", "rx_batch")}
+        for _index in range(12):
+            start = time.perf_counter()
+            panel.toggle_group(group["id"])
+            timings["group_action"].append((time.perf_counter() - start) * 1000)
+            app.processEvents()
+            timings["group_frame"].append((time.perf_counter() - start) * 1000)
+        rows = [row for row in panel.list_host.findChildren(CommandRow)
+                if row.item.get("group") == group["id"]]
+        check("R-054 压力折叠后200条命令仍完整可见",
+              len(rows) == 200 and all(row.isVisible() for row in rows))
+
+        log = window.log
+        window.clear_log()
+        log.autoscroll = False
+        log.setPlainText("\n".join(f"PERF {index:05d} payload=" + "x" * 80
+                                    for index in range(20000)))
+        window._appended = 20000
+        app.processEvents()
+        bar = log.verticalScrollBar()
+        for index in range(40):
+            start = time.perf_counter()
+            bar.setValue(max(0, bar.maximum() - (index + 1) * 3))
+            app.processEvents()
+            timings["log_scroll"].append((time.perf_counter() - start) * 1000)
+        expected = window._appended
+        for index in range(12):
+            payload = (f"PERF_RX_{index}\r\n" * 100).encode("ascii")
+            start = time.perf_counter()
+            window._on_rx(time.time() * 1000, payload)
+            window._flush_rx()
+            app.processEvents()
+            timings["rx_batch"].append((time.perf_counter() - start) * 1000)
+            expected += 100
+        check("R-054 压力接收逐行计数准确且日志上限损失提示可见",
+              window._appended >= expected and log.blockCount() == 20000
+              and window.trim_badge.isVisible())
+        received = [line.rsplit("◇", 1)[-1] for line in log.line_texts()]
+        check("R-054 每一批100条接收内容全部保留",
+              all(received.count(f"PERF_RX_{index}") == 100 for index in range(12)))
+        report = {}
+        for name, samples in timings.items():
+            ordered = sorted(samples)
+            report[name] = {"median_ms": round(statistics.median(samples), 3),
+                            "p95_ms": round(ordered[int((len(samples) - 1) * 0.95)], 3),
+                            "max_ms": round(max(samples), 3)}
+        destination = os.path.join(ROOT, ".artifacts", "ui-perf.json")
+        if "--perf-out" in sys.argv:
+            destination = sys.argv[sys.argv.index("--perf-out") + 1]
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        with open(destination, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2)
+        print("UI_PERF " + json.dumps(report))
+        check("R-054 滚动、200条命令折叠和100行接收批次的P95耗时低于40ms",
+              all(report[name]["p95_ms"] < 40 for name in ("log_scroll", "group_frame", "rx_batch")),
+              str(report))
+        store.remove_group(group["id"], drop_commands=True)
         next_()
 
     def step_shell(next_):
@@ -1011,6 +1215,519 @@ def main() -> int:
               str(window.port_combo.currentData()))
         next_()
 
+    def step_serial_lifecycle(next_):
+        manager = window.bridge.manager
+        manager.close()
+        window._on_status(manager.status())
+        window._sync_port_combo("DEMO")
+        original_open = manager.open
+        original_close = manager.close
+        delay = threading.Event()
+        timings = []
+        gaps = []
+        gap_cycles = []
+        blocked_stacks = []
+        watchdog_stop = threading.Event()
+        previous = [time.perf_counter()]
+        cycles = [0]
+        deadline = [time.monotonic() + 4]
+
+        def slow_open(*args, **kwargs):
+            delay.wait(0.4)
+            original_open(*args, **kwargs)
+
+        def slow_close():
+            delay.wait(0.4)
+            original_close()
+
+        open_patch = patch.object(manager, "open", slow_open)
+        close_patch = patch.object(manager, "close", slow_close)
+        open_patch.start()
+        close_patch.start()
+        heartbeat = QTimer(window)
+        heartbeat.setInterval(10)
+
+        def tick():
+            now = time.perf_counter()
+            gaps.append((now - previous[0]) * 1000)
+            gap_cycles.append(cycles[0])
+            previous[0] = now
+
+        heartbeat.timeout.connect(tick)
+        heartbeat.start()
+
+        def watch_main_thread():
+            while not watchdog_stop.wait(0.04):
+                if time.perf_counter() - previous[0] > 0.08 and len(blocked_stacks) < 3:
+                    frame = sys._current_frames().get(threading.main_thread().ident)
+                    blocked_stacks.append(" > ".join(
+                        f"{item.name}:{item.lineno}" for item in traceback.extract_stack(frame)[-6:]))
+
+        watchdog = threading.Thread(target=watch_main_thread, daemon=True)
+        watchdog.start()
+
+        def finish():
+            heartbeat.stop()
+            watchdog_stop.set()
+            heartbeat.deleteLater()
+            open_patch.stop()
+            close_patch.stop()
+            check("R-055 连续12次慢驱动开关不阻塞按钮回调",
+                  len(timings) == 12 and max(timings, default=999) < 40,
+                  f"{len(timings)} calls, max {max(timings, default=999):.1f} ms")
+            check("R-055 慢驱动开关期间界面心跳无超过80ms的停顿",
+                  len(gaps) > 20 and max(gaps, default=999) < 80,
+                f"{len(gaps)} ticks, max {max(gaps, default=999):.1f} ms; "
+                  f"stalls {[(gap_cycles[index], round(gap, 1)) for index, gap in enumerate(gaps) if gap >= 80]}; "
+                  f"stacks {blocked_stacks}")
+            check("R-055 连续开关后串口确实关闭且未进入重连",
+                  not manager.status()["connected"] and not manager.status()["want"]
+                  and not manager.status()["reconnecting"])
+            next_()
+
+        def toggle():
+            started = time.perf_counter()
+            window.btn_connect.click()
+            timings.append((time.perf_counter() - started) * 1000)
+            cycles[0] += 1
+            deadline[0] = time.monotonic() + 4
+            QTimer.singleShot(10, poll)
+
+        def poll():
+            expected = bool(cycles[0] % 2)
+            if (manager.status()["connected"] == expected
+                    and not window._status.get("busy")
+                    and window._status.get("connected") == expected):
+                if cycles[0] == 12:
+                    finish()
+                else:
+                    QTimer.singleShot(10, toggle)
+                return
+            if time.monotonic() > deadline[0]:
+                check("R-055 串口开关在超时前完成", False, str(manager.status()))
+                finish()
+                return
+            QTimer.singleShot(10, poll)
+
+        QTimer.singleShot(20, toggle)
+
+    def step_serial_races(next_):
+        from omnicom import serial_port
+
+        manager = serial_port.PortManager(lambda event: None)
+        entered = threading.Event()
+        release = threading.Event()
+
+        class DelayedDevice:
+            in_waiting = 0
+
+            def reset_input_buffer(self):
+                pass
+
+            def read(self, size):
+                entered.set()
+                release.wait(2)
+                raise OSError("retired reader")
+
+            def close(self):
+                pass
+
+        try:
+            with patch.object(serial_port.serial, "Serial", return_value=DelayedDevice()):
+                manager.open("TEST_DELAYED", {"autoReconnect": False})
+            entered.wait(1)
+            old_reader = manager._reader
+            manager.close()
+            manager.open("DEMO", {"autoReconnect": False})
+            release.set()
+            old_reader.join(1)
+            check("R-055 旧读线程的延迟错误不会关闭新连接",
+                  manager.status()["connected"] and manager.status()["port"] == "DEMO")
+            current_handle = manager._ser
+            current_stop = manager._reader_stop
+            with patch.object(serial_port, "DemoDevice", wraps=serial_port.DemoDevice) as factory:
+                manager._open_now("DEMO", manager.status()["opts"], announce=False,
+                                  generation=manager._generation)
+                check("R-055 延迟到达的重连不会重复打开已有连接",
+                      factory.call_count == 0 and manager._ser is current_handle)
+            if manager._ser is not current_handle:
+                current_stop.set()
+                current_handle.close()
+            manager._handle_loss(OSError("retired write"), object())
+            check("R-055 旧写入错误不会关闭当前连接", manager.status()["connected"])
+            manager.close()
+
+            entered.clear()
+            release.clear()
+            discarded = []
+
+            def delayed_open(**kwargs):
+                entered.set()
+                release.wait(2)
+                handle = serial_port.DemoDevice()
+                discarded.append(handle)
+                return handle
+
+            with patch.object(serial_port.serial, "Serial", side_effect=delayed_open):
+                opener = threading.Thread(target=manager.open,
+                                          args=("TEST_CANCELLED", {"autoReconnect": False}))
+                opener.start()
+                entered.wait(1)
+                release_timer = threading.Timer(0.05, release.set)
+                release_timer.start()
+                manager.close()
+                opener.join(2)
+                release_timer.join()
+            check("R-055 打开完成前关闭不会重新发布已取消连接",
+                  not opener.is_alive() and not manager.status()["connected"]
+                  and manager.status()["want"] is None)
+            check("R-055 被取消的驱动句柄已释放",
+                  len(discarded) == 1 and not discarded[0].is_open)
+        finally:
+            release.set()
+            manager.shutdown()
+        next_()
+
+    def step_group_unique(next_):
+        import json
+        from pathlib import Path
+
+        from omnicom.commands import CommandStore
+        from omnicom.i18n import language, set_language, tr
+
+        def rejected(operation):
+            try:
+                operation()
+            except ValueError:
+                return True
+            return False
+
+        with tempfile.TemporaryDirectory(prefix="omnicom-groups-") as directory:
+            path = Path(directory) / "commands.json"
+            store = CommandStore(str(path))
+            first = store.add_group("Unique A", "first")
+            other = store.add_group("Unique B", "second")
+            snapshot = path.read_bytes()
+            before = json.dumps(store.groups, sort_keys=True)
+            with patch.object(store, "_commit", wraps=store._commit) as commit:
+                add_rejected = rejected(lambda: store.add_group("  Unique A  ", "duplicate"))
+                rename_rejected = rejected(lambda: store.update_group(
+                    other["id"], {"name": " Unique A ", "note": "must not change"}))
+                check("R-056 同名创建和改名都拒绝且不写盘、不发重建通知",
+                      add_rejected and rename_rejected and commit.call_count == 0
+                      and json.dumps(store.groups, sort_keys=True) == before
+                      and path.read_bytes() == snapshot)
+            store.update_group(first["id"], {"name": " Unique A ", "note": "updated"})
+            check("R-056 保持自身名称可保存且自动去除首尾空格",
+                  first["name"] == "Unique A" and first["note"] == "updated")
+            command = store.add(["AT+UNIQUE"], {"group": first["id"]})[0]
+            bundle = store.export_payload([command])
+            bundle["groups"][0]["name"] = "  Unique A  "
+            export_path = Path(directory) / "import.json"
+            export_path.write_text(json.dumps(bundle), encoding="utf-8")
+            count = len(store.groups)
+            added = store.import_from(str(export_path))
+            check("R-056 导入同名分组合并而不再创建",
+                  added == 1 and len(store.groups) == count
+                  and store.items[-1]["group"] == first["id"])
+
+        panel = window.commands_panel
+        store = panel.store
+        original_ids = {group["id"] for group in store.groups}
+        existing = store.groups[0]
+        other = store.add_group("R056_OTHER", "")
+        before = json.dumps(store.groups, sort_keys=True)
+        with patch.object(GroupDialog, "exec", return_value=QDialog.Accepted), \
+                patch.object(GroupDialog, "result_group", return_value={
+                    "name": existing["name"], "note": "duplicate"}), \
+                patch.object(panel, "notify") as notify:
+            panel.new_group()
+            panel.edit_group(other["id"])
+            check("R-056 界面创建和改名时显示重名提示且不改变原数据",
+                  notify.call_count == 2 and json.dumps(store.groups, sort_keys=True) == before)
+        for group in list(store.groups):
+            if group["id"] not in original_ids:
+                store.remove_group(group["id"])
+        previous_language = language()
+        set_language("zh")
+        chinese = tr("cmd.group.duplicate", name="Unique A")
+        set_language("en")
+        english = tr("cmd.group.duplicate", name="Unique A")
+        set_language(previous_language)
+        check("R-033 重名提示中英文隔离且保留用户分组名称",
+              bool(re.search(r"[\u4e00-\u9fff]", chinese))
+              and not re.search(r"[\u4e00-\u9fff]", english)
+              and "Unique A" in chinese and "Unique A" in english)
+        next_()
+
+    def step_connection_colours(next_):
+        states = [
+            ("关闭", {}, "Ghost"),
+            ("打开中", {"busy": True}, "Ghost"),
+            ("已连接", {"connected": True, "port": "DEMO"}, "Primary"),
+            ("重连中", {"reconnecting": True}, "Ghost"),
+            ("打开失败", {"error": "test error"}, "Ghost"),
+        ]
+        for name, status, expected in states:
+            window._on_status(status)
+            check(f"R-057 {name}按钮颜色与实际连接状态一致",
+                  window.btn_connect.objectName() == expected
+                  and window.btn_connect.isEnabled() == (not status.get("busy", False)),
+                  window.btn_connect.objectName())
+        window._on_status(window.bridge.manager.status())
+        next_()
+
+    def step_motion_buttons(next_):
+        from PySide6.QtCore import QAbstractAnimation, QPointF
+        from PySide6.QtGui import QEnterEvent, QPainter
+        from PySide6.QtWidgets import QHBoxLayout
+
+        from omnicom.ui.widgets import Button, GlyphButton
+
+        host = QWidget(window)
+        host.setGeometry(400, 200, 320, 70)
+        layout = QHBoxLayout(host)
+        primary = Button("Send", host)
+        primary.setObjectName("Primary")
+        secondary = Button("Cancel", host)
+        secondary.setObjectName("Ghost")
+        icon = GlyphButton(GlyphButton.SEND, host)
+        controls = [primary, secondary, icon]
+        for control in controls:
+            layout.addWidget(control)
+        clicks = []
+        primary.clicked.connect(lambda: clicks.append(time.perf_counter()))
+        host.show()
+        app.processEvents()
+        geometry = [control.geometry() for control in controls]
+        frames = [host.grab().toImage()]
+        for control in controls:
+            app.sendEvent(control, QEnterEvent(QPointF(5, 5), QPointF(5, 5), QPointF(5, 5)))
+
+        def hover_frame():
+            frames.append(host.grab().toImage())
+            check("R-058 悬停具有实际可见的中间帧而非瞬间切换",
+                  all(0 < control.hover < 1 for control in controls)
+                  and frames[-1] != frames[0])
+            QTest.mousePress(primary, Qt.LeftButton)
+            wait(40, press_frame)
+
+        def press_frame():
+            frames.append(host.grab().toImage())
+            check("R-058 文字按钮按压有动画且布局尺寸不变",
+                0 < primary.press <= 1
+                  and [control.geometry() for control in controls] == geometry
+                  and frames[-1] != frames[-2])
+            QTest.mouseRelease(primary, Qt.LeftButton)
+            check("R-058 松开立即执行一次动作并继续回弹",
+                len(clicks) == 1 and primary.press > 0,
+                f"clicks={len(clicks)}, press={primary.press:.3f}")
+            wait(240, release_frame)
+
+        def release_frame():
+            frames.append(host.grab().toImage())
+            check("R-058 松开后回到原尺寸且按压动画停止",
+                  all(control.press == 0 and control._press_anim.state() == QAbstractAnimation.Stopped
+                      for control in controls)
+                  and [control.geometry() for control in controls] == geometry)
+            primary.setEnabled(False)
+            QTest.mouseClick(primary, Qt.LeftButton)
+            check("R-058 禁用按钮不触发动作也不继续动画",
+                  len(clicks) == 1 and primary.press == 0 and primary.hover == 0
+                  and primary._hover_anim.state() == QAbstractAnimation.Stopped)
+            primary.setEnabled(True)
+            primary.setFocus()
+            QTest.keyClick(primary, Qt.Key_Space)
+            check("R-058 键盘空格也立即触发一次并有按压反馈",
+                  len(clicks) == 2 and primary.press > 0)
+            for control in controls:
+                app.sendEvent(control, QEvent(QEvent.Leave))
+            wait(260, finish)
+
+        def finish():
+            check("R-058 空闲时全部反馈动画停止且不会改变布局",
+                  all(control.hover == 0 and control.press == 0
+                      and control._hover_anim.state() == QAbstractAnimation.Stopped
+                      and control._press_anim.state() == QAbstractAnimation.Stopped
+                      for control in controls)
+                  and [control.geometry() for control in controls] == geometry)
+            QTest.mousePress(icon, Qt.LeftButton)
+            wait(40, glyph_frame)
+
+        def glyph_frame():
+            frames.append(host.grab().toImage())
+            check("R-058 图标按钮真实按压也有反馈且不移动控件",
+                  0 < icon.press <= 1 and icon.geometry() == geometry[-1])
+            QTest.mouseRelease(icon, Qt.LeftButton)
+            wait(240, complete)
+
+        def complete():
+            dialog = GroupDialog(window)
+            actual = [window.btn_connect, window.btn_record, window.send_panel.btn_send,
+                      *window.titlebar.tab_buttons.values(), *dialog.findChildren(QPushButton)]
+            check("R-058 主操作、标签页和对话框均使用共用动画按钮",
+                  all(isinstance(control, Button) for control in actual))
+            dialog.deleteLater()
+            strip = QImage(host.width() * len(frames), host.height(), QImage.Format_ARGB32)
+            strip.fill(QColor(theme.BG))
+            painter = QPainter(strip)
+            for index, frame in enumerate(frames):
+                painter.drawImage(index * host.width(), 0, frame)
+            painter.end()
+            os.makedirs(os.path.join(ROOT, ".artifacts"), exist_ok=True)
+            strip.save(os.path.join(ROOT, ".artifacts", "button-motion.png"))
+            host.hide()
+            host.deleteLater()
+            next_()
+
+        wait(45, hover_frame)
+
+    def step_launcher_remove(next_):
+        import json
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        module = next(info.module for info in window.plugins.plugins if info.id == "launcher")
+        with tempfile.TemporaryDirectory(prefix="omnicom-launcher-") as directory:
+            path = Path(directory) / "apps.json"
+            entries = [{"id": "first", "name": "First", "path": sys.executable},
+                       {"id": "second", "name": "Second", "path": sys.executable}]
+            path.write_text(json.dumps(entries), encoding="utf-8")
+            api = SimpleNamespace(data_dir=directory, t=lambda zh, en: zh,
+                                  notify=lambda *args: None, on_language=lambda callback: None)
+            page = module.LauncherPage(api)
+            page._timer.stop()
+            page.show()
+            app.processEvents()
+            tile = page.tiles[0]
+
+            def choose_remove():
+                menu = QApplication.activePopupWidget()
+                QTest.mouseClick(menu, Qt.LeftButton,
+                                 pos=menu.actionGeometry(menu.actions()[-1]).center())
+
+            QTimer.singleShot(30, choose_remove)
+            app.sendEvent(tile, QContextMenuEvent(QContextMenuEvent.Mouse, QPoint(2, 2),
+                                                 tile.mapToGlobal(QPoint(2, 2))))
+            check("R-059 真实图标右键删除只移除选中的快捷方式",
+                  [item["id"] for item in page.apps] == ["second"])
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            check("R-059 删除结果写入配置且重新载入不会复活",
+                  [item["id"] for item in saved] == ["second"]
+                  and [item["id"] for item in page._load()] == ["second"])
+            page.hide()
+            page.deleteLater()
+        next_()
+
+    def step_launcher_instances(next_):
+        import json
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        module = next(info.module for info in window.plugins.plugins if info.id == "launcher")
+        if sys.platform.startswith("win") and app.platformName() == "windows":
+            native = [QWidget(), QWidget()]
+            for index, widget in enumerate(native):
+                widget.setWindowTitle(f"OmniCOM instance test {index}")
+                widget.resize(280, 100)
+                widget.show()
+            app.processEvents()
+            actual = module._windows_windows({os.getpid(): os.path.basename(sys.executable)})
+            actual = [item for item in actual if item["title"].startswith("OmniCOM instance test")]
+            check("R-060 Windows原生枚举保留同进程两个真实窗口句柄",
+                  {item["hwnd"] for item in actual} == {int(widget.winId()) for widget in native})
+            activated = []
+            for widget in native:
+                activated.append(module._focus_window({"hwnd": int(widget.winId()), "pid": os.getpid()}))
+                app.processEvents()
+            check("R-060 Windows原生API分别激活两个真实窗口", all(activated))
+            check("R-060 Windows原生API拒绝PID不符的过期绑定",
+                  not module._focus_window({"hwnd": int(native[0].winId()), "pid": os.getpid() + 1}))
+            for widget in native:
+                widget.close()
+                widget.deleteLater()
+        with tempfile.TemporaryDirectory(prefix="omnicom-windows-") as directory:
+            path = Path(directory) / "apps.json"
+            path.write_text(json.dumps([{"id": "editor", "name": "Editor",
+                                         "path": sys.executable}]), encoding="utf-8")
+            api = SimpleNamespace(data_dir=directory, t=lambda zh, en: zh,
+                                  notify=lambda *args: None, on_language=lambda callback: None)
+            page = module.LauncherPage(api)
+            page._timer.stop()
+            handles = [
+                {"hwnd": 101, "pid": 999, "path": sys.executable, "title": "Older document"},
+                {"hwnd": 202, "pid": 999, "path": sys.executable, "title": "Newer document"},
+            ]
+            page._apply_processes({"processes": {999: os.path.basename(sys.executable)},
+                                   "windows": handles})
+            tiles = [tile for tile in page.tiles if isinstance(tile, module.AppTile)]
+            check("R-060 同一进程的两个窗口显示两个独立图标",
+                  len(tiles) == 2 and {tile.instance["hwnd"] for tile in tiles} == {101, 202})
+            with patch.object(module, "_focus_window", return_value=True) as focus, \
+                    patch.object(page, "_spawn") as spawn:
+                for tile in tiles:
+                    tile.click()
+                check("R-060 新旧窗口图标分别切换到自己的句柄而不是首个窗口",
+                      [call.args[0]["hwnd"] for call in focus.call_args_list] == [101, 202]
+                      and spawn.call_count == 0)
+            page._apply_processes({"processes": {999: os.path.basename(sys.executable)},
+                                   "windows": handles[1:]})
+            tiles = [tile for tile in page.tiles if isinstance(tile, module.AppTile)]
+            check("R-060 已关闭窗口消失且仍存活的窗口保留绑定",
+                  len(tiles) == 1 and tiles[0].instance["hwnd"] == 202)
+            stale = {**page.apps[0], "_window": handles[0]}
+            with patch.object(module, "_focus_window", return_value=False), \
+                    patch.object(page, "_spawn") as spawn:
+                page.launch(stale)
+                check("R-060 点击过期窗口不会擅自创建新实例", spawn.call_count == 0)
+            page._apply_processes({"processes": {}, "windows": []})
+            check("R-060 所有窗口退出后保留一个可启动的快捷方式",
+                  len(page.tiles) == 1 and page.tiles[0].instance is None
+                  and len(page.apps) == 1)
+            page.deleteLater()
+        next_()
+
+    def step_custom_baud(next_):
+        from PySide6.QtCore import QSignalBlocker
+
+        original = window.baud.currentText()
+        window.baud.setCurrentText("115200")
+        window._committed_baud = "115200"
+        window.activateWindow()
+        app.processEvents()
+        with QSignalBlocker(window.bridge), patch.object(window.bridge, "update_opts") as update:
+            window._on_status({"connected": True, "port": "DEMO"})
+            editor = window.baud.lineEdit()
+            QTest.mouseClick(editor, Qt.LeftButton)
+            app.processEvents()
+            for character in "123457":
+                QTest.keyClick(QApplication.focusWidget(), Qt.Key(ord(character)))
+            check("R-061 鼠标进入后真实键盘输入非预设波特率",
+                  window.baud.currentText() == "123457", window.baud.currentText())
+            check("R-061 输入期间不按每位数字重配串口", update.call_count == 0)
+            QTest.keyClick(QApplication.focusWidget(), Qt.Key_Return)
+            check("R-061 Enter保留自定义值并仅提交一次完整参数",
+                  window.baud.currentText() == "123457" and update.call_count == 1
+                  and update.call_args.args[0]["baudrate"] == 123457,
+                  f"text={window.baud.currentText()}, calls={update.call_count}")
+            window.baud.showPopup()
+            QTest.keyClick(window.baud.view(), Qt.Key_Escape)
+            window.send_panel.input.setFocus()
+            check("R-061 候选列表退出和失焦不覆盖自定义值",
+                  window.baud.currentText() == "123457", window.baud.currentText())
+            window._save_settings()
+            window.baud.setCurrentText("115200")
+            window._restore_settings()
+            check("R-061 设置重载仍保留已提交的自定义波特率",
+                  window.baud.currentText() == "123457" and window._serial_opts()["baudrate"] == 123457)
+        window.baud.setCurrentText(original)
+        window._save_settings()
+        window._on_status(window.bridge.manager.status())
+        next_()
+
+    runner.add("R-061 custom_baud", step_custom_baud)
+    runner.add("R-059 launcher_remove", step_launcher_remove)
+    runner.add("R-060 launcher_instances", step_launcher_instances)
     runner.add("persist", step_persist)
     runner.add("combo", step_combo)
     runner.add("font", step_font)
@@ -1025,6 +1742,19 @@ def main() -> int:
     runner.add("logo", step_logo)
     runner.add("shell", step_shell)
     runner.add("menus", step_menus)
+    runner.add("R-049 视觉与选区交互", step_visual_interactions)
+    runner.add("R-054 performance", step_performance)
+    runner.add("R-055 serial_lifecycle", step_serial_lifecycle)
+    runner.add("R-055 serial_races", step_serial_races)
+    runner.add("R-056 group_unique", step_group_unique)
+    runner.add("R-057 connection_colours", step_connection_colours)
+    runner.add("R-058 motion_buttons", step_motion_buttons)
+
+    if "--only" in sys.argv:
+        target = sys.argv[sys.argv.index("--only") + 1]
+        runner.steps = [step for step in runner.steps if target in step[0]]
+        if not runner.steps:
+            raise ValueError(f"Unknown test step: {target}")
 
     runner.start()
     app.exec()

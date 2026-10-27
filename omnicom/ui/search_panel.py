@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -229,6 +229,21 @@ class SearchPanel(QWidget):
 
     def _options_changed(self, *_args) -> None:
         self.mode = self.mode_box.currentData() or "all"
+        self.run_search()
+
+    def search_selection(self, text: str) -> None:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        with QSignalBlocker(self.input), QSignalBlocker(self.match_box), QSignalBlocker(self.mode_box):
+            self.clear_all()
+            self.match_box.setCurrentIndex(self.match_box.findData("plain"))
+            self.mode_box.setCurrentIndex(self.mode_box.findData("any"))
+            self.mode = "any"
+            if len(lines) > 1:
+                self.keywords = list(dict.fromkeys(lines))
+                self._rebuild_chips()
+            elif lines:
+                self.input.setText(lines[0])
+        self._refresh_hint()
         self.run_search()
 
     def submit_input(self) -> None:

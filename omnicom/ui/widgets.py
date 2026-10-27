@@ -6,6 +6,7 @@ from typing import ClassVar
 
 from PySide6.QtCore import (
     Property,
+    QCoreApplication,
     QEasingCurve,
     QEvent,
     QPoint,
@@ -20,6 +21,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QKeyEvent,
     QLinearGradient,
     QPainter,
     QPainterPath,
@@ -35,6 +37,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QLayout,
     QPushButton,
+    QStyle,
+    QStyleOptionButton,
     QWidget,
 )
 
@@ -187,6 +191,7 @@ class SwitchRow(QWidget):
         layout.setContentsMargins(2, 3, 2, 3)
         layout.setSpacing(8)
         self.label = QLabel(text)
+        self.label.setWordWrap(True)
         self.label.setStyleSheet(f"color: {theme.INK2}; font-size: 12.5px;")
         if compact:
             layout.addWidget(self.label, 0)
@@ -377,7 +382,102 @@ class Chip(QWidget):
             f" border: 1px solid rgba(14, 148, 132, 82); border-radius: 10px; }}")
 
 
-class GlyphButton(QPushButton):
+class Button(QPushButton):
+    """Native button semantics with paint-only, event-driven motion."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._hover = 0.0
+        self._press = 0.0
+        self._hover_anim = QPropertyAnimation(self, b"hover", self)
+        self._press_anim = QPropertyAnimation(self, b"press", self)
+        for animation in (self._hover_anim, self._press_anim):
+            animation.setEasingCurve(QEasingCurve.OutCubic)
+        self.pressed.connect(self._press_in)
+        self.released.connect(self._press_out)
+
+    def _get_hover(self) -> float:
+        return self._hover
+
+    def _set_hover(self, value: float) -> None:
+        self._hover = value
+        self.update()
+
+    hover = Property(float, _get_hover, _set_hover)
+
+    def _get_press(self) -> float:
+        return self._press
+
+    def _set_press(self, value: float) -> None:
+        self._press = value
+        self.update()
+
+    press = Property(float, _get_press, _set_press)
+
+    @staticmethod
+    def _animate(animation, current: float, target: float, duration: int) -> None:
+        animation.stop()
+        if current == target:
+            return
+        animation.setDuration(duration)
+        animation.setStartValue(current)
+        animation.setEndValue(target)
+        animation.start()
+
+    def _press_in(self) -> None:
+        if self.isEnabled():
+            self._animate(self._press_anim, self._press, 1.0, 80)
+
+    def _press_out(self) -> None:
+        if self.isEnabled():
+            self._set_press(max(self._press, 0.45))
+            self._animate(self._press_anim, self._press, 0.0, 180)
+
+    def enterEvent(self, event) -> None:
+        if self.isEnabled():
+            self._animate(self._hover_anim, self._hover, 1.0, 140)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._animate(self._hover_anim, self._hover, 0.0, 140)
+        super().leaveEvent(event)
+
+    def _reset_motion(self) -> None:
+        self._hover_anim.stop()
+        self._press_anim.stop()
+        self._set_hover(0.0)
+        self._set_press(0.0)
+
+    def changeEvent(self, event) -> None:
+        if event.type() == QEvent.EnabledChange and not self.isEnabled():
+            self._reset_motion()
+        super().changeEvent(event)
+
+    def hideEvent(self, event) -> None:
+        self._reset_motion()
+        super().hideEvent(event)
+
+    def _apply_press_transform(self, painter: QPainter) -> None:
+        painter.translate(self.width() / 2.0, self.height() / 2.0)
+        scale = 1.0 - 0.07 * self._press
+        painter.scale(scale, scale)
+        painter.translate(-self.width() / 2.0, -self.height() / 2.0)
+
+    def paintEvent(self, event) -> None:
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        option.state &= ~(QStyle.State_MouseOver | QStyle.State_Sunken)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        self._apply_press_transform(painter)
+        self.style().drawControl(QStyle.CE_PushButton, option, painter, self)
+        if self._hover > 0 and self.isEnabled():
+            option.state |= QStyle.State_MouseOver
+            painter.setOpacity(self._hover)
+            self.style().drawControl(QStyle.CE_PushButton, option, painter, self)
+
+
+class GlyphButton(Button):
     """Title-bar button that draws its icon with QPainter.
 
     Text glyphs such as ``✕`` depend on a font that actually carries them; when
@@ -419,9 +519,28 @@ class GlyphButton(QPushButton):
         if object_name is None:
             object_name = "TopIconClose" if danger else "TopIcon"
         self.setObjectName(object_name)
+        self._glyph_size = size
+        self.setStyleSheet(
+            f"QPushButton {{ min-width: {size}px; max-width: {size}px;"
+            f" min-height: {size}px; max-height: {size}px; padding: 0; }}")
         self.setFixedSize(size, size)
         self.setCursor(Qt.PointingHandCursor)
         self.setFlat(True)
+        self._feedback_anim = self._hover_anim
+
+    def _get_feedback(self) -> float:
+        return self.hover
+
+    def _set_feedback(self, value: float) -> None:
+        self.hover = value
+
+    feedback = Property(float, _get_feedback, _set_feedback)
+
+    def sizeHint(self) -> QSize:
+        return QSize(self._glyph_size, self._glyph_size)
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
 
     def set_glyph(self, glyph: str) -> None:
         if glyph != self.glyph:
@@ -433,12 +552,17 @@ class GlyphButton(QPushButton):
             return QColor("#FFFFFF")
         if not self.isEnabled():
             return QColor(theme.DIM)
-        return QColor(theme.INK2)
+        base, accent = QColor(theme.INK2), QColor(theme.TEAL)
+        return QColor.fromRgbF(
+            base.redF() + (accent.redF() - base.redF()) * self.hover,
+            base.greenF() + (accent.greenF() - base.greenF()) * self.hover,
+            base.blueF() + (accent.blueF() - base.blueF()) * self.hover)
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)          # keeps the QSS hover/pressed wash
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
+        self._apply_press_transform(painter)
         pen = QPen(self._ink(), 1.4)
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
@@ -495,25 +619,11 @@ class GlyphButton(QPushButton):
                 painter.drawLine(int(sx), int(sy), int(ex), int(sy))
                 painter.drawLine(int(sx), int(sy), int(sx), int(ey))
         elif glyph == self.REFRESH:
-            # One open arc plus a two-stroke arrowhead at the arc's end.  The
-            # old version hard-coded the head against the bounding box, which
-            # left stray pixels outside the circle ("有点脏"); the head is now
-            # placed with trig so it always sits exactly on the arc (R-038).
-            import math
-
             rect = QRectF(cx - half, cy - half, half * 2, half * 2)
-            start_deg, span_deg = 55.0, 270.0
-            painter.drawArc(rect, int(start_deg * 16), int(span_deg * 16))
-            end_deg = start_deg + span_deg
-            angle = math.radians(end_deg)
-            tip_x = cx + half * math.cos(angle)
-            tip_y = cy - half * math.sin(angle)
-            head = half * 0.55
-            for delta in (60, 120):
-                a = math.radians(end_deg - delta)
-                painter.drawLine(
-                    QPointF(tip_x, tip_y),
-                    QPointF(tip_x + head * math.cos(a), tip_y - head * math.sin(a)))
+            painter.drawArc(rect, -75 * 16, -285 * 16)
+            tip = QPointF(cx + half, cy)
+            painter.drawLine(tip, QPointF(cx + half, cy - half * 0.8))
+            painter.drawLine(tip, QPointF(cx + half * 0.2, cy))
         elif glyph == self.FOLDER:
             path = QPainterPath()
             path.moveTo(cx - half, cy - half * 0.7)
@@ -620,6 +730,8 @@ class Combo(QComboBox):
     def __init__(self, parent=None, editable: bool = False) -> None:
         super().__init__(parent)
         self.setEditable(editable)
+        self.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.setMinimumContentsLength(1)
         self.setCursor(Qt.PointingHandCursor)
         self.setMaxVisibleItems(14)
         view = self.view()
@@ -638,6 +750,8 @@ class Combo(QComboBox):
         if editable and self.lineEdit() is not None:
             self.lineEdit().installEventFilter(self)
             self.lineEdit().setCursor(Qt.IBeamCursor)
+            view.installEventFilter(self)
+            container.installEventFilter(self)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -646,6 +760,8 @@ class Combo(QComboBox):
         self._chevron.raise_()
 
     def eventFilter(self, obj, event) -> bool:
+        if obj in (self.view(), self.view().window()) and self._edit_popup_key(event):
+            return True
         if obj is self.lineEdit() and event.type() == QEvent.MouseButtonRelease:
             # Click selects the whole value and opens the list: typing then
             # replaces the number instead of appending to it, which is what a
@@ -663,8 +779,34 @@ class Combo(QComboBox):
             return False
         return super().eventFilter(obj, event)
 
+    def _edit_popup_key(self, event) -> bool:
+        if (not self.isEditable() or event.type() != QEvent.KeyPress
+                or not self.view().isVisible()):
+            return False
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Escape,
+                           Qt.Key_Up, Qt.Key_Down, Qt.Key_PageUp, Qt.Key_PageDown,
+                           Qt.Key_Tab, Qt.Key_Backtab):
+            return False
+        if not event.text() and event.key() not in (Qt.Key_Backspace, Qt.Key_Delete):
+            return False
+        key = QKeyEvent(event.type(), event.key(), event.modifiers(), event.text(),
+                        event.isAutoRepeat(), event.count())
+        self.hidePopup()
+        editor = self.lineEdit()
+        editor.setFocus()
+        editor.selectAll()
+        QCoreApplication.sendEvent(editor, key)
+        return True
+
+    def keyPressEvent(self, event) -> None:
+        if not self._edit_popup_key(event):
+            super().keyPressEvent(event)
+
     def showPopup(self) -> None:
         super().showPopup()
+        if self.isEditable():
+            self.view().installEventFilter(self)
+            self.view().window().installEventFilter(self)
         self._chevron.set_open(True)
 
     def hidePopup(self) -> None:
@@ -719,7 +861,7 @@ class _Chevron(QWidget):
         painter.drawLine(QPointF(0, half * 0.55), QPointF(half, -half * 0.55))
 
 
-class ScrollBottomPill(QPushButton):
+class ScrollBottomPill(Button):
     """Floating "jump to latest" bubble, like the one web chat UIs show.
 
     Appears only while the view is scrolled away from the bottom, then fades +

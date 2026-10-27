@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QProgressBar,
-    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -22,6 +21,7 @@ from .. import paths
 from ..i18n import tr
 from . import theme
 from .log_view import LogView
+from .widgets import Button as QPushButton
 from .widgets import GlassFrame
 
 PROTOCOLS = [

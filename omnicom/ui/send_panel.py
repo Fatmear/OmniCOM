@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
-    QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -20,6 +19,7 @@ from PySide6.QtWidgets import (
 from ..commands import decode_escapes, parse_hex
 from ..i18n import tr
 from . import theme
+from .widgets import Button as QPushButton
 from .widgets import Combo, GlassFrame, ToggleSwitch
 
 LINE_ENDS = {"crlf": b"\r\n", "lf": b"\n", "cr": b"\r", "none": b""}
@@ -41,7 +41,7 @@ class SendPanel(GlassFrame):
     abortRequested = Signal()
 
     def __init__(self, parent=None) -> None:
-        super().__init__(parent, radius=18, shadow=True)
+        super().__init__(parent, radius=theme.RADIUS_CARD, shadow=False)
         self.setObjectName("SendPanel")
         self._timed = QTimer(self)
         self._timed.timeout.connect(self.emit_current)
@@ -70,7 +70,7 @@ class SendPanel(GlassFrame):
             f" padding: 6px 10px; }}"
             f"QPlainTextEdit#SendInput:focus {{ border: 1px solid {theme.TEAL}; }}")
         self.input.setPlaceholderText(tr("send.placeholder"))
-        self.input.setFixedHeight(64)
+        self.input.setMinimumHeight(64)
         self.input.sendTriggered.connect(self.emit_current)
         top.addWidget(self.input, 1)
 
@@ -80,7 +80,8 @@ class SendPanel(GlassFrame):
         self.btn_send.setObjectName("Primary")
         self.btn_send.setCursor(Qt.PointingHandCursor)
         self.btn_send.clicked.connect(self.emit_current)
-        side.addWidget(self.btn_send, 1)
+        side.addWidget(self.btn_send)
+        side.addStretch(1)
 
         opts = QHBoxLayout()
         opts.setSpacing(6)
@@ -103,7 +104,7 @@ class SendPanel(GlassFrame):
         opts.addLayout(hex_box)
         side.addLayout(opts)
         top.addLayout(side)
-        root.addLayout(top)
+        root.addLayout(top, 1)
 
         foot = QHBoxLayout()
         foot.setSpacing(8)
@@ -152,6 +153,10 @@ class SendPanel(GlassFrame):
 
         shortcut = QShortcut(QKeySequence("Ctrl+Return"), self.input)
         shortcut.activated.connect(self.emit_current)
+
+    def sizeHint(self) -> QSize:
+        hint = super().sizeHint()
+        return QSize(hint.width(), max(150, self.minimumSizeHint().height()))
 
     # ------------------------------------------------------------------ send
     def payload(self) -> tuple[bytes, str]:

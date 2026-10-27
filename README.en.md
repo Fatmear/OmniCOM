@@ -35,7 +35,9 @@ python -m ruff check .
 
 * Double-click `start.cmd`, or run `python run.py`. Add `--demo` for a virtual DEMO port.
 * Pick a port on the left, set the parameters, then press *Open port* - data starts appearing on the *Serial log* page.
+* Click the baud field and type a custom value. Enter or moving focus applies it; the dropdown still offers common rates.
 * Type in the box at the bottom and press Ctrl+Enter or *Send*. Line ending, HEX and timed send live to its right.
+* Drag the divider above the composer to grow the actual text editor; its height is restored on the next launch.
 
 ### 2. Serial log
 
@@ -45,6 +47,7 @@ python -m ruff check .
 * *HEX view* prints 16 bytes per line: offset, hex, ASCII.
 * *Save view* writes the log to a file. *Capture to file* writes the raw bytes in the background and never misses a byte, regardless of what the UI shows.
 * Right-click the log to copy, copy all, save, find or jump to latest.
+* The port button is neutral while disconnected and coloured only when connected. Opening and closing run in the background; the button is temporarily disabled.
 
 ### 3. Terminal
 
@@ -62,15 +65,17 @@ python -m ruff check .
 ### 5. Commands
 
 * Click a command to send it, or tick several and press *Send in order* (each keeps its own delay).
-* *Groups* organise them: the folder button creates one, groups take a note, and they collapse.
+* *Groups* organise them: the folder button creates one, groups take a note, and they collapse. Creating or renaming a group rejects existing names after trimming leading and trailing whitespace.
+* Each command and its send/edit/delete actions share one primary line. A colour strip shows selection; notes appear below in smaller text. Hover for full text and delay.
 * Every command supports a note, line ending, delay, timed repeat and HEX.
-* Right-click a command to move it to another group or export just that one; the save icon on a group header exports the whole group.
+* Right-click a command to move groups. Use the export button at the top to select commands or a group to export.
 * The exported JSON can be imported on another machine - groups merge automatically.
 * Pasting several lines creates several commands.
 
 ### 6. Search
 
 * Type a keyword and press Enter: it searches **the whole log, history included**, and lists hits as `line-number  text`.
+* Select log text and right-click Find to replace the old query and search literally. A multi-line selection matches any of its lines.
 * Double-click any row to jump to that line in the log; it flashes.
 * Modes: Plain / Fuzzy (characters in order) / Whole word / Regex, plus a *Match case* switch.
 * The expand arrow blows the results up to the full window; Esc exits.
@@ -79,7 +84,8 @@ python -m ruff check .
 
 * A plugin is a folder under `plugins/` or `omnicom-data/plugins/`; each one gets its own tab in the top bar.
 * Copy the whole folder to another machine's `plugins/`, press *Plugins → Reload* and it is installed.
-* Ships with *Launcher*: add your apps, see a badge with the running instance count, and choose between opening another window or switching to the existing one.
+* Ships with *Launcher*: every open app window gets its own icon. Click to switch to that exact window; hover to see its full title.
+* Right-click to open another window or remove the shortcut. Removal does not close the running app.
 
 ### 8. Preferences and language
 

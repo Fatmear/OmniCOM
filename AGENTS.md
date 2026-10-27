@@ -10,8 +10,8 @@ Rules
 - **Do not build or ship an .exe (R-019)**: corporate endpoint policy blocks self-built executables.
   Run from source: `start.cmd`, or `python run.py`, or `python run.py --demo` (虚拟串口).
 - Verify commands: `python tools/protocol_selftest.py` (X/Y/ZMODEM loopback, 23 checks),
-  `python tools/ui_selftest.py` (123 GUI acceptance checks incl. DEMO port),
-  `python tools/acceptance_test.py` (171 checks covering R-001..R-048 + `.artifacts/acceptance.json`),
+  `python tools/ui_selftest.py` (GUI acceptance checks incl. DEMO port),
+  `python tools/acceptance_test.py` (229 checks covering R-001..R-061 + `.artifacts/acceptance.json`),
   `python tools/ui_snapshot.py` (renders `.artifacts/ui.png` for visual review),
   `python tools/contrast_audit.py` (light-theme text contrast must stay >= 4.5:1).
   GUI checks must start with their `R-0xx` id — an un-mapped check fails the run.
@@ -58,3 +58,6 @@ Rules
 - Collapsing a command group must stay off the write path: call
   `store.update_group(..., notify=False)`, flip `setVisible` in place, and let `closeEvent` flush it
   (`R-041` / L-045). A 30 ms `os.replace` on the click path is a visible stutter.
+- GUI serial lifecycle calls go through `SerialBridge.open/close/update_opts`, not the manager
+  directly; driver calls and reader joins must stay off the GUI thread (R-055 / L-069).
+- Launcher process scans also run off-thread (L-070); response tests must span its 4 s refresh.

@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QObject, QThread, Signal
 
@@ -37,8 +38,40 @@ class SerialBridge(QObject):
 
     def __init__(self, demo: bool = False) -> None:
         super().__init__()
+        self._operation_lock = threading.Lock()
+        self._pending = 0
+        self._closing = False
+        self._operations = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="omnicom-port")
         self.manager = PortManager(self._dispatch, demo=demo)
         self.recorder = Recorder(paths.logs_dir(), self._dispatch)
+
+    def open(self, port: str, opts: dict) -> None:
+        self._submit(self.manager.open, port, dict(opts))
+
+    def close(self) -> None:
+        self._submit(self.manager.close)
+
+    def update_opts(self, opts: dict) -> None:
+        self._submit(self.manager.update_opts, dict(opts))
+
+    def _submit(self, operation, *args) -> None:
+        with self._operation_lock:
+            if self._closing:
+                return
+            self._pending += 1
+        self._dispatch({"t": "status", **self.manager.status()})
+        self._operations.submit(self._run_operation, operation, args)
+
+    def _run_operation(self, operation, args) -> None:
+        try:
+            operation(*args)
+        except Exception as exc:
+            self.notice.emit(str(exc), "error")
+        finally:
+            with self._operation_lock:
+                self._pending -= 1
+            self._dispatch({"t": "status", **self.manager.status()})
 
     # -- worker thread entry point -----------------------------------------
     def _dispatch(self, event: dict) -> None:
@@ -49,7 +82,9 @@ class SerialBridge(QObject):
                 self.recorder.write(data)
             self.rx.emit(time.time() * 1000.0, data)
         elif kind == "status":
-            self.status.emit(event)
+            with self._operation_lock:
+                busy = self._pending > 0
+            self.status.emit({**event, "busy": busy})
         elif kind == "ports":
             self.ports.emit(event.get("ports") or [])
         elif kind == "notice":
@@ -63,6 +98,9 @@ class SerialBridge(QObject):
         return self.manager.status()
 
     def shutdown(self) -> None:
+        with self._operation_lock:
+            self._closing = True
+        self._operations.shutdown(wait=True, cancel_futures=True)
         with contextlib.suppress(Exception):
             self.recorder.stop(silent=True)
         self.manager.shutdown()

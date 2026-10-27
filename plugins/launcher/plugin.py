@@ -21,7 +21,9 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
+import uuid
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
@@ -75,53 +77,100 @@ def _running_count(process_names: set[str]) -> int:
     return sum(1 for name in procs.values() if name.lower() in targets)
 
 
-def _focus_window(process_name: str) -> bool:
-    """Bring the first top-level window owned by ``process_name`` to the front."""
+def _windows_windows(processes: dict[int, str]) -> list[dict]:
+    if not sys.platform.startswith("win"):
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+        user32.EnumWindows.restype = wintypes.BOOL
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetWindow.restype = wintypes.HWND
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        found = []
+
+        def callback(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd) or user32.GetWindow(hwnd, 4):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value not in processes:
+                return True
+            title = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, title, len(title))
+            path = processes[pid.value]
+            handle = kernel32.OpenProcess(0x1000, False, pid.value)
+            if handle:
+                try:
+                    size = wintypes.DWORD(32768)
+                    buffer = ctypes.create_unicode_buffer(size.value)
+                    if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                        path = buffer.value
+                finally:
+                    kernel32.CloseHandle(handle)
+            found.append({"hwnd": int(hwnd), "pid": pid.value, "path": path,
+                          "title": title.value})
+            return True
+
+        user32.EnumWindows(callback_type(callback), 0)
+        return sorted(found, key=lambda window: (window["pid"], window["hwnd"]))
+    except Exception:
+        return []
+
+
+def _focus_window(window: dict) -> bool:
     if not sys.platform.startswith("win"):
         return False
     try:
         import ctypes
         from ctypes import wintypes
 
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-
-        target = process_name.lower()
-        found: list[int] = []
-
-        EnumWindowsProc = ctypes.WINFUNCTYPE(
-            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-
-        def callback(hwnd, _lparam):
-            if not user32.IsWindowVisible(hwnd):
-                return True
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length == 0:
-                return True
-            pid = wintypes.DWORD()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            handle = kernel32.OpenProcess(0x1000, False, pid.value)
-            if not handle:
-                return True
-            try:
-                size = wintypes.DWORD(1024)
-                buffer = ctypes.create_unicode_buffer(1024)
-                ok = kernel32.QueryFullProcessImageNameW(
-                    handle, 0, buffer, ctypes.byref(size))
-                if ok and os.path.basename(buffer.value).lower() == target:
-                    found.append(hwnd)
-            finally:
-                kernel32.CloseHandle(handle)
-            return True
-
-        user32.EnumWindows(EnumWindowsProc(callback), 0)
-        if not found:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.IsWindow.argtypes = [wintypes.HWND]
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.IsIconic.argtypes = [wintypes.HWND]
+        user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+        hwnd = int(window["hwnd"])
+        pid = wintypes.DWORD()
+        if not user32.IsWindow(hwnd):
             return False
-        hwnd = found[0]
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if pid.value != window["pid"]:
+            return False
         if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd, 9)          # SW_RESTORE
-        user32.SetForegroundWindow(hwnd)
-        return True
+            user32.ShowWindow(hwnd, 9)
+        if user32.SetForegroundWindow(hwnd) or user32.GetForegroundWindow() == hwnd:
+            return True
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        thread = kernel32.GetCurrentThreadId()
+        foreground = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+        attached = foreground != thread and user32.AttachThreadInput(thread, foreground, True)
+        try:
+            user32.BringWindowToTop(hwnd)
+            return bool(user32.SetForegroundWindow(hwnd) or user32.GetForegroundWindow() == hwnd)
+        finally:
+            if attached:
+                user32.AttachThreadInput(thread, foreground, False)
     except Exception:
         return False
 
@@ -169,10 +218,11 @@ class AppTile(QPushButton):
     activated = Signal(dict)          # app dict
     menuRequested = Signal(dict, object)   # app dict, global position
 
-    def __init__(self, app: dict, api, parent=None) -> None:
+    def __init__(self, app: dict, api, parent=None, instance: dict | None = None) -> None:
         super().__init__(parent)
         self.app = app
         self.api = api
+        self.instance = instance
         self._running = 0
         self.setObjectName("AppTile")
         self.setCursor(Qt.PointingHandCursor)
@@ -192,8 +242,11 @@ class AppTile(QPushButton):
         # override is the one thing the layout cannot take back.
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.setFixedSize(TILE_W, TILE_H)
-        self.setToolTip(app["path"])
-        self.clicked.connect(lambda: self.activated.emit(self.app))
+        self.setToolTip(f"{instance['title']}\n{app['path']}" if instance else app["path"])
+        self.clicked.connect(lambda: self.activated.emit(self._target()))
+
+    def _target(self) -> dict:
+        return {**self.app, "_window": self.instance} if self.instance else self.app
 
     def sizeHint(self) -> QSize:
         return QSize(TILE_W, TILE_H)
@@ -208,7 +261,7 @@ class AppTile(QPushButton):
         self.update()
 
     def contextMenuEvent(self, event) -> None:
-        self.menuRequested.emit(self.app, event.globalPos())
+        self.menuRequested.emit(self._target(), event.globalPos())
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
@@ -234,12 +287,17 @@ class AppTile(QPushButton):
 # page
 # --------------------------------------------------------------------------- #
 class LauncherPage(QWidget):
+    processesReady = Signal(dict)
+
     def __init__(self, api) -> None:
         super().__init__()
         self.api = api
         self.apps: list[dict] = self._load()
         self.tiles: list[AppTile] = []
         self._procs: dict[int, str] = {}
+        self._windows: list[dict] = []
+        self._refreshing = False
+        self.processesReady.connect(self._apply_processes)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -325,7 +383,10 @@ class LauncherPage(QWidget):
             with open(self._store_path(), encoding="utf-8") as handle:
                 raw = json.load(handle)
             if isinstance(raw, list):
-                return [item for item in raw if isinstance(item, dict) and item.get("path")]
+                apps = [item for item in raw if isinstance(item, dict) and item.get("path")]
+                for item in apps:
+                    item.setdefault("id", uuid.uuid4().hex)
+                return apps
         except (OSError, json.JSONDecodeError):
             pass
         return []
@@ -356,10 +417,13 @@ class LauncherPage(QWidget):
 
         width = self.host.width() or self.width() or 640
         columns = max(3, width // (TILE_W + 10))
-        for index, app in enumerate(self.apps):
-            tile = AppTile(app, self.api, self.host)
+        entries = [(app, instance) for app in self.apps
+                   for instance in (self._windows_of(app) or [None])]
+        for index, (app, instance) in enumerate(entries):
+            tile = AppTile(app, self.api, self.host, instance=instance)
             tile.activated.connect(self.launch)
             tile.menuRequested.connect(self._context_menu)
+            tile.set_running(1 if instance else 0)
             self.grid.addWidget(tile, index // columns, index % columns)
             self.tiles.append(tile)
         self._update_count()
@@ -399,20 +463,36 @@ class LauncherPage(QWidget):
         return set()
 
     def _running_of(self, app: dict) -> int:
-        names = self._processes_of(app)
-        if not names:
-            return 0
-        lowered = {name.lower() for name in names}
-        return sum(1 for name in self._procs.values() if name.lower() in lowered)
+        return len(self._windows_of(app))
+
+    def _windows_of(self, app: dict) -> list[dict]:
+        names = {name.lower() for name in self._processes_of(app)}
+        return [window for window in self._windows
+                if os.path.basename(window["path"]).lower() in names]
 
     def refresh_running(self) -> None:
+        if self._refreshing:
+            return
+        self._refreshing = True
+        threading.Thread(target=self._scan_processes, name="omnicom-processes",
+                         daemon=True).start()
+
+    def _scan_processes(self) -> None:
         procs = _windows_processes()
-        if procs or not self._procs:
-            self._procs = procs
-        for tile in self.tiles:
-            if isinstance(tile, AppTile):
-                tile.set_running(self._running_of(tile.app))
-        self._update_count()
+        windows = _windows_windows(procs)
+        with contextlib.suppress(RuntimeError):
+            self.processesReady.emit({"processes": procs, "windows": windows})
+
+    def _apply_processes(self, snapshot: dict) -> None:
+        self._refreshing = False
+        self._procs = snapshot["processes"]
+        windows = snapshot["windows"]
+        changed = windows != self._windows
+        self._windows = windows
+        if changed:
+            self._rebuild()
+        else:
+            self._update_count()
 
     # ---------------------------------------------------------------- launch
     def add_app(self) -> None:
@@ -423,6 +503,7 @@ class LauncherPage(QWidget):
         if not path:
             return
         self.apps.append({
+            "id": uuid.uuid4().hex,
             "path": path,
             "name": os.path.splitext(os.path.basename(path))[0],
             "args": "",
@@ -437,6 +518,9 @@ class LauncherPage(QWidget):
                                    f"Added {os.path.basename(path)}"), "ok")
 
     def launch(self, app: dict, force_new: bool = False) -> None:
+        if app.get("_window") and not force_new:
+            self._activate_window(app["_window"])
+            return
         running = self._running_of(app)
         if running and not force_new:
             self._ask_instance(app, running)
@@ -470,23 +554,26 @@ class LauncherPage(QWidget):
         header.setEnabled(False)
         menu.addSeparator()
         open_new = menu.addAction(self.api.t("再打开一个新窗口", "Open another window"))
-        focus = menu.addAction(self.api.t("切换到已打开的窗口", "Switch to the open window"))
+        actions = {menu.addAction(instance["title"]): instance
+                   for instance in self._windows_of(app)}
         chosen = menu.exec(self.cursor().pos())
-        if chosen is focus:
-            names = self._processes_of(app)
-            for name in names:
-                if _focus_window(name):
-                    self.api.notify(self.api.t(f"已切换到 {app.get('name')}",
-                                               f"Switched to {app.get('name')}"), "ok")
-                    return
-            self.api.notify(self.api.t("没找到可切换的窗口，已为你打开新的",
-                                       "No focusable window found - opening a new one"), "warn")
-            self._spawn(app)
+        if chosen in actions:
+            self._activate_window(actions[chosen])
         elif chosen is open_new:
             self._spawn(app)
 
+    def _activate_window(self, instance: dict) -> None:
+        if not _focus_window(instance):
+            self.api.notify(self.api.t("窗口已关闭或无法切换，请等待列表刷新",
+                                       "Window closed or unavailable. Wait for the list to refresh."), "warn")
+            self.refresh_running()
+
     # ---------------------------------------------------------------- context
     def _context_menu(self, app: dict, position) -> None:
+        instance = app.get("_window")
+        app = next((item for item in self.apps if item["id"] == app.get("id")), None)
+        if app is None:
+            return
         menu = QMenu(self)
         launch = menu.addAction(self.api.t("打开", "Open"))
         focus = menu.addAction(self.api.t("切换到已打开窗口", "Switch to window"))
@@ -499,16 +586,18 @@ class LauncherPage(QWidget):
         if chosen is launch:
             self.launch(app, force_new=True)
         elif chosen is focus:
-            for name in self._processes_of(app):
-                if _focus_window(name):
-                    return
-            self.api.notify(self.api.t("该程序当前没有可切换的窗口",
-                                       "That app has no window to switch to"), "warn")
+            if instance:
+                self._activate_window(instance)
+            elif self._windows_of(app):
+                self._ask_instance(app, self._running_of(app))
+            else:
+                self.api.notify(self.api.t("该程序当前没有可切换的窗口",
+                                           "That app has no window to switch to"), "warn")
         elif chosen is locate:
             with contextlib.suppress(Exception):
                 subprocess.Popen(["explorer", "/select,", app["path"]])
         elif chosen is remove:
-            self.apps = [item for item in self.apps if item is not app]
+            self.apps = [item for item in self.apps if item["id"] != app["id"]]
             self._save()
             self._rebuild()
         elif chosen is rename:

@@ -193,7 +193,8 @@ class PortManager:
         self._emit = emit
         self.demo = demo
         self._lock = threading.RLock()
-        self._open_lock = threading.Lock()
+        self._open_lock = threading.RLock()
+        self._generation = 0
         self._ser = None
         self._reader: threading.Thread | None = None
         self._reader_stop = threading.Event()
@@ -258,38 +259,49 @@ class PortManager:
                 identity = (item.get("serial") or "", item.get("vid"), item.get("pid"))
                 break
         with self._lock:
+            self._generation += 1
+            generation = self._generation
             self._want = port
             self._opts = merged
             self._identity = identity
             self._last_error = None
             self._reconnecting = False
-        self._close_hardware(silent=True)
-        self._open_now(port, merged, announce=True)
+        with self._open_lock:
+            if generation != self._generation or self._stopping:
+                return
+            self._close_hardware(silent=True)
+            self._open_now(port, merged, announce=True, generation=generation)
 
     def close(self) -> None:
         with self._lock:
+            self._generation += 1
+            generation = self._generation
             self._want = None
             self._reconnecting = False
             self._identity = None
-        self._close_hardware(silent=False)
+        with self._open_lock:
+            if generation != self._generation:
+                return
+            self._close_hardware(silent=False)
         self._emit_status()
 
     def _close_hardware(self, silent: bool) -> None:
-        self._reader_stop.set()
-        with self._lock:
-            ser, self._ser = self._ser, None
-            self._port = None
-        if ser is not None:
-            with contextlib.suppress(Exception):
-                ser.close()
-        reader = self._reader
-        if reader is not None and reader.is_alive() and reader is not threading.current_thread():
-            reader.join(0.5)
-        self._reader = None
-        if not silent:
-            self._drain_raw()
+        with self._open_lock:
+            self._reader_stop.set()
+            with self._lock:
+                ser, self._ser = self._ser, None
+                reader, self._reader = self._reader, None
+                self._port = None
+            if ser is not None:
+                with contextlib.suppress(Exception):
+                    ser.close()
+            if reader is not None and reader.is_alive() and reader is not threading.current_thread():
+                reader.join(0.5)
+            if not silent:
+                self._drain_raw()
 
-    def _open_now(self, port: str, opts: dict, announce: bool) -> bool:
+    def _open_now(self, port: str, opts: dict, announce: bool,
+                  generation: int | None = None) -> bool:
         if port != DEMO_PORT and serial is None:
             self._last_error = "缺少 pyserial，请执行 pip install -r requirements.txt"
             self._emit({"t": "notice", "level": "error", "text": self._last_error})
@@ -297,54 +309,69 @@ class PortManager:
         if not self._open_lock.acquire(blocking=False):
             return False
         try:
-            if port == DEMO_PORT:
-                handle = DemoDevice()
-            else:
-                handle = serial.Serial(
-                    port=port,
-                    baudrate=int(opts["baudrate"]),
-                    bytesize=int(opts["bytesize"]),
-                    parity=_PARITY.get(str(opts["parity"]).upper(), "N"),
-                    stopbits=float(opts["stopbits"]),
-                    timeout=0.05,
-                    write_timeout=5.0,
-                    rtscts=bool(opts.get("rtscts")),
-                    xonxoff=bool(opts.get("xonxoff")),
-                    dsrdtr=bool(opts.get("dsrdtr")),
-                    exclusive=True,
-                )
+            with self._lock:
+                if generation is None:
+                    generation = self._generation
+                if self._stopping or not self._want or generation != self._generation:
+                    return False
+                if self._ser is not None:
+                    return self._port == port
             try:
-                handle.dtr = bool(opts.get("dtr", True))
-                handle.rts = bool(opts.get("rts", True))
-            except Exception:
-                pass
-            with contextlib.suppress(Exception):
-                handle.reset_input_buffer()
-        except Exception as exc:
-            self._last_error = _friendly_error(exc, port)
-            self._emit({"t": "notice", "level": "warn", "text": self._last_error})
+                if port == DEMO_PORT:
+                    handle = DemoDevice()
+                else:
+                    handle = serial.Serial(
+                        port=port,
+                        baudrate=int(opts["baudrate"]),
+                        bytesize=int(opts["bytesize"]),
+                        parity=_PARITY.get(str(opts["parity"]).upper(), "N"),
+                        stopbits=float(opts["stopbits"]),
+                        timeout=0.05,
+                        write_timeout=5.0,
+                        rtscts=bool(opts.get("rtscts")),
+                        xonxoff=bool(opts.get("xonxoff")),
+                        dsrdtr=bool(opts.get("dsrdtr")),
+                        exclusive=True,
+                    )
+                with contextlib.suppress(Exception):
+                    handle.dtr = bool(opts.get("dtr", True))
+                    handle.rts = bool(opts.get("rts", True))
+                with contextlib.suppress(Exception):
+                    handle.reset_input_buffer()
+            except Exception as exc:
+                with self._lock:
+                    if generation != self._generation or self._stopping:
+                        return False
+                    self._last_error = _friendly_error(exc, port)
+                self._emit({"t": "notice", "level": "warn", "text": self._last_error})
+                self._emit_status()
+                return False
+
+            with self._lock:
+                cancelled = generation != self._generation or self._stopping or not self._want
+                if not cancelled:
+                    self._reader_stop = threading.Event()
+                    self._ser = handle
+                    self._port = port
+                    self._last_error = None
+                    self._reconnecting = False
+                    self._opened_at = time.time()
+                    self._drain_raw()
+            if cancelled:
+                with contextlib.suppress(Exception):
+                    handle.close()
+                return False
+            reader = threading.Thread(target=self._reader_loop, args=(handle, self._reader_stop),
+                                      name="omnicom-reader", daemon=True)
+            self._reader = reader
+            reader.start()
+            if announce:
+                self._emit({"t": "notice", "level": "ok",
+                            "text": f"已打开 {port} @ {opts['baudrate']}"})
             self._emit_status()
-            return False
+            return True
         finally:
             self._open_lock.release()
-
-        self._reader_stop = threading.Event()
-        with self._lock:
-            self._ser = handle
-            self._port = port
-            self._last_error = None
-            self._reconnecting = False
-            self._opened_at = time.time()
-            self._drain_raw()
-        reader = threading.Thread(target=self._reader_loop, args=(handle, self._reader_stop),
-                                  name="omnicom-reader", daemon=True)
-        self._reader = reader
-        reader.start()
-        if announce:
-            self._emit({"t": "notice", "level": "ok",
-                        "text": f"已打开 {port} @ {opts['baudrate']}"})
-        self._emit_status()
-        return True
 
     # ------------------------------------------------------------------ reader
     def _reader_loop(self, handle, stop: threading.Event) -> None:
@@ -353,7 +380,8 @@ class PortManager:
                 waiting = handle.in_waiting
                 data = handle.read(waiting if waiting else 1)
             except Exception as exc:
-                self._handle_loss(exc)
+                if not stop.is_set():
+                    self._handle_loss(exc, handle)
                 return
             if not data:
                 continue
@@ -364,14 +392,16 @@ class PortManager:
             else:
                 self._emit({"t": "rx", "d": data})
 
-    def _handle_loss(self, exc: Exception) -> None:
-        port = self._want or "串口"
-        present = self._port_present(port)
+    def _handle_loss(self, exc: Exception, handle=None) -> None:
         with self._lock:
+            if self._ser is None or (handle is not None and handle is not self._ser):
+                return
+            port = self._want or "串口"
+            present = self._port_present(port)
             ser, self._ser = self._ser, None
             self._port = None
             self._last_error = _friendly_error(exc, port, present)
-            auto = bool(self._opts.get("autoReconnect", True))
+            auto = bool(self._want and self._opts.get("autoReconnect", True))
             # Enter the retry state immediately, otherwise the UI flashes
             # "连接失败" for the whole time the device is being re-plugged.
             self._reconnecting = auto
@@ -418,8 +448,12 @@ class PortManager:
                     target = self._resolve_target(want, ports)
                     if target:
                         with self._lock:
+                            if self._want != want or self._ser is not None:
+                                continue
+                            generation = self._generation
                             self._reconnecting = True
-                        if self._open_now(target, self._opts, announce=False):
+                        if self._open_now(target, self._opts, announce=False,
+                                          generation=generation):
                             self._retry_notice = 0.0
                         else:
                             self._notify_retry_throttled()
@@ -459,7 +493,7 @@ class PortManager:
             written = handle.write(data)
             handle.flush()
         except Exception as exc:
-            self._handle_loss(exc)
+            self._handle_loss(exc, handle)
             raise PortNotOpen(str(exc)) from exc
         self.tx_bytes += len(data)
         self.tx_ops += 1
@@ -546,7 +580,11 @@ class PortManager:
         self._emit_status()
 
     def shutdown(self) -> None:
-        self._stopping = True
+        with self._lock:
+            self._stopping = True
+            self._generation += 1
+            self._want = None
+            self._reconnecting = False
         self._close_hardware(silent=True)
 
 
