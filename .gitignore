@@ -1,0 +1,17 @@
+# build / runtime artefacts
+build/
+dist/
+*.spec
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.artifacts/
+
+# per-user data (logs, received files, settings)
+omnicom-data/
+
+# editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
