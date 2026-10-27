@@ -9,14 +9,15 @@ Exit code 0 means all checks passed.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import sys
 import tempfile
-import time
 import traceback
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("OMNICOM_SETTINGS_SUFFIX", "-test")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -25,10 +26,9 @@ if ROOT not in sys.path:
 from PySide6.QtCore import QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from omnicom import paths  # noqa: E402
+from omnicom.ui.commands_panel import CommandRow  # noqa: E402
 from omnicom.ui.main_window import OmniWindow  # noqa: E402
 from omnicom.ui.theme import app_stylesheet  # noqa: E402
-from omnicom.ui.commands_panel import CommandRow  # noqa: E402
 
 RESULTS: list[tuple[bool, str, str]] = []
 STAMP_RE = re.compile(r"^\d{2}:\d{2}:\d{2}\.\d{3} ")
@@ -43,7 +43,7 @@ class Runner:
     def __init__(self) -> None:
         self.steps: list[tuple[str, callable, int]] = []
 
-    def add(self, label: str, func, delay: int = 0) -> "Runner":
+    def add(self, label: str, func, delay: int = 0) -> Runner:
         self.steps.append((label, func, delay))
         return self
 
@@ -59,7 +59,7 @@ class Runner:
         def go() -> None:
             try:
                 func(self.advance)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 check(label, False, "exception: " + traceback.format_exc().splitlines()[-1])
                 self.advance()
 
@@ -246,7 +246,6 @@ def main() -> int:
         window.commands_panel.import_text(paste)
         after = len(window.command_store.items)
         check("R-009 粘贴多行自动填入命令列表", after - before == 5, f"{before} -> {after}")
-        from omnicom.ui.commands_panel import CommandRow
         rows = window.commands_panel.findChildren(CommandRow)
         check("R-008 命令列表已渲染为可操作行", len(rows) == after, f"{len(rows)} 行")
         item = window.command_store.items[-1]
@@ -308,33 +307,31 @@ def main() -> int:
     # ------------------------------------------------------------- send file
     def step_send_file(next_):
         payload = bytes(range(256)) * 40     # 10 KB
-        handle = tempfile.NamedTemporaryFile(delete=False, suffix=".bin")
-        handle.write(payload)
-        handle.close()
-        state["file"] = handle.name
+        # The file must outlive this call, so delete=False + explicit path.
+        sample = os.path.join(tempfile.mkdtemp(prefix="omnicom-file-"), "payload.bin")
+        with open(sample, "wb") as handle:
+            handle.write(payload)
+        state["file"] = sample
         state["file_size"] = len(payload)
         state["tx_file"] = window.bridge.manager.tx_bytes
-        window.send_file(handle.name)
+        window.send_file(sample)
         wait(1800, next_)
 
     def step_send_file_check(next_):
         grew = window.bridge.manager.tx_bytes - state["tx_file"]
         check("R-006 文件按原始字节发送", grew == state["file_size"],
               f"+{grew} / {state['file_size']}")
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(state["file"])
-        except OSError:
-            pass
         next_()
 
     # ------------------------------------------------------------------- misc
     def step_sidebar(next_):
-        height_before = window.search_block.height()
         window.commands_panel.toggle_collapsed()
         wait(300, next_)
 
     def step_sidebar_check(next_):
-        check("侧栏：折叠扩展命令后搜索区变高",
+        check("R-008 侧栏：折叠扩展命令后搜索区变高",
               window.search_block.height() > 0 and not window.commands_panel.body.isVisible(),
               f"search={window.search_block.height()}px")
         window.commands_panel.toggle_collapsed()
@@ -347,7 +344,29 @@ def main() -> int:
         check("R-008 命令列表持久化到磁盘",
               len(reloaded.items) == len(window.command_store.items),
               f"{len(reloaded.items)} 条")
-        check("侧栏整体可隐藏", hasattr(window, "toggle_sidebar"))
+        # -- 侧栏显隐必须是真实行为，不能只查有没有这个方法
+        side = window._sidebar_widget
+        window.toggle_sidebar()
+        app.processEvents()
+        hid = side.isHidden() and not side.isVisible()
+        window.toggle_sidebar()
+        app.processEvents()
+        back = not side.isHidden() and side.isVisible()
+        check("R-008 侧栏整体可隐藏并可恢复", hid and back, f"hide={hid} show={back}")
+
+        # -- 测试隔离：UI 状态不得写进用户真实配置
+        check("R-008 测试运行使用独立配置（不污染用户设置）",
+              window.settings.applicationName() == "OmniCOM-test",
+              window.settings.applicationName())
+
+        # -- isHidden 语义：窗口自身隐藏不能被误判成"侧栏被关掉"
+        window.hide()
+        app.processEvents()
+        semantics = not side.isVisible() and not side.isHidden()
+        window.show()
+        app.processEvents()
+        check("R-008 侧栏显隐按 isHidden 判定（窗口隐藏不误判）", semantics,
+              f"visible={side.isVisible()} hidden={side.isHidden()}")
         next_()
 
     runner.add("ports", step_ports)

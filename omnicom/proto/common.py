@@ -9,7 +9,7 @@ agnostic is what makes the loopback harness possible without hardware.
 from __future__ import annotations
 
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 # Shared control bytes
 SOH = 0x01
@@ -74,7 +74,7 @@ class ByteReader:
         return len(self._pushback) + (len(self._buf) - self._pos)
 
     # -- public ------------------------------------------------------------
-    def getbyte(self, timeout: float = 1.0) -> Optional[int]:
+    def getbyte(self, timeout: float = 1.0) -> int | None:
         if self._pushback:
             return self._pushback.pop()
         if not self._fill(timeout):
@@ -133,9 +133,9 @@ def _noop(*_args, **_kwargs) -> None:
     return None
 
 
-def progress_cb(value: Optional[Progress]) -> Progress:
+def progress_cb(value: Progress | None) -> Progress:
     return value or _noop
 
 
-def logger_cb(value: Optional[Logger]) -> Logger:
+def logger_cb(value: Logger | None) -> Logger:
     return value or _noop

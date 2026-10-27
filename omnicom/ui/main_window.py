@@ -7,18 +7,30 @@ import os
 import subprocess
 import sys
 import time
-from typing import Optional
 
-from PySide6.QtCore import QEvent, QPoint, QSettings, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QBrush, QColor, QGuiApplication, QLinearGradient, QPainter,
-                           QRadialGradient)
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame,
-                               QHBoxLayout, QLabel, QMainWindow, QPushButton, QScrollArea,
-                               QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtCore import QPoint, QSettings, Qt, QTimer
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QPainter,
+)
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QComboBox,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QScrollArea,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .. import __version__, paths
 from ..commands import CommandStore
-from ..serial_port import DEMO_PORT
 from . import theme
 from .commands_panel import CommandsPanel
 from .log_view import LogView
@@ -27,6 +39,22 @@ from .send_panel import SendPanel
 from .transfer_panel import TransferPanel
 from .widgets import Badge, GlassFrame, SectionTitle, StatusPill, SwitchRow, Toast
 from .workers import SerialBridge, TransferWorker
+
+SETTINGS_ORG = "OmniCOM"
+SETTINGS_APP = "OmniCOM"
+
+
+def ui_settings() -> QSettings:
+    """QSettings holding persisted UI state.
+
+    ``OMNICOM_SETTINGS_SUFFIX`` gives test runs (``tools/*.py``) their own
+    store, so a harness that deliberately hides the sidebar or resizes the
+    window cannot leak that state into the next harness - or into the user's
+    real session.
+    """
+    suffix = os.environ.get("OMNICOM_SETTINGS_SUFFIX", "")
+    return QSettings(SETTINGS_ORG, f"{SETTINGS_APP}{suffix}")
+
 
 BAUD_RATES = ["9600", "19200", "38400", "57600", "115200", "230400", "460800",
               "921600", "1000000", "1500000", "2000000", "3000000"]
@@ -55,7 +83,7 @@ def human_bytes(value: float) -> str:
 class Aurora(QWidget):
     """Solid backdrop — flat colour only, no grid, no blobs (R-020)."""
 
-    def paintEvent(self, event) -> None:  # noqa: N802
+    def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setPen(Qt.NoPen)
@@ -66,10 +94,10 @@ class Aurora(QWidget):
 class TitleBar(GlassFrame):
     """Single glass bar: brand, page tabs, connection state, counters, controls."""
 
-    def __init__(self, window: "OmniWindow") -> None:
+    def __init__(self, window: OmniWindow) -> None:
         super().__init__(None, radius=16, strong=True, shadow=True)
         self.window_ref = window
-        self._drag: Optional[QPoint] = None
+        self._drag: QPoint | None = None
         self.setFixedHeight(62)
 
         layout = QHBoxLayout(self)
@@ -181,22 +209,22 @@ class TitleBar(GlassFrame):
             f'<span style="color:#C4B5FD">{human_size(tx)}</span>')
 
     # -- window drag --------------------------------------------------------
-    def mousePressEvent(self, event) -> None:  # noqa: N802
+    def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             self._drag = event.globalPosition().toPoint() - self.window_ref.frameGeometry().topLeft()
 
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+    def mouseMoveEvent(self, event) -> None:
         if self._drag is not None and event.buttons() & Qt.LeftButton:
             if self.window_ref.isMaximized():
                 self.window_ref.showNormal()
                 self._drag = QPoint(self.window_ref.width() // 2, 30)
             self.window_ref.move(event.globalPosition().toPoint() - self._drag)
 
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+    def mouseReleaseEvent(self, event) -> None:
         self._drag = None
         super().mouseReleaseEvent(event)
 
-    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+    def mouseDoubleClickEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             self.window_ref.toggle_maximize()
 
@@ -222,7 +250,7 @@ class OmniWindow(QMainWindow):
         self.setMinimumSize(1020, 640)
         self.resize(1440, 900)
 
-        self.settings = QSettings("OmniCOM", "OmniCOM")
+        self.settings = ui_settings()
         self.bridge = SerialBridge(demo=demo)
         self.command_store = CommandStore(command_path)
         self.demo = demo
@@ -240,7 +268,7 @@ class OmniWindow(QMainWindow):
         self._replay_queue: list[tuple[float, bytes]] = []
         self._appended = 0
         self._status = {}
-        self._transfer: Optional[TransferWorker] = None
+        self._transfer: TransferWorker | None = None
         self._snapshot_text = ""
 
         self._build_ui()
@@ -553,7 +581,7 @@ class OmniWindow(QMainWindow):
             self.search_block.setMaximumHeight(self.search_panel.header.height() + 6)
 
     def toggle_sidebar(self) -> None:
-        visible = not self._sidebar_widget.isVisible()
+        visible = self._sidebar_widget.isHidden()
         self._sidebar_widget.setVisible(visible)
         self.settings.setValue("ui/sidebar", "1" if visible else "0")
 
@@ -772,7 +800,7 @@ class OmniWindow(QMainWindow):
             if self._backlog_bytes > MAX_BACKLOG:
                 # Surface the loss instead of hiding it (R-017).
                 while self._backlog_bytes > MAX_BACKLOG and len(self._backlog) > 1:
-                    old_ts, old = self._backlog.pop(0)
+                    _old_ts, old = self._backlog.pop(0)
                     self._backlog_bytes -= len(old)
                     self._lost_bytes += len(old)
             self._update_pause_badge()
@@ -951,7 +979,7 @@ class OmniWindow(QMainWindow):
             return
         try:
             self.bridge.manager.write(payload)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self.notify(str(exc), "warn")
             return
         if self.row_echo.isChecked():
@@ -1075,24 +1103,25 @@ class OmniWindow(QMainWindow):
             self.record_hint.setText("记录在后台进行，暂停打印也不会漏字节。")
 
     def _on_upload(self, event: dict) -> None:
-        # progress of a raw file send (PortManager reports it here)
+        # Progress of a raw file send. Completion is reported by RawFileWorker's
+        # own signals, so nothing else belongs here: an earlier version compared
+        # the whole event dict against the strings "done"/"error" (never true)
+        # and referenced an undefined `state` inside that dead branch.
         if event.get("state") == "running":
             self.send_panel.set_file_progress(event.get("sent", 0), event.get("total", 0),
                                               event.get("name", ""))
-        elif event in ("done", "error"):
-            self._raw_done(state == "done", event.get("message") or "文件发送完成")
 
     def open_data_dir(self) -> None:
         path = self.bridge.recorder.state().get("path") or paths.logs_dir()
         target = os.path.dirname(path) if os.path.isfile(path) else paths.data_dir()
         try:
             if sys.platform.startswith("win"):
-                os.startfile(target)  # noqa: S606 - open the folder for the user
+                os.startfile(target)
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", target])
             else:
                 subprocess.Popen(["xdg-open", target])
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self.notify(f"打开目录失败：{exc}", "warn")
 
     def save_view(self) -> None:
@@ -1131,10 +1160,10 @@ class OmniWindow(QMainWindow):
         else:
             self.showMaximized()
 
-    def closeEvent(self, event) -> None:  # noqa: N802
+    def closeEvent(self, event) -> None:
         self.settings.setValue("ui/geometry", self.saveGeometry())
         self._save_settings()
-        self.settings.setValue("ui/sidebar", "1" if self._sidebar_widget.isVisible() else "0")
+        self.settings.setValue("ui/sidebar", "0" if self._sidebar_widget.isHidden() else "1")
         if self._transfer is not None and self._transfer.isRunning():
             self._transfer.cancel()
             self._transfer.wait(2000)

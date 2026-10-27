@@ -14,12 +14,11 @@ import queue
 import random
 import tempfile
 import threading
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from .proto import xmodem, ymodem, zmodem
 from .proto.common import Link
 from .proto.crc import crc16, crc16_seal, crc32, crc32_seal
-
 
 # ------------------------------------------------------------------ harness
 
@@ -27,7 +26,7 @@ class Pipe:
     """One-way byte pipe with 64-byte fragmentation."""
 
     def __init__(self) -> None:
-        self.queue: "queue.Queue[bytes]" = queue.Queue()
+        self.queue: queue.Queue[bytes] = queue.Queue()
 
     def put(self, data: bytes) -> None:
         if not data:
@@ -82,7 +81,7 @@ def run_pair(send_fn: Callable[[Link], dict], recv_fn: Callable[[Link], dict],
     def worker() -> None:
         try:
             result.update(send_fn(sender_link) or {})
-        except BaseException as exc:  # noqa: BLE001 - report anything
+        except BaseException as exc:
             errors.append(exc)
 
     thread = threading.Thread(target=worker, daemon=True)
@@ -117,7 +116,7 @@ def _add(checks: list[dict], name: str, ok: bool, detail: object = None) -> None
     checks.append({"name": name, "ok": bool(ok), "detail": detail})
 
 
-def run_protocol_checks(verbose: Optional[Callable[[str], None]] = None) -> list[dict]:
+def run_protocol_checks(verbose: Callable[[str], None] | None = None) -> list[dict]:
     """Return a list of ``{name, ok, detail}`` for the X/Y/ZMODEM engines."""
     checks: list[dict] = []
 
@@ -154,7 +153,7 @@ def run_protocol_checks(verbose: Optional[Callable[[str], None]] = None) -> list
             _add(checks, f"{name} 内容一致", got == data,
                  f"rx={len(received.get('data') or b'')}")
             _add(checks, f"{name} 计数一致", sent.get("bytes") == len(data), str(sent.get("bytes")))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _add(checks, f"{name} 内容一致", False, f"{type(exc).__name__}: {exc}")
 
     # -- YMODEM
@@ -173,7 +172,7 @@ def run_protocol_checks(verbose: Optional[Callable[[str], None]] = None) -> list
         _add(checks, "YMODEM 内容一致", bool(files) and files[0]["data"] == ydata,
              f"rx={len(files[0]['data']) if files else 0}")
         _add(checks, "YMODEM 发送计数", sent.get("bytes") == len(ydata), sent.get("bytes"))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         _add(checks, "YMODEM 内容一致", False, f"{type(exc).__name__}: {exc}")
 
     # -- ZMODEM
@@ -195,7 +194,7 @@ def run_protocol_checks(verbose: Optional[Callable[[str], None]] = None) -> list
                         disk = handle.read()
                     _add(checks, f"{name} 落盘内容一致", disk == data, f"rx={len(disk)}")
                 _add(checks, f"{name} 发送计数", sent.get("bytes") == len(data), sent.get("bytes"))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _add(checks, f"{name} 落盘内容一致", False, f"{type(exc).__name__}: {exc}")
 
     return checks

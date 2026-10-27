@@ -1,0 +1,46 @@
+# Tooling configuration for OmniCOM.
+#
+# The editor surfaces ruff/Pylance style diagnostics.  Those are the project
+# conventions, recorded here so they apply in every editor and in CI:
+#
+#   * BLE001 (blind `except Exception`) is IGNORED on purpose.  This program has
+#     long-lived threads (serial reader, port monitor, Qt workers) whose whole
+#     job is to survive a device being unplugged mid-write.  Letting an exception
+#     escape one of those loops would silently stop reception, which violates
+#     R-017 (never lose bytes).  The broad catches are commented at each site.
+#
+#   * E501 (line length) is IGNORED: the UI and the protocol logs are full of
+#     Chinese strings, whose visual width is roughly double the character count,
+#     so a column limit would flag readable lines and pass unreadable ones.
+#     line-length is kept at 100 for anything that does honour it.
+#
+#   * UP007 (`X | None`) is enforced (Python >= 3.13 only, see requirements).
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = ["build", "dist", ".artifacts", "omnicom-data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "BLE", "RUF", "SIM", "C4"]
+ignore = [
+  "E501",    # see the header note: CJK strings make column limits misleading
+  "BLE001",  # deliberate: long-lived worker threads must never die
+  "RUF001",  # ambiguous unicode inside Chinese UI strings ("×" etc.)
+  "RUF002",
+  "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Verification scripts print progress and use assert-heavy flows.
+"tools/*.py" = ["SIM117", "RUF015"]
+
+[tool.mypy]
+python_version = "3.13"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+exclude = ["build/", "dist/", "\\.artifacts/", "omnicom-data/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -7,7 +7,7 @@ code run inside the Qt worker thread and inside a headless CLI invocation.
 from __future__ import annotations
 
 import os
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from . import paths
 from .proto import xmodem, ymodem, zmodem
@@ -48,7 +48,7 @@ def safe_name(name: str, fallback: str = "received.bin") -> str:
     return cleaned or fallback
 
 
-def save_bytes(name: str, data: bytes, directory: Optional[str] = None,
+def save_bytes(name: str, data: bytes, directory: str | None = None,
                dedupe: bool = True) -> dict:
     """Write received bytes into the data directory without overwriting."""
     target_dir = directory or paths.received_dir()
@@ -67,10 +67,10 @@ def save_bytes(name: str, data: bytes, directory: Optional[str] = None,
 
 def run_transfer(manager: PortManager, protocol: str, direction: str,
                  name: str = "file.bin", data: bytes = b"",
-                 *, log: Optional[Callable[[str], None]] = None,
-                 progress: Optional[Callable[[int, int], None]] = None,
-                 cancel: Optional[Callable[[], bool]] = None,
-                 save_dir: Optional[str] = None) -> dict:
+                 *, log: Callable[[str], None] | None = None,
+                 progress: Callable[[int, int], None] | None = None,
+                 cancel: Callable[[], bool] | None = None,
+                 save_dir: str | None = None) -> dict:
     """Run one X/Y/ZMODEM transfer synchronously on the current thread.
 
     ``direction`` is ``"send"`` or ``"recv"``.  The caller must already hold the

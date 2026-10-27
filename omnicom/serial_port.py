@@ -11,11 +11,12 @@ UI buffers them on the client side.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import queue
 import threading
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 try:
     import serial
@@ -194,19 +195,19 @@ class PortManager:
         self._lock = threading.RLock()
         self._open_lock = threading.Lock()
         self._ser = None
-        self._reader: Optional[threading.Thread] = None
+        self._reader: threading.Thread | None = None
         self._reader_stop = threading.Event()
-        self._want: Optional[str] = None
-        self._port: Optional[str] = None
+        self._want: str | None = None
+        self._port: str | None = None
         self._opts = dict(DEFAULT_OPTS)
-        self._identity: Optional[tuple] = None
-        self._raw: "queue.Queue[bytes]" = queue.Queue()
+        self._identity: tuple | None = None
+        self._raw: queue.Queue[bytes] = queue.Queue()
         self._exclusive = False
         self._stopping = False
         self._ports: list[dict] = []
-        self._ports_sig: Optional[tuple] = None
+        self._ports_sig: tuple | None = None
         self._reconnecting = False
-        self._last_error: Optional[str] = None
+        self._last_error: str | None = None
         self._opened_at = 0.0
 
         self.rx_bytes = 0
@@ -245,7 +246,7 @@ class PortManager:
         self._emit({"t": "status", **self.status()})
 
     # ------------------------------------------------------------- open/close
-    def open(self, port: str, opts: Optional[dict] = None) -> None:
+    def open(self, port: str, opts: dict | None = None) -> None:
         merged = dict(self._opts)
         if opts:
             merged.update({key: value for key, value in opts.items() if value is not None})
@@ -278,10 +279,8 @@ class PortManager:
             ser, self._ser = self._ser, None
             self._port = None
         if ser is not None:
-            try:
+            with contextlib.suppress(Exception):
                 ser.close()
-            except Exception:
-                pass
         reader = self._reader
         if reader is not None and reader.is_alive() and reader is not threading.current_thread():
             reader.join(0.5)
@@ -318,11 +317,9 @@ class PortManager:
                 handle.rts = bool(opts.get("rts", True))
             except Exception:
                 pass
-            try:
+            with contextlib.suppress(Exception):
                 handle.reset_input_buffer()
-            except Exception:
-                pass
-        except Exception as exc:  # noqa: BLE001 - surface any open failure
+        except Exception as exc:
             self._last_error = _friendly_error(exc, port)
             self._emit({"t": "notice", "level": "warn", "text": self._last_error})
             self._emit_status()
@@ -354,7 +351,7 @@ class PortManager:
             try:
                 waiting = handle.in_waiting
                 data = handle.read(waiting if waiting else 1)
-            except Exception as exc:  # noqa: BLE001 - unplug / driver error
+            except Exception as exc:
                 self._handle_loss(exc)
                 return
             if not data:
@@ -372,10 +369,8 @@ class PortManager:
             self._port = None
             self._last_error = _friendly_error(exc, self._want or "串口")
         if ser is not None:
-            try:
+            with contextlib.suppress(Exception):
                 ser.close()
-            except Exception:
-                pass
         self._drain_raw()
         self._emit({"t": "notice", "level": "warn", "text": f"串口断开：{self._last_error}"})
         self._emit_status()
@@ -386,7 +381,7 @@ class PortManager:
             try:
                 ports = list_serial_ports()
                 if self.demo:
-                    ports = ports + [{
+                    ports = [*ports, {
                         "name": DEMO_PORT,
                         "description": "虚拟演示串口（AT 回环 + 遥测）",
                         "hwid": "DEMO\\OmniCOM",
@@ -411,11 +406,11 @@ class PortManager:
                         self._open_now(target, self._opts, announce=False)
                 elif want and not connected:
                     self._reconnecting = False
-            except Exception:  # noqa: BLE001 - the monitor must never die
+            except Exception:
                 pass
             time.sleep(0.4)
 
-    def _resolve_target(self, want: str, ports: list[dict]) -> Optional[str]:
+    def _resolve_target(self, want: str, ports: list[dict]) -> str | None:
         names = {item["name"] for item in ports}
         if want in names:
             return want
@@ -443,7 +438,7 @@ class PortManager:
         try:
             written = handle.write(data)
             handle.flush()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self._handle_loss(exc)
             raise PortNotOpen(str(exc)) from exc
         self.tx_bytes += len(data)
@@ -518,7 +513,7 @@ class PortManager:
                     handle.dtr = bool(merged["dtr"])
                 if "rts" in patch:
                     handle.rts = bool(merged["rts"])
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._emit({"t": "notice", "level": "warn", "text": f"参数应用失败：{exc}"})
             hot = ("bytesize", "parity", "stopbits", "rtscts", "xonxoff", "dsrdtr")
             if any(merged[key] != before[key] for key in hot):
@@ -564,7 +559,7 @@ class Recorder:
         self._emit = emit
         self._lock = threading.Lock()
         self._handle = None
-        self._path: Optional[str] = None
+        self._path: str | None = None
         self._bytes = 0
 
     @property
@@ -581,7 +576,9 @@ class Recorder:
             os.makedirs(self.directory, exist_ok=True)
             stamp = time.strftime("%Y%m%d-%H%M%S")
             self._path = os.path.join(self.directory, f"rx-{stamp}.log")
-            self._handle = open(self._path, "ab", buffering=0)
+            # Long-lived streaming handle by design (closed in stop()), so it
+            # cannot use a context manager.  SIM115 is about leaks; this is not one.
+            self._handle = open(self._path, "ab", buffering=0)  # noqa: SIM115
             self._bytes = 0
         self._emit({"t": "record", **self.state()})
         return self.state()
@@ -599,10 +596,8 @@ class Recorder:
     def flush(self) -> None:
         with self._lock:
             if self._handle is not None:
-                try:
+                with contextlib.suppress(Exception):
                     self._handle.flush()
-                except Exception:
-                    pass
 
     def stop(self, silent: bool = False) -> dict:
         with self._lock:

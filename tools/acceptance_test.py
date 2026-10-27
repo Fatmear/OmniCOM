@@ -68,7 +68,7 @@ def add(req: str, name: str, ok: bool, detail: object = "") -> None:
 
 
 def run(args: list[str], timeout: int = 180) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable] + args, cwd=ROOT, capture_output=True,
+    return subprocess.run([sys.executable, *args], cwd=ROOT, capture_output=True,
                           text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
@@ -87,7 +87,7 @@ def suite_protocol() -> None:
 
 
 def cli_json(*args: str) -> dict:
-    proc = run(["-m", "omnicom.cli"] + list(args))
+    proc = run(["-m", "omnicom.cli", *args])
     try:
         return json.loads(proc.stdout or "{}")
     except json.JSONDecodeError:
@@ -177,31 +177,37 @@ def suite_gui() -> None:
     print("\n== 3/4 GUI 验收（offscreen + DEMO）")
     proc = run(["tools/ui_selftest.py"], timeout=300)
     out = (proc.stdout or "") + (proc.stderr or "")
+    unmapped: list[str] = []
     for line in out.splitlines():
         match = GUI_LINE.match(line)
         if not match:
+            if line.strip().startswith(("PASS", "FAIL")):
+                unmapped.append(line.strip())
             continue
         status, req, name, detail = match.groups()
         add(req, name.strip(), status == "PASS", detail or "")
     add("R-001", "GUI 验收整体通过", "ALL GUI SELFTESTS PASSED" in out,
         "" if "ALL GUI SELFTESTS PASSED" in out else out.strip().splitlines()[-1:])
+    # -- a check without an R-id is invisible to the aggregation above, so a
+    #    silently dropped/renamed check would still look like full coverage.
+    add("R-001", "GUI 每项检查都映射到需求（无游离检查）", not unmapped,
+        f"{len(unmapped)} 项游离: {unmapped[:3]}")
 
 
 def suite_visual() -> None:
     print("\n== 4/4 视觉 / 交付形态")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("OMNICOM_SETTINGS_SUFFIX", "-test")
     from PySide6.QtWidgets import QApplication
 
-    from omnicom.ui.main_window import OmniWindow, TitleBar
-    from omnicom.ui.theme import app_stylesheet
 
     app = QApplication.instance() or QApplication([sys.argv[0]])
     app.setStyle("Fusion")
     app.setStyleSheet(app_stylesheet())
 
     # -- solid background, proven on the backdrop widget itself.
-    from omnicom.ui.main_window import Aurora
     from omnicom.ui import theme
+    from omnicom.ui.main_window import Aurora
 
     backdrop = Aurora()
     backdrop.resize(480, 320)
@@ -215,8 +221,9 @@ def suite_visual() -> None:
     backdrop.close()
 
     # -- the grid was drawn with drawLine(); its absence is the negative proof.
-    source = open(os.path.join(ROOT, "omnicom", "ui", "main_window.py"),
-                  encoding="utf-8").read()
+    with open(os.path.join(ROOT, "omnicom", "ui", "main_window.py"),
+              encoding="utf-8") as handle:
+        source = handle.read()
     add("R-020", "源码中已无网格绘制（drawLine / step = 46 / 网格）",
         "drawLine(" not in source and "step = 46" not in source
         and "subtle grid" not in source.lower())

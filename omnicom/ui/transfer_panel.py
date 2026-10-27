@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import os
-from typing import Callable
+from collections.abc import Callable
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QFrame, QHBoxLayout, QLabel,
-                               QProgressBar, QPushButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QProgressBar,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .. import paths
 from . import theme
@@ -61,22 +70,22 @@ class DropZone(QFrame):
         self.detail.setText(f"{size / 1024:.1f} KB  ·  {path}")
         self._apply_style(True)
 
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+    def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             path, _ = QFileDialog.getOpenFileName(self, "选择要传输的文件")
             if path:
                 self.fileDropped.emit(path)
         super().mouseReleaseEvent(event)
 
-    def dragEnterEvent(self, event) -> None:  # noqa: N802
+    def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
             self._apply_style(True)
 
-    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+    def dragLeaveEvent(self, event) -> None:
         self._apply_style(bool(self.detail.text()))
 
-    def dropEvent(self, event) -> None:  # noqa: N802
+    def dropEvent(self, event) -> None:
         urls = event.mimeData().urls()
         if urls:
             path = urls[0].toLocalFile()

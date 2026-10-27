@@ -2,12 +2,34 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import (QEasingCurve, QPoint, QPropertyAnimation, QRectF, QSize,
-                            Qt, Property, Signal)
-from PySide6.QtGui import (QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath,
-                           QPen, QRadialGradient)
-from PySide6.QtWidgets import (QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
-                               QLayout, QSizePolicy, QVBoxLayout, QWidget)
+from typing import ClassVar
+
+from PySide6.QtCore import (
+    Property,
+    QEasingCurve,
+    QPropertyAnimation,
+    QRectF,
+    QSize,
+    Qt,
+    Signal,
+)
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QLinearGradient,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QRadialGradient,
+)
+from PySide6.QtWidgets import (
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QHBoxLayout,
+    QLabel,
+    QLayout,
+    QWidget,
+)
 
 from . import theme
 
@@ -28,7 +50,7 @@ class GlassFrame(QFrame):
             effect.setColor(QColor(0, 0, 0, 170))
             self.setGraphicsEffect(effect)
 
-    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+    def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
@@ -87,10 +109,10 @@ class ToggleSwitch(QWidget):
     knob = Property(float, get_knob, set_knob)
 
     # -- state --------------------------------------------------------------
-    def isChecked(self) -> bool:  # noqa: N802 - Qt naming
+    def isChecked(self) -> bool:
         return self._checked
 
-    def setChecked(self, value: bool, animate: bool = True) -> None:  # noqa: N802
+    def setChecked(self, value: bool, animate: bool = True) -> None:
         value = bool(value)
         if value == self._checked:
             return
@@ -104,12 +126,12 @@ class ToggleSwitch(QWidget):
             self.set_knob(1.0 if value else 0.0)
         self.toggled.emit(value)
 
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+    def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton and self.isEnabled():
             self.setChecked(not self._checked)
         super().mouseReleaseEvent(event)
 
-    def paintEvent(self, event) -> None:  # noqa: N802
+    def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         rect = QRectF(0.5, 0.5, self._w - 1, self._h - 1)
@@ -158,13 +180,13 @@ class SwitchRow(QWidget):
         if tooltip:
             self.setToolTip(tooltip)
 
-    def isChecked(self) -> bool:  # noqa: N802
+    def isChecked(self) -> bool:
         return self.switch.isChecked()
 
-    def setChecked(self, value: bool) -> None:  # noqa: N802
+    def setChecked(self, value: bool) -> None:
         self.switch.setChecked(value, animate=False)
 
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+    def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             self.switch.setChecked(not self.switch.isChecked())
         super().mouseReleaseEvent(event)
@@ -197,7 +219,7 @@ class Badge(QLabel):
 class StatusPill(QFrame):
     """Connection state: coloured dot + short text, one consistent shape."""
 
-    KINDS = {
+    KINDS: ClassVar[dict[str, tuple[str, str, str]]] = {
         "idle": ("#6D7997", "rgba(255, 255, 255, 16)", "rgba(255, 255, 255, 30)"),
         "ok": ("#5EEAD4", "rgba(94, 234, 212, 32)", "rgba(94, 234, 212, 120)"),
         "retry": ("#FBBF24", "rgba(251, 191, 36, 30)", "rgba(251, 191, 36, 110)"),
@@ -249,35 +271,35 @@ class FlowLayout(QLayout):
         self._spacing = spacing
         self.setContentsMargins(0, 0, 0, 0)
 
-    def addItem(self, item) -> None:  # noqa: N802
+    def addItem(self, item) -> None:
         self._items.append(item)
 
     def count(self) -> int:
         return len(self._items)
 
-    def itemAt(self, index: int):  # noqa: N802
+    def itemAt(self, index: int):
         return self._items[index] if 0 <= index < len(self._items) else None
 
-    def takeAt(self, index: int):  # noqa: N802
+    def takeAt(self, index: int):
         return self._items.pop(index) if 0 <= index < len(self._items) else None
 
-    def expandingDirections(self):  # noqa: N802
+    def expandingDirections(self):
         return Qt.Orientations(0)
 
-    def hasHeightForWidth(self) -> bool:  # noqa: N802
+    def hasHeightForWidth(self) -> bool:
         return True
 
-    def heightForWidth(self, width: int) -> int:  # noqa: N802
+    def heightForWidth(self, width: int) -> int:
         return self._layout(QRectF(0, 0, width, 0), apply=False)
 
-    def setGeometry(self, rect) -> None:  # noqa: N802
+    def setGeometry(self, rect) -> None:
         super().setGeometry(rect)
         self._layout(QRectF(rect), apply=True)
 
-    def sizeHint(self) -> QSize:  # noqa: N802
+    def sizeHint(self) -> QSize:
         return self.minimumSize()
 
-    def minimumSize(self) -> QSize:  # noqa: N802
+    def minimumSize(self) -> QSize:
         size = QSize()
         for item in self._items:
             size = size.expandedTo(item.minimumSize())
@@ -352,5 +374,5 @@ class Toast(QWidget):
         self.show()
         self.raise_()
 
-    def paintEvent(self, event) -> None:  # noqa: N802
+    def paintEvent(self, event) -> None:
         super().paintEvent(event)

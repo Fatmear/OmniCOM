@@ -2,17 +2,29 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QFont, QTextCursor
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
-                               QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy,
-                               QSpinBox, QVBoxLayout, QWidget)
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPlainTextEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
 
-from ..commands import CommandStore, decode_escapes, payload_of
+from ..commands import CommandStore, payload_of
 from . import theme
-from .widgets import Badge, Divider, SwitchRow, ToggleSwitch
+from .widgets import Badge, SwitchRow, ToggleSwitch
 
 LINE_END_LABELS = [("crlf", "\\r\\n"), ("lf", "\\n"), ("cr", "\\r"), ("none", "无")]
 
@@ -35,7 +47,7 @@ class ElidedLabel(QLabel):
         self.setToolTip(text)
         self.update()
 
-    def paintEvent(self, event) -> None:  # noqa: N802
+    def paintEvent(self, event) -> None:
         from PySide6.QtGui import QPainter
         painter = QPainter(self)
         metrics = self.fontMetrics()
@@ -50,7 +62,7 @@ class PasteBox(QPlainTextEdit):
 
     pasted = Signal(str)
 
-    def insertFromMimeData(self, source) -> None:  # noqa: N802
+    def insertFromMimeData(self, source) -> None:
         text = source.text()
         if text:
             self.pasted.emit(text)

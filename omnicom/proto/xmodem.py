@@ -2,10 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
-from .common import (ACK, CAN, CRC_CHAR, EOT, NAK, SOH, STX, SUB, ByteReader, Link,
-                     Progress, TransferAborted, TransferError, logger_cb, progress_cb)
+from .common import (
+    ACK,
+    CAN,
+    CRC_CHAR,
+    EOT,
+    NAK,
+    SOH,
+    STX,
+    SUB,
+    ByteReader,
+    Link,
+    Progress,
+    TransferAborted,
+    TransferError,
+    logger_cb,
+    progress_cb,
+)
 from .crc import crc16_seal
 
 
@@ -21,7 +36,7 @@ def build_block(block_no: int, payload: bytes, crc_mode: bool) -> bytes:
     return head + payload + tail
 
 
-def _check_cancel(cancel: Optional[Callable[[], bool]]) -> None:
+def _check_cancel(cancel: Callable[[], bool] | None) -> None:
     if cancel and cancel():
         raise TransferAborted("用户取消")
 
@@ -66,15 +81,15 @@ def read_block(reader: ByteReader, timeout: float, crc_mode: bool = True) -> tup
 
 
 def send(link: Link, data: bytes, *, block_size: int = 1024, timeout: float = 10.0,
-         retries: int = 10, progress: Optional[Progress] = None, log=None,
-         cancel: Optional[Callable[[], bool]] = None, name: str = "file") -> dict:
+         retries: int = 10, progress: Progress | None = None, log=None,
+         cancel: Callable[[], bool] | None = None, name: str = "file") -> dict:
     progress = progress_cb(progress)
     log = logger_cb(log)
     reader = ByteReader(link)
     reader.drain(0.1)
     log(f"XMODEM 发送 {name}（{len(data)} 字节，{block_size}B/块）")
 
-    crc_mode: Optional[bool] = None
+    crc_mode: bool | None = None
     for _ in range(60):
         _check_cancel(cancel)
         byte = reader.getbyte(timeout)
@@ -128,8 +143,8 @@ def send(link: Link, data: bytes, *, block_size: int = 1024, timeout: float = 10
 
 
 def receive(link: Link, *, timeout: float = 10.0, retries: int = 10,
-            progress: Optional[Progress] = None, log=None,
-            cancel: Optional[Callable[[], bool]] = None,
+            progress: Progress | None = None, log=None,
+            cancel: Callable[[], bool] | None = None,
             name: str = "received.bin", max_bytes: int = 512 * 1024 * 1024) -> dict:
     progress = progress_cb(progress)
     log = logger_cb(log)

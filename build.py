@@ -15,12 +15,12 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
 import subprocess
 import sys
-import re
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 NAME = "OmniCOM"
@@ -79,11 +79,9 @@ def main() -> int:
         return 3
 
     if not options.skip_icon:
-        try:
+        with contextlib.suppress(OSError):
             subprocess.run([sys.executable, os.path.join(ROOT, "tools", "make_icon.py")],
                            cwd=ROOT, check=False)
-        except OSError:
-            pass
 
     if not options.no_clean:
         for folder in ("build", "dist"):
@@ -122,7 +120,7 @@ def main() -> int:
     # a --windowed build has no stdout, so the verdict also comes from the exit code
     verdict = None
     try:
-        with open(result_file, "r", encoding="utf-8") as handle:
+        with open(result_file, encoding="utf-8") as handle:
             verdict = json.load(handle)
     except (OSError, json.JSONDecodeError):
         pass

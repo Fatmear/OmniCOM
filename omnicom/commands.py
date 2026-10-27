@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from typing import Iterable
+from collections.abc import Iterable
 
 from PySide6.QtCore import QObject, Signal
 
@@ -39,24 +39,20 @@ def decode_escapes(text: str) -> str:
             index += 1
             continue
         nxt = text[index + 1]
-        if nxt == "r":
-            out.append("\r"); index += 2
-        elif nxt == "n":
-            out.append("\n"); index += 2
-        elif nxt == "t":
-            out.append("\t"); index += 2
-        elif nxt == "0":
-            out.append("\0"); index += 2
-        elif nxt == "\\":
-            out.append("\\"); index += 2
+        simple = {"r": "\r", "n": "\n", "t": "\t", "0": "\0", "\\": "\\"}
+        if nxt in simple:
+            out.append(simple[nxt])
+            index += 2
         elif nxt == "x" and index + 3 < length:
             try:
                 out.append(chr(int(text[index + 2:index + 4], 16)))
                 index += 4
             except ValueError:
-                out.append(char); index += 1
+                out.append(char)
+                index += 1
         else:
-            out.append(char); index += 1
+            out.append(char)
+            index += 1
     return "".join(out)
 
 
@@ -109,7 +105,7 @@ class CommandStore(QObject):
     # -------------------------------------------------------------- storage
     def _load(self) -> list[dict]:
         try:
-            with open(self.path, "r", encoding="utf-8") as handle:
+            with open(self.path, encoding="utf-8") as handle:
                 raw = json.load(handle)
             if isinstance(raw, list):
                 items = []

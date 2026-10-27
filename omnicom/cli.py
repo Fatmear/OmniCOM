@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import json
 import os
 import re
 import sys
 import time
-from typing import Any, Callable, Iterable, Optional
+from collections.abc import Callable, Iterable
+from typing import Any
 
 from . import __version__, paths
 from .commands import LINE_ENDS, decode_escapes, parse_hex
@@ -118,14 +120,12 @@ class PortSession:
         raise PortNotOpen(f"打开 {self.port} 超时")
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.recorder.stop(silent=True)
-        except Exception:
-            pass
         self.manager.close()
         self.manager.shutdown()
 
-    def __enter__(self) -> "PortSession":
+    def __enter__(self) -> PortSession:
         self.open()
         return self
 
@@ -146,7 +146,7 @@ class PortSession:
         return data
 
     def read_for(self, duration: float, max_bytes: int = 0,
-                 until: Optional[Callable[[bytes], bool]] = None,
+                 until: Callable[[bytes], bool] | None = None,
                  poll: float = 0.02) -> bytes:
         """Collect bytes for ``duration`` seconds (or until ``until`` is true)."""
         deadline = time.monotonic() + max(0.0, duration)
@@ -177,7 +177,7 @@ def serial_opts(args) -> dict:
     }
 
 
-def payload_from_args(data: Optional[str], hex_data: Optional[str],
+def payload_from_args(data: str | None, hex_data: str | None,
                       line_end: str, decode: bool = True) -> tuple[bytes, str]:
     """Build the wire payload + a human description of it."""
     if hex_data:
@@ -186,15 +186,12 @@ def payload_from_args(data: Optional[str], hex_data: Optional[str],
             raise ValueError(f"HEX 内容不合法：{hex_data!r}")
         return parsed, f"hex:{len(parsed)}B"
     text = data or ""
-    if decode:
-        body = decode_escapes(text)
-    else:
-        body = text
+    body = decode_escapes(text) if decode else text
     ending = LINE_ENDS.get(line_end, b"")
     return body.encode("utf-8") + ending, f"text:{len(body)}B+{len(ending)}B"
 
 
-def wait_until_contains(needles: Iterable[str], regex: Optional[str],
+def wait_until_contains(needles: Iterable[str], regex: str | None,
                         buffer: bytes) -> bool:
     text = buffer.decode("utf-8", "replace")
     if regex:
@@ -203,10 +200,7 @@ def wait_until_contains(needles: Iterable[str], regex: Optional[str],
                 return True
         except re.error:
             return False
-    for needle in needles:
-        if needle and needle in text:
-            return True
-    return False
+    return any(needle and needle in text for needle in needles)
 
 
 # ------------------------------------------------------------------- commands
@@ -214,7 +208,7 @@ def wait_until_contains(needles: Iterable[str], regex: Optional[str],
 def cmd_ports(args) -> int:
     ports = list_serial_ports()
     if args.demo:
-        ports = ports + [{
+        ports = [*ports, {
             "name": DEMO_PORT,
             "description": "虚拟演示串口（AT 回环 + 遥测）",
             "hwid": "DEMO\\OmniCOM",
@@ -432,7 +426,7 @@ def cmd_transfer(args) -> int:
             "stats": session.stats(),
         })
         return EXIT_OK
-    except Exception as exc:  # noqa: BLE001 - report every protocol failure as JSON
+    except Exception as exc:
         return fail(f"{type(exc).__name__}: {exc}", log=logs,
                     stats=session.stats())
     finally:
@@ -483,13 +477,13 @@ def cmd_session(args) -> int:
         session.close()
 
 
-def _load_script(args) -> Optional[dict]:
+def _load_script(args) -> dict | None:
     raw: str
     if args.script in (None, "-"):
         raw = sys.stdin.read()
     else:
         try:
-            with open(args.script, "r", encoding="utf-8") as handle:
+            with open(args.script, encoding="utf-8") as handle:
                 raw = handle.read()
         except OSError:
             return None
@@ -619,7 +613,7 @@ def _run_step(session: PortSession, step: dict, args) -> dict:
         try:
             result = run_transfer(session.manager, proto, direction, name=name, data=data,
                                   log=logs.append, save_dir=spec.get("save_dir"))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return {"step": "transfer", "ok": False,
                     "error": f"{type(exc).__name__}: {exc}", "log": logs}
         return {"step": "transfer", "ok": True, "result": result, "log": logs}
@@ -681,7 +675,7 @@ def cmd_selftest(args) -> int:
         session.read_for(1.0)
         state = session.recorder.stop()
         record("demo: 接收记录到文件", state.get("bytes", 0) > 0, state.get("path"))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         record("demo: 会话", False, f"{type(exc).__name__}: {exc}")
     finally:
         session.close()
@@ -712,7 +706,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"OmniCOM CLI {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    def add_serial(p, default_port: Optional[str] = None) -> None:
+    def add_serial(p, default_port: str | None = None) -> None:
         p.add_argument("--port", default=default_port,
                        help="串口名，如 COM3；用 DEMO 走虚拟设备")
         p.add_argument("--baud", type=int, default=115200, help="波特率（默认 115200）")
@@ -801,7 +795,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if getattr(args, "port", None) is None and args.command in (
@@ -814,7 +808,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return int(args.func(args))
     except KeyboardInterrupt:
         return fail("用户中断")
-    except Exception as exc:  # noqa: BLE001 - never crash without JSON
+    except Exception as exc:
         return fail(f"{type(exc).__name__}: {exc}")
 
 

@@ -12,11 +12,20 @@ CRC16 is accumulated until it reaches 0, CRC32 until 0xDEBB20E3.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
-from .common import ByteReader, Link, Progress, TransferAborted, TransferError, logger_cb, progress_cb
+from .common import (
+    ByteReader,
+    Link,
+    Progress,
+    TransferAborted,
+    TransferError,
+    logger_cb,
+    progress_cb,
+)
 from .crc import crc16, crc16_seal, crc32
 
 ZPAD = 0x2A
@@ -73,8 +82,8 @@ def rclhdr(hdr) -> int:
 
 class ZModem:
     def __init__(self, link: Link, *, timeout: float = 10.0, log=None,
-                 progress: Optional[Progress] = None,
-                 cancel: Optional[Callable[[], bool]] = None) -> None:
+                 progress: Progress | None = None,
+                 cancel: Callable[[], bool] | None = None) -> None:
         self.link = link
         self.reader = ByteReader(link)
         self.timeout = timeout
@@ -102,9 +111,7 @@ class ZModem:
         escape = False
         if c & 0x60:
             escape = False
-        elif c in (ZDLE, XON, XOFF, XON | 0x80, XOFF | 0x80, 0x10):
-            escape = True
-        elif c == 0x0D and (self._lastsent & 0x7F) == 0x40:
+        elif c in (ZDLE, XON, XOFF, XON | 0x80, XOFF | 0x80, 0x10) or (c == 0x0D and (self._lastsent & 0x7F) == 0x40):
             escape = True
         if escape:
             out.append(ZDLE)
@@ -170,10 +177,8 @@ class ZModem:
         self.link.write(bytes(out))
 
     def _abort(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.link.write(bytes((CAN_BYTE,)) * 8 + b"\x08" * 8)
-        except Exception:
-            pass
 
     # ----------------------------------------------------------- rx plumbing
     def _zdlread(self, timeout: float) -> int:
@@ -217,7 +222,7 @@ class ZModem:
             raise _BadFrame("意外的数据子包结束符")
         return value
 
-    def _read_header(self, timeout: float) -> Optional[tuple[int, bytes]]:
+    def _read_header(self, timeout: float) -> tuple[int, bytes] | None:
         deadline = time.monotonic() + timeout
         cans = 0
         while True:
@@ -252,7 +257,7 @@ class ZModem:
                     if indicator == ZHEX:
                         return self._read_hex_header(self.timeout)
                 except _BadFrame as exc:
-                    raise ZModemError(str(exc))
+                    raise ZModemError(str(exc)) from exc
                 continue
             if c == CAN_BYTE:
                 cans += 1
@@ -320,10 +325,8 @@ class ZModem:
         except _Timeout:
             return ftype, bytes(hdr)
         if epilogue in (0x0D, 0x0D | 0x80):
-            try:
+            with contextlib.suppress(_Timeout):
                 self._getbyte(0.05)
-            except _Timeout:
-                pass
         elif epilogue == 0x0A or epilogue == (0x0A | 0x80):
             pass
         else:
@@ -442,10 +445,8 @@ class ZModem:
             result = self._read_header(5.0)
             if result and result[0] == ZFIN:
                 break
-        try:
+        with contextlib.suppress(Exception):
             self.link.write(b"OO")
-        except Exception:
-            pass
         self.progress(total, total)
         self.log("ZMODEM 发送完成")
         return {"bytes": total, "name": base}
@@ -496,7 +497,7 @@ class ZModem:
         raise ZModemError("ZEOF 未被接收方确认")
 
     # -------------------------------------------------------------- receiver
-    def receive(self, *, save_dir: str = ".", on_log: Optional[Callable[[str], None]] = None,
+    def receive(self, *, save_dir: str = ".", on_log: Callable[[str], None] | None = None,
                 dedupe: bool = True) -> dict:
         self.reader.drain(0.2)
         os.makedirs(save_dir, exist_ok=True)
@@ -504,14 +505,13 @@ class ZModem:
         self.log("ZMODEM 接收：等待发送方")
 
         ftype = None
-        hdr = b""
         for _ in range(10):
             self._check_cancel()
             self._send_hex_header(ZRINIT, [RINIT_FLAGS, 0, 0, 0])
             result = self._read_header(3.0)
             if result is None:
                 continue
-            ftype, hdr = result
+            ftype, _hdr = result
             if ftype == ZFILE:
                 break
             if ftype == ZRQINIT:
@@ -522,10 +522,8 @@ class ZModem:
                 continue
             if ftype == ZFIN:
                 self._send_hex_header(ZFIN, [0, 0, 0, 0])
-                try:
+                with contextlib.suppress(Exception):
                     self.link.write(b"OO")
-                except Exception:
-                    pass
                 return {"files": [], "bytes": 0}
         if ftype != ZFILE:
             raise ZModemError("等待发送方 ZFILE 超时")
@@ -575,7 +573,7 @@ class ZModem:
     def _receive_stream(self, buf: bytearray, expected_size: int) -> str:
         while True:
             self._check_cancel()
-            ftype, hdr = self._read_header_required()
+            ftype, _hdr = self._read_header_required()
             if ftype == ZDATA:
                 self._receive_blocks(buf, expected_size)
             elif ftype == ZEOF:
@@ -607,10 +605,8 @@ class ZModem:
 
     def _finish_receive(self) -> None:
         self._send_hex_header(ZFIN, [0, 0, 0, 0])
-        try:
+        with contextlib.suppress(Exception):
             self.link.write(b"OO")
-        except Exception:
-            pass
         self.log("ZMODEM 接收结束")
 
     @staticmethod

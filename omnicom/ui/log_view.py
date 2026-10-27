@@ -7,14 +7,12 @@ GUI thread at high baud rates.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
-from typing import Iterable
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QPlainTextEdit, QWidget
-
-from . import theme
 
 MAX_BLOCKS = 20000
 
@@ -211,7 +209,7 @@ class LogView(QPlainTextEdit):
     def note_trimmed(self, count: int) -> None:
         self.trimmed = count
 
-    def keyPressEvent(self, event) -> None:  # noqa: N802
+    def keyPressEvent(self, event) -> None:
         # Ctrl+C already copies; block edits so the log stays a faithful view.
         if event.matches(event.StandardKey.Copy):
             super().keyPressEvent(event)

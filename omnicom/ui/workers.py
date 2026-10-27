@@ -7,6 +7,7 @@ Qt threads and signals.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 
@@ -62,10 +63,8 @@ class SerialBridge(QObject):
         return self.manager.status()
 
     def shutdown(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.recorder.stop(silent=True)
-        except Exception:
-            pass
         self.manager.shutdown()
 
 
@@ -90,7 +89,7 @@ class TransferWorker(QThread):
     def cancel(self) -> None:
         self._cancel.set()
 
-    def run(self) -> None:  # noqa: D401 - QThread entry point
+    def run(self) -> None:
         self.state.emit("running")
         try:
             result = run_transfer(
@@ -105,7 +104,7 @@ class TransferWorker(QThread):
             self.aborted.emit(str(exc) or "已中止")
         except TransferError as exc:
             self.failed.emit(str(exc))
-        except Exception as exc:  # noqa: BLE001 - surface anything to the user
+        except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
         finally:
             self.state.emit("idle")
@@ -131,5 +130,5 @@ class RawFileWorker(QThread):
         try:
             self.manager.send_file(self.data, self.name, cancel=self._cancel.is_set)
             self.finished_ok.emit()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")

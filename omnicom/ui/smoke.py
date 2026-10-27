@@ -9,6 +9,7 @@ A windowed exe has no stdout, so the verdict is also written to
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -22,10 +23,8 @@ RESULTS: list[dict] = []
 
 def _emit(text: str) -> None:
     """Print when possible; a --windowed build has no stdout at all."""
-    try:
+    with contextlib.suppress(Exception):
         print(text)
-    except Exception:
-        pass
 
 
 def _check(name: str, ok: bool, detail: str = "") -> None:
@@ -52,6 +51,7 @@ def _write_result(ok: bool) -> None:
 
 def run() -> int:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    os.environ.setdefault("OMNICOM_SETTINGS_SUFFIX", "-test")
 
     from .main_window import OmniWindow
     from .theme import app_stylesheet

@@ -12,6 +12,7 @@ import sys
 import traceback
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ.setdefault("OMNICOM_SETTINGS_SUFFIX", "-test")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -29,7 +30,7 @@ ERRORS: list[str] = []
 def guard(label: str, func) -> None:
     try:
         func()
-    except Exception:  # noqa: BLE001 - collect everything, report at the end
+    except Exception:
         ERRORS.append(f"{label}: {traceback.format_exc()}")
 
 
@@ -94,7 +95,7 @@ def main() -> int:
                 rect = widget.geometry()
                 print(f"    {name:12} {rect.width():4d}x{rect.height():3d} "
                       f"visible={widget.isVisible()}")
-        except Exception:  # noqa: BLE001
+        except Exception:
             ERRORS.append("snapshot: " + traceback.format_exc())
         finally:
             window.close()

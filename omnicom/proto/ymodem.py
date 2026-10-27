@@ -3,10 +3,22 @@
 from __future__ import annotations
 
 import os
-from typing import Callable, Optional
+from collections.abc import Callable
 
-from .common import (ACK, CAN, CRC_CHAR, EOT, NAK, SOH, STX, ByteReader, Link, Progress,
-                     TransferAborted, TransferError, logger_cb, progress_cb)
+from .common import (
+    ACK,
+    CAN,
+    CRC_CHAR,
+    EOT,
+    NAK,
+    ByteReader,
+    Link,
+    Progress,
+    TransferAborted,
+    TransferError,
+    logger_cb,
+    progress_cb,
+)
 from .xmodem import build_block, pad_block, read_block
 
 BLOCK0_SIZE = 128
@@ -41,8 +53,8 @@ def _parse_block0(payload: bytes) -> tuple[str, int]:
 
 
 def send(link: Link, data: bytes, *, name: str = "file.bin", block_size: int = 1024,
-         timeout: float = 10.0, retries: int = 10, progress: Optional[Progress] = None,
-         log=None, cancel: Optional[Callable[[], bool]] = None) -> dict:
+         timeout: float = 10.0, retries: int = 10, progress: Progress | None = None,
+         log=None, cancel: Callable[[], bool] | None = None) -> dict:
     progress = progress_cb(progress)
     log = logger_cb(log)
     reader = ByteReader(link)
@@ -120,8 +132,8 @@ def send(link: Link, data: bytes, *, name: str = "file.bin", block_size: int = 1
 
 
 def receive(link: Link, *, timeout: float = 10.0, retries: int = 10,
-            progress: Optional[Progress] = None, log=None,
-            cancel: Optional[Callable[[], bool]] = None,
+            progress: Progress | None = None, log=None,
+            cancel: Callable[[], bool] | None = None,
             max_files: int = 32, max_bytes: int = 512 * 1024 * 1024) -> dict:
     progress = progress_cb(progress)
     log = logger_cb(log)
@@ -130,7 +142,7 @@ def receive(link: Link, *, timeout: float = 10.0, retries: int = 10,
     log("YMODEM 接收：等待文件头块")
 
     files: list[dict] = []
-    current: Optional[dict] = None
+    current: dict | None = None
     expected = 0
     attempts = 0
     handshake_sent = False
