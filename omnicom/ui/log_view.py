@@ -14,19 +14,24 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QPlainTextEdit, QWidget
 
+from . import theme
+
 MAX_BLOCKS = 20000
 
+# "收←" / "发→" read faster than RX/TX in a long log, and the direction column
+# keeps a fixed width so the payload starts at the same x on every line.
+_DIR_LABELS = {"RX": "收←", "TX": "发→", "··": "··", "!!": "!!"}
 _DIR_COLORS = {
-    "RX": "#7EE7D5",
-    "TX": "#C4B5FD",
-    "··": "#5B6482",
-    "!!": "#E0A84A",
+    "RX": theme.TEAL,
+    "TX": theme.VIOLET,
+    "··": theme.DIM,
+    "!!": theme.AMBER,
 }
 _TEXT_COLORS = {
-    "rx": "#DBE6FB",
-    "tx": "#D7CDFF",
-    "sys": "#8A96B3",
-    "evt": "#FFD28A",
+    "rx": theme.INK,
+    "tx": "#3A2F86",
+    "sys": theme.DIM,
+    "evt": theme.AMBER,
 }
 
 
@@ -72,15 +77,17 @@ class LogView(QPlainTextEdit):
         self.setFont(font)
         self.setStyleSheet(
             "QPlainTextEdit#Log { background: transparent; border: 0;"
-            " padding: 2px 10px 8px 12px; selection-background-color: rgba(94,234,212,70); }")
+            " padding: 2px 10px 8px 12px;"
+            " selection-background-color: rgba(46, 196, 176, 90); }")
         self.show_ts = True
         self.show_ctrl = False
         self.autoscroll = True
         self.trimmed = 0
         self._pending = False
-        self._ts_format = self._make_format("#6D7997")
-        self._mark_format = self._make_format("#EAFFFB", background="#3A6C63")
-        self._pending_format = self._make_format("#B9CBE8")
+        self._ts_format = self._make_format(theme.DIM)
+        self._mark_format = self._make_format("#0A3F3A", background="#BFF0E6")
+        self._marker_format = self._make_format(theme.DIM)
+        self._pending_format = self._make_format("#5A6A85")
 
     # ------------------------------------------------------------------ setup
     @staticmethod
@@ -116,15 +123,15 @@ class LogView(QPlainTextEdit):
             cursor.insertBlock()
 
         if self.show_ts:
-            ts_text = f"{stamp(ts)} "
-            cursor.insertText(ts_text, self._ts_format)
+            cursor.insertText(f"[{stamp(ts)}]", self._ts_format)
 
         if self.show_dir:
-            dir_text = f"{direction:<2} "
-            dir_format = self._make_format(_DIR_COLORS.get(direction, "#6D7997"))
-            cursor.insertText(dir_text, dir_format)
+            label = _DIR_LABELS.get(direction, direction)
+            cursor.insertText(label, self._make_format(_DIR_COLORS.get(direction, theme.DIM)))
+            if direction in ("RX", "TX"):
+                cursor.insertText("◇", self._marker_format)
 
-        body_format = self._make_format(_TEXT_COLORS.get(kind, "#DBE6FB"))
+        body_format = self._make_format(_TEXT_COLORS.get(kind, theme.INK))
         words = [word for word in keywords if word]
         if words and not lite and text:
             self._insert_marked(cursor, text, words, body_format)

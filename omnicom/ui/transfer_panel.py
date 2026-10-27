@@ -58,8 +58,8 @@ class DropZone(QFrame):
         layout.addWidget(self.detail)
 
     def _apply_style(self, active: bool) -> None:
-        border = "rgba(94, 234, 212, 140)" if active else "rgba(255, 255, 255, 40)"
-        fill = "rgba(94, 234, 212, 26)" if active else "rgba(255, 255, 255, 8)"
+        border = "rgba(14, 148, 132, 150)" if active else theme.LINE_STRONG
+        fill = theme.TEAL_SOFT if active else theme.WASH
         self.setStyleSheet(
             f"QFrame {{ border: 1px dashed {border}; border-radius: 14px; background: {fill}; }}"
             "QLabel { border: 0; background: transparent; }")
@@ -136,8 +136,8 @@ class TransferPanel(QWidget):
         dir_row.setSpacing(3)
         dir_box = QFrame()
         dir_box.setStyleSheet(
-            "QFrame { background: rgba(255,255,255,10);"
-            " border: 1px solid rgba(255,255,255,18); border-radius: 11px; }")
+            f"QFrame {{ background: {theme.WASH};"
+            f" border: 1px solid {theme.LINE_SOFT}; border-radius: 11px; }}")
         dir_layout = QHBoxLayout(dir_box)
         dir_layout.setContentsMargins(3, 3, 3, 3)
         dir_layout.setSpacing(3)

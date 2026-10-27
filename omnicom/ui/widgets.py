@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLayout,
+    QPushButton,
     QWidget,
 )
 
@@ -35,7 +36,7 @@ from . import theme
 
 
 class GlassFrame(QFrame):
-    """Rounded translucent surface with a gradient border and soft shadow."""
+    """Rounded white card with a hairline border and a soft shadow."""
 
     def __init__(self, parent=None, radius: int = 20, strong: bool = False,
                  shadow: bool = True) -> None:
@@ -45,9 +46,9 @@ class GlassFrame(QFrame):
         self.setAttribute(Qt.WA_StyledBackground, False)
         if shadow:
             effect = QGraphicsDropShadowEffect(self)
-            effect.setBlurRadius(52)
-            effect.setOffset(0, 20)
-            effect.setColor(QColor(0, 0, 0, 170))
+            effect.setBlurRadius(34)
+            effect.setOffset(0, 10)
+            effect.setColor(QColor(18, 26, 43, 46))
             self.setGraphicsEffect(effect)
 
     def paintEvent(self, event) -> None:
@@ -57,26 +58,23 @@ class GlassFrame(QFrame):
         path = QPainterPath()
         path.addRoundedRect(rect, self.radius, self.radius)
 
-        fill = QLinearGradient(rect.topLeft(), rect.bottomLeft())
-        top = 34 if self.strong else 22
-        fill.setColorAt(0.0, QColor(255, 255, 255, top))
-        fill.setColorAt(0.42, QColor(255, 255, 255, 9))
-        fill.setColorAt(1.0, QColor(255, 255, 255, 6))
+        # Flat white surface; the "strong" variant (title bar) is a touch
+        # cooler so it separates from the cards below it.
+        fill = QColor(theme.CARD) if self.strong else QColor(255, 255, 255, 244)
+        painter.setPen(Qt.NoPen)
         painter.fillPath(path, QBrush(fill))
 
-        # top specular sheen
-        sheen = QRadialGradient(rect.left() + rect.width() * 0.18, rect.top() - 8,
-                                max(rect.width() * 0.85, 220))
-        sheen.setColorAt(0.0, QColor(255, 255, 255, 34))
-        sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+        # A barely-there top sheen keeps the card from looking dead flat.
+        sheen = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        sheen.setColorAt(0.0, QColor(255, 255, 255, 255))
+        sheen.setColorAt(0.35, QColor(255, 255, 255, 0))
         painter.fillPath(path, QBrush(sheen))
 
         border = QLinearGradient(rect.topLeft(), rect.bottomLeft())
-        border.setColorAt(0.0, QColor(255, 255, 255, 82))
-        border.setColorAt(0.35, QColor(255, 255, 255, 34))
-        border.setColorAt(1.0, QColor(255, 255, 255, 16))
-        pen = QPen(QBrush(border), 1.0)
-        painter.setPen(pen)
+        border.setColorAt(0.0, QColor(18, 26, 43, 52))
+        border.setColorAt(0.4, QColor(18, 26, 43, 30))
+        border.setColorAt(1.0, QColor(18, 26, 43, 20))
+        painter.setPen(QPen(QBrush(border), 1.0))
         painter.drawPath(path)
         super().paintEvent(event)
 
@@ -126,9 +124,20 @@ class ToggleSwitch(QWidget):
             self.set_knob(1.0 if value else 0.0)
         self.toggled.emit(value)
 
+    def mousePressEvent(self, event) -> None:
+        # Accept the press/release here: QWidget ignores mouse events by
+        # default, which let them propagate to SwitchRow and toggle the state
+        # straight back (the switch looked dead when clicked directly).
+        if event.button() == Qt.LeftButton and self.isEnabled():
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton and self.isEnabled():
             self.setChecked(not self._checked)
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
 
     def paintEvent(self, event) -> None:
@@ -139,12 +148,12 @@ class ToggleSwitch(QWidget):
 
         track = QLinearGradient(rect.topLeft(), rect.bottomRight())
         if self._checked:
-            track.setColorAt(0.0, QColor(94, 234, 212, 220))
-            track.setColorAt(1.0, QColor(167, 139, 250, 220))
+            track.setColorAt(0.0, QColor(18, 179, 158))
+            track.setColorAt(1.0, QColor(124, 92, 250))
         else:
-            track.setColorAt(0.0, QColor(255, 255, 255, 26))
-            track.setColorAt(1.0, QColor(255, 255, 255, 20))
-        painter.setPen(QPen(QColor(255, 255, 255, 70 if self._checked else 34), 1))
+            track.setColorAt(0.0, QColor(18, 26, 43, 40))
+            track.setColorAt(1.0, QColor(18, 26, 43, 30))
+        painter.setPen(QPen(QColor(18, 26, 43, 30), 1))
         painter.setBrush(QBrush(track))
         painter.drawRoundedRect(rect, radius, radius)
 
@@ -153,8 +162,8 @@ class ToggleSwitch(QWidget):
         knob = QRectF(x, rect.top() + 2, knob_d, knob_d)
         glow = QRadialGradient(knob.center(), knob_d * 0.95)
         glow.setColorAt(0.0, QColor(255, 255, 255, 255))
-        glow.setColorAt(1.0, QColor(214, 226, 242, 255))
-        painter.setPen(QPen(QColor(0, 0, 0, 70), 1))
+        glow.setColorAt(1.0, QColor(248, 250, 253, 255))
+        painter.setPen(QPen(QColor(18, 26, 43, 60), 1))
         painter.setBrush(QBrush(glow))
         painter.drawEllipse(knob)
 
@@ -220,10 +229,10 @@ class StatusPill(QFrame):
     """Connection state: coloured dot + short text, one consistent shape."""
 
     KINDS: ClassVar[dict[str, tuple[str, str, str]]] = {
-        "idle": ("#6D7997", "rgba(255, 255, 255, 16)", "rgba(255, 255, 255, 30)"),
-        "ok": ("#5EEAD4", "rgba(94, 234, 212, 32)", "rgba(94, 234, 212, 120)"),
-        "retry": ("#FBBF24", "rgba(251, 191, 36, 30)", "rgba(251, 191, 36, 110)"),
-        "error": ("#F87171", "rgba(248, 113, 113, 30)", "rgba(248, 113, 113, 110)"),
+        "idle": ("#8A94A6", theme.WASH, theme.LINE),
+        "ok": (theme.TEAL, theme.OK_SOFT, "rgba(14, 148, 132, 120)"),
+        "retry": (theme.AMBER, theme.AMBER_SOFT, "rgba(180, 83, 9, 110)"),
+        "error": (theme.DANGER, theme.DANGER_SOFT, "rgba(197, 52, 52, 110)"),
     }
 
     def __init__(self, parent=None, text: str = "未连接") -> None:
@@ -243,8 +252,8 @@ class StatusPill(QFrame):
 
     def set_state(self, kind: str, text: str) -> None:
         dot_color, fill, border = self.KINDS.get(kind, self.KINDS["idle"])
-        text_color = "#D8FFF6" if kind == "ok" else "#FFE9C2" if kind == "retry" else \
-            "#FFD9D9" if kind == "error" else theme.INK2
+        text_color = theme.OK if kind == "ok" else theme.AMBER if kind == "retry" else \
+            theme.DANGER if kind == "error" else theme.INK2
         self.dot.setStyleSheet(
             f"color: {dot_color}; border: 0; background: transparent; font-size: 10px;")
         self.label.setText(text)
@@ -259,7 +268,7 @@ class Divider(QFrame):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFixedHeight(1)
-        self.setStyleSheet("background: rgba(255, 255, 255, 14); border: 0;")
+        self.setStyleSheet(f"background: {theme.LINE_SOFT}; border: 0;")
 
 
 class FlowLayout(QLayout):
@@ -302,7 +311,7 @@ class FlowLayout(QLayout):
     def minimumSize(self) -> QSize:
         size = QSize()
         for item in self._items:
-            size = size.expandedTo(item.minimumSize())
+            size = size.expandedTo(item.MinimumSize())
         margins = self.contentsMargins()
         return size + QSize(margins.left() + margins.right(),
                             margins.top() + margins.bottom())
@@ -338,16 +347,84 @@ class Chip(QWidget):
         layout.setContentsMargins(9, 2, 6, 2)
         layout.setSpacing(5)
         label = QLabel(text)
-        label.setStyleSheet(f"color: #D9FFF8; font-family: {theme.MONO_FONT}; font-size: 11.5px;")
+        label.setStyleSheet(
+            f"color: {theme.TEAL}; font-family: {theme.MONO_FONT}; font-size: 11.5px;")
         close = QLabel("×")
         close.setCursor(Qt.PointingHandCursor)
-        close.setStyleSheet("color: rgba(217,255,248,150); font-size: 13px;")
+        close.setStyleSheet(f"color: {theme.TEAL}; font-size: 13px;")
         close.mouseReleaseEvent = lambda _event: self.removed.emit(self.text)
         layout.addWidget(label)
         layout.addWidget(close)
         self.setStyleSheet(
-            "QWidget { background: rgba(94, 234, 212, 32);"
-            " border: 1px solid rgba(94, 234, 212, 82); border-radius: 10px; }")
+            f"QWidget {{ background: {theme.TEAL_SOFT};"
+            f" border: 1px solid rgba(14, 148, 132, 82); border-radius: 10px; }}")
+
+
+class GlyphButton(QPushButton):
+    """Title-bar button that draws its icon with QPainter.
+
+    Text glyphs such as ``✕`` depend on a font that actually carries them; when
+    the fallback chain lacks the character the button looks empty.  Painting two
+    lines is deterministic on every machine, so the window controls are always
+    visible regardless of theme or font.
+    """
+
+    MINIMIZE = "minimize"
+    MAXIMIZE = "maximize"
+    RESTORE = "restore"
+    CLOSE = "close"
+    SIDEBAR = "sidebar"
+
+    def __init__(self, glyph: str, parent=None, danger: bool = False) -> None:
+        super().__init__(parent)
+        self.glyph = glyph
+        self.danger = danger
+        self.setObjectName("TopIconClose" if danger else "TopIcon")
+        self.setFixedSize(30, 30)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFlat(True)
+
+    def set_glyph(self, glyph: str) -> None:
+        if glyph != self.glyph:
+            self.glyph = glyph
+            self.update()
+
+    def _ink(self) -> QColor:
+        if self.danger and self.underMouse():
+            return QColor("#FFFFFF")
+        if not self.isEnabled():
+            return QColor(theme.DIM)
+        return QColor(theme.INK2)
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)          # keeps the QSS hover/pressed wash
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(self._ink(), 1.4)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        half = 4.5
+        if self.glyph == self.MINIMIZE:
+            painter.drawLine(int(cx - half), int(cy), int(cx + half), int(cy))
+        elif self.glyph == self.MAXIMIZE:
+            painter.drawRect(QRectF(cx - half, cy - half, half * 2, half * 2))
+        elif self.glyph == self.RESTORE:
+            painter.drawRect(QRectF(cx - half, cy - half + 2, half * 2 - 2, half * 2 - 2))
+            painter.drawLine(int(cx - half + 2), int(cy - half + 2),
+                             int(cx - half + 2), int(cy - half))
+            painter.drawLine(int(cx - half + 2), int(cy - half),
+                             int(cx + half), int(cy - half))
+            painter.drawLine(int(cx + half), int(cy - half),
+                             int(cx + half), int(cy + half - 2))
+        elif self.glyph == self.SIDEBAR:
+            painter.drawRoundedRect(
+                QRectF(cx - half - 0.5, cy - half, half * 2 + 1, half * 2), 1.5, 1.5)
+            painter.drawLine(int(cx + 1), int(cy - half), int(cx + 1), int(cy + half))
+        else:  # close
+            painter.drawLine(int(cx - half), int(cy - half), int(cx + half), int(cy + half))
+            painter.drawLine(int(cx + half), int(cy - half), int(cx - half), int(cy + half))
 
 
 class Toast(QWidget):
@@ -361,12 +438,12 @@ class Toast(QWidget):
         layout.setContentsMargins(14, 10, 14, 10)
         label = QLabel(text)
         label.setWordWrap(True)
-        label.setStyleSheet("color: #F2F6FF; font-size: 12.3px;")
+        label.setStyleSheet(f"color: {theme.INK}; font-size: 12.3px;")
         layout.addWidget(label)
-        accent = {"ok": theme.TEAL, "warn": theme.AMBER, "error": theme.DANGER}.get(level, theme.BLUE)
+        accent = {"ok": theme.OK, "warn": theme.AMBER, "error": theme.DANGER}.get(level, theme.BLUE)
         self.setStyleSheet(
-            f"QWidget {{ background: rgba(16, 20, 30, 236);"
-            f" border: 1px solid rgba(255, 255, 255, 40);"
+            f"QWidget {{ background: {theme.CARD};"
+            f" border: 1px solid {theme.LINE};"
             f" border-left: 3px solid {accent}; border-radius: 12px; }}")
         self.adjustSize()
         self.setFixedWidth(min(420, max(240, self.sizeHint().width() + 8)))

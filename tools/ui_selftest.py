@@ -23,15 +23,18 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from PySide6.QtCore import QTimer  # noqa: E402
+from PySide6.QtCore import QPoint, Qt, QTimer  # noqa: E402
+from PySide6.QtGui import QColor  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
+from omnicom.ui import theme  # noqa: E402
 from omnicom.ui.commands_panel import CommandRow  # noqa: E402
 from omnicom.ui.main_window import OmniWindow  # noqa: E402
 from omnicom.ui.theme import app_stylesheet  # noqa: E402
 
 RESULTS: list[tuple[bool, str, str]] = []
-STAMP_RE = re.compile(r"^\d{2}:\d{2}:\d{2}\.\d{3} ")
+STAMP_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\.\d{3}\]")
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -138,7 +141,7 @@ def main() -> int:
     def step_send_check(next_):
         grew = window.bridge.manager.tx_bytes - state["tx0"]
         check("R-004 发送生效（txt 计数增加）", grew == 4, f"+{grew} B")
-        check("R-007 发送回显出现在日志", "TX" in window.log.plain_text())
+        check("R-007 发送回显出现在日志", "发→" in window.log.plain_text())
         # device answers AT with OK
         wait(500, next_)
 
@@ -165,7 +168,7 @@ def main() -> int:
 
     def step_hex_check(next_):
         lines = [line for line in window.log.plain_text().splitlines() if line.strip()]
-        pattern = re.compile(r"\d{2}:\d{2}:\d{2}\.\d{3} RX [0-9a-f]{8}  ")
+        pattern = re.compile(r"^\[\d{2}:\d{2}:\d{2}\.\d{3}\]收←◇[0-9a-f]{8}  ")
         check("R-007 HEX 显示为 偏移 + 十六进制 + ASCII", any(pattern.match(line) for line in lines),
               lines[-1] if lines else "")
         window.row_hex.setChecked(False)
@@ -369,6 +372,64 @@ def main() -> int:
               f"visible={side.isVisible()} hidden={side.isHidden()}")
         next_()
 
+    def step_ui_polish(next_):
+        # -- 窗口按钮必须是"画"出来的，不依赖字体里有没有这个符号
+        missing = []
+        for name in ("btn_min", "btn_max", "btn_close", "btn_sidebar"):
+            button = getattr(window.titlebar, name)
+            shot = button.grab().toImage()
+            corner = shot.pixelColor(1, 1).name()
+            ink = sum(
+                1
+                for y in range(shot.height())
+                for x in range(shot.width())
+                if shot.pixelColor(x, y).name() != corner
+            )
+            if ink < 12:
+                missing.append(f"{name}={ink}px")
+        check("R-001 右上角窗口按钮图标可见（自绘，不依赖字体）", not missing, str(missing))
+
+        # -- 白色主题：背景色亮度必须很高
+        bg = QColor(theme.BG)
+        check("R-020 浅色（白色）主题生效", bg.lightness() > 220,
+              f"{theme.BG} lightness={bg.lightness()}")
+
+        # -- 日志格式 [hh:mm:ss.mmm]发→◇ / 收←◇
+        window.log.clear_all()
+        window.log.append_line(0.0, "TX", "AT+QSSLCLOSE=0", "tx")
+        window.log.append_line(0.0, "RX", "OK", "rx")
+        lines = window.log.plain_text().splitlines()
+        sent = next((line for line in lines if "QSSLCLOSE" in line), "")
+        check("R-024 日志行为「[时间]发→◇内容」",
+              bool(re.match(r"^\[\d{2}:\d{2}:\d{2}\.\d{3}\]发→◇AT\+QSSLCLOSE=0$", sent)),
+              sent)
+        got = next((line for line in lines if line.endswith("OK")), "")
+        check("R-024 日志行为「[时间]收←◇内容」",
+              bool(re.match(r"^\[\d{2}:\d{2}:\d{2}\.\d{3}\]收←◇OK$", got)), got)
+
+        # -- 开关本体可点击（曾经点开关无效，只有点文字才行）
+        row = window.row_scroll
+        before = row.isChecked()
+        QTest.mouseClick(row.switch, Qt.LeftButton,
+                         pos=QPoint(row.switch.width() // 2, row.switch.height() // 2))
+        app.processEvents()
+        flipped = row.isChecked() != before
+        row.setChecked(before)
+        check("R-002 点击开关本体即可切换（不限于点文字）", flipped,
+              f"{before} -> {not before}")
+
+        # -- 打开控制字符显示后，发送内容也要显示不可见字符
+        was = window.row_ctrl.isChecked()
+        window.row_ctrl.setChecked(True)
+        window.log.clear_all()
+        window.send_payload(b"AT+QSSLCLOSE=0\r\n", "AT+QSSLCLOSE=0")
+        app.processEvents()
+        text = window.log.plain_text()
+        window.row_ctrl.setChecked(was)
+        check("R-025 开启后发送内容也显示不可见字符",
+              "发→" in text and "\\r\\n" in text, text.splitlines()[-1] if text else "")
+        next_()
+
     runner.add("ports", step_ports)
     runner.add("connected", step_connected)
     runner.add("rx", step_rx)
@@ -402,6 +463,7 @@ def main() -> int:
     runner.add("sidebar", step_sidebar)
     runner.add("sidebar_check", step_sidebar_check)
     runner.add("persist", step_persist)
+    runner.add("ui_polish", step_ui_polish)
 
     runner.start()
     app.exec()

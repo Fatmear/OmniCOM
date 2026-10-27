@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-from PySide6.QtCore import QPoint, QSettings, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QSettings, Qt, QTimer
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -37,7 +37,15 @@ from .log_view import LogView
 from .search_panel import SearchPanel
 from .send_panel import SendPanel
 from .transfer_panel import TransferPanel
-from .widgets import Badge, GlassFrame, SectionTitle, StatusPill, SwitchRow, Toast
+from .widgets import (
+    Badge,
+    GlassFrame,
+    GlyphButton,
+    SectionTitle,
+    StatusPill,
+    SwitchRow,
+    Toast,
+)
 from .workers import SerialBridge, TransferWorker
 
 SETTINGS_ORG = "OmniCOM"
@@ -111,10 +119,10 @@ class TitleBar(GlassFrame):
         logo.setFixedSize(38, 38)
         logo.setAlignment(Qt.AlignCenter)
         logo.setStyleSheet(
-            "QLabel { border-radius: 13px; font-size: 21px; color: #A9F7EA;"
+            "QLabel { border-radius: 13px; font-size: 21px; color: #FFFFFF;"
             " background: qlineargradient(x1:0, y1:0, x2:1, y2:1,"
-            " stop:0 rgba(94,234,212,72), stop:1 rgba(167,139,250,58));"
-            " border: 1px solid rgba(255,255,255,58); }")
+            " stop:0 #12B39E, stop:1 #7C5CFA);"
+            " border: 1px solid rgba(18,26,43,40); }")
         brand.addWidget(logo)
         names = QVBoxLayout()
         names.setSpacing(1)
@@ -137,14 +145,14 @@ class TitleBar(GlassFrame):
         tab_box.setObjectName("TabBox")
         tab_box.setFixedHeight(38)
         tab_box.setStyleSheet(
-            "QFrame#TabBox { background: rgba(255,255,255,10);"
-            " border: 1px solid rgba(255,255,255,20); border-radius: 14px; }")
+            f"QFrame#TabBox {{ background: {theme.WASH};"
+            f" border: 1px solid {theme.LINE_SOFT}; border-radius: 14px; }}")
         tab_layout = QHBoxLayout(tab_box)
         tab_layout.setContentsMargins(4, 4, 4, 4)
         tab_layout.setSpacing(2)
         for index, (key, label) in enumerate((("terminal", "终端"), ("transfer", "文件传输"))):
             button = QPushButton(label)
-            button.setObjectName("TabSeg")
+            button.setObjectName("Seg")
             button.setCheckable(True)
             button.setCursor(Qt.PointingHandCursor)
             button.setProperty("page", key)
@@ -172,30 +180,39 @@ class TitleBar(GlassFrame):
 
         layout.addWidget(self._vline())
 
-        self.btn_sidebar = self._tool("▤", "显示 / 隐藏右侧栏")
+        self.btn_sidebar = GlyphButton(GlyphButton.SIDEBAR, self)
+        self.btn_sidebar.setToolTip("显示 / 隐藏右侧栏")
         self.btn_sidebar.clicked.connect(window.toggle_sidebar)
         layout.addWidget(self.btn_sidebar)
 
-        for text, tip, slot, close in (
-                ("—", "最小化", window.showMinimized, False),
-                ("❐", "最大化 / 还原", window.toggle_maximize, False),
-                ("✕", "关闭", window.close, True)):
-            button = self._tool(text, tip, close=close)
-            button.clicked.connect(slot)
-            layout.addWidget(button)
+        self.btn_min = GlyphButton(GlyphButton.MINIMIZE, self)
+        self.btn_min.setToolTip("最小化")
+        self.btn_min.clicked.connect(window.showMinimized)
+        layout.addWidget(self.btn_min)
+
+        self.btn_max = GlyphButton(GlyphButton.MAXIMIZE, self)
+        self.btn_max.setToolTip("最大化 / 还原")
+        self.btn_max.clicked.connect(window.toggle_maximize)
+        layout.addWidget(self.btn_max)
+        self.max_button = self.btn_max
+
+        self.btn_close = GlyphButton(GlyphButton.CLOSE, self, danger=True)
+        self.btn_close.setToolTip("关闭")
+        self.btn_close.clicked.connect(window.close)
+        layout.addWidget(self.btn_close)
 
     # ------------------------------------------------------------------ parts
     @staticmethod
     def _vline() -> QFrame:
         line = QFrame()
         line.setFixedSize(1, 22)
-        line.setStyleSheet("background: rgba(255,255,255,24); border: 0;")
+        line.setStyleSheet(f"background: {theme.LINE}; border: 0;")
         return line
 
     def _tool(self, text: str, tip: str, close: bool = False) -> QPushButton:
         button = QPushButton(text)
         button.setObjectName("TopIconClose" if close else "TopIcon")
-        button.setFixedSize(28, 28)
+        button.setFixedSize(30, 30)
         button.setToolTip(tip)
         button.setCursor(Qt.PointingHandCursor)
         return button
@@ -203,10 +220,10 @@ class TitleBar(GlassFrame):
     def set_counters(self, rx: int, tx: int) -> None:
         self.counter.setText(
             f'<span style="color:{theme.DIM}">RX</span> '
-            f'<span style="color:#9DF3E4">{human_size(rx)}</span>'
+            f'<span style="color:{theme.TEAL}">{human_size(rx)}</span>'
             f'<span style="color:{theme.DIM}"> &nbsp;·&nbsp; </span>'
             f'<span style="color:{theme.DIM}">TX</span> '
-            f'<span style="color:#C4B5FD">{human_size(tx)}</span>')
+            f'<span style="color:{theme.VIOLET}">{human_size(tx)}</span>')
 
     # -- window drag --------------------------------------------------------
     def mousePressEvent(self, event) -> None:
@@ -469,7 +486,7 @@ class OmniWindow(QMainWindow):
     def _divider() -> QFrame:
         line = QFrame()
         line.setFixedHeight(1)
-        line.setStyleSheet("background: rgba(255,255,255,12);")
+        line.setStyleSheet(f"background: {theme.LINE_SOFT};")
         return line
 
     # -------------------------------------------------------------- terminal
@@ -987,7 +1004,12 @@ class OmniWindow(QMainWindow):
                 text = "[HEX] " + " ".join(f"{byte:02x}" for byte in payload)
             else:
                 text = description or payload.decode("utf-8", "replace")
-                if not self.row_ctrl.isChecked():
+                if self.row_ctrl.isChecked():
+                    # Render the *bytes that actually left the port* (including
+                    # the appended line end), so TX is as faithful as RX.
+                    from .log_view import escape_control
+                    text = escape_control(payload.decode("utf-8", "replace"))
+                else:
                     text = text.rstrip("\r\n")
             self.log.append_line(time.time() * 1000, "TX", text, "tx",
                                  keywords=self.search_panel.keywords)
@@ -1159,6 +1181,12 @@ class OmniWindow(QMainWindow):
             self.showNormal()
         else:
             self.showMaximized()
+        self.titlebar.sync_max_button()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange:
+            self.titlebar.sync_max_button()
 
     def closeEvent(self, event) -> None:
         self.settings.setValue("ui/geometry", self.saveGeometry())

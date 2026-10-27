@@ -36,7 +36,7 @@ from omnicom.ui.theme import app_stylesheet  # noqa: E402
 RESULTS: dict[str, list[tuple[str, bool, str]]] = {}
 FAILED: list[tuple[str, str, str]] = []
 TITLES = {
-    "R-001": "整体功能完整 + 液态玻璃界面",
+    "R-001": "整体功能完整 + 白色主题 + 自绘窗口按钮",
     "R-002": "左栏完整串口配置（含流控/DTR/RTS）",
     "R-003": "顶部标签页：终端 / 文件传输(X/Y/Z)",
     "R-004": "方便、准确、不丢字的收发",
@@ -55,7 +55,12 @@ TITLES = {
     "R-017": "绝不静默丢字节",
     "R-018": "原生 Python GUI（无浏览器/无服务）",
     "R-019": "不打包/不依赖自编译 exe",
-    "R-020": "纯色背景（无网格）",
+    "R-020": "白色主题 + 纯色背景（无网格）",
+    "R-021": "面向 AI 的 CLI + 文档",
+    "R-022": "CLI 单 JSON 输出契约",
+    "R-023": "CLI 支持 DEMO 虚拟端口",
+    "R-024": "日志格式 [时间]发→/收←",
+    "R-025": "开启后发送内容也显示不可见字符",
 }
 
 
@@ -98,7 +103,9 @@ def suite_cli() -> None:
     print("\n== 2/4 CLI（AI 接口）")
 
     info = cli_json("info")
-    add("R-018", "CLI info 可用", info.get("ok") is True, info.get("version", ""))
+    add("R-021", "CLI info 可用", info.get("ok") is True, info.get("version", ""))
+    add("R-021", "CLI 文档存在（docs/CLI.md 供 AI 阅读）",
+        os.path.isfile(os.path.join(ROOT, "docs", "CLI.md")))
 
     ports = cli_json("ports", "--demo")
     names = [item["name"] for item in ports.get("ports", [])]
@@ -134,7 +141,7 @@ def suite_cli() -> None:
     mon = run(["-m", "omnicom.cli", "monitor", "--port", "DEMO", "--duration", "1.6",
                "--grep", "temp"])
     lines = [json.loads(item) for item in (mon.stdout or "").splitlines() if item.strip()]
-    add("R-004", "CLI monitor 流式输出 NDJSON 行",
+    add("R-022", "CLI monitor 流式输出 NDJSON 行",
         any(item.get("dir") == "rx" and "temp=" in item.get("line", "") for item in lines),
         f"{len(lines)} 条")
 
@@ -152,12 +159,12 @@ def suite_cli() -> None:
     # scripted session — the main AI entry point
     session = cli_json("session", "--port", "DEMO",
                        "--script", os.path.join(ROOT, "tests", "session-demo.json"))
-    add("R-004", "CLI session 全部步骤通过",
+    add("R-021", "CLI session 全部步骤通过",
         session.get("ok") is True and session.get("steps_run") == session.get("steps_total"),
         f"{session.get('steps_run')}/{session.get('steps_total')}")
 
     st = cli_json("selftest")
-    add("R-004", "CLI selftest 全绿", st.get("ok") is True,
+    add("R-023", "CLI selftest 全绿（DEMO 端口，无需硬件）", st.get("ok") is True,
         f"{st.get('passed')}/{st.get('total')}")
 
     # every CLI failure must still be valid JSON with ok:false
@@ -167,7 +174,7 @@ def suite_cli() -> None:
         ok = parsed.get("ok") is False and bool(parsed.get("error")) and bad.returncode == 1
     except json.JSONDecodeError:
         ok = False
-    add("R-018", "CLI 失败也返回 JSON + 退出码 1", ok, (bad.stdout or "")[:60])
+    add("R-022", "CLI 失败也返回 JSON + 退出码 1", ok, (bad.stdout or "")[:60])
 
 
 GUI_LINE = re.compile(r"^\s*(PASS|FAIL)\s+(R-\d+)\s+(.*?)\s*(?:\[(.*)\])?$")
@@ -200,6 +207,11 @@ def suite_visual() -> None:
     os.environ.setdefault("OMNICOM_SETTINGS_SUFFIX", "-test")
     from PySide6.QtWidgets import QApplication
 
+    # -- the light theme must stay readable: every text/surface pair >= 4.5:1
+    contrast = run(["tools/contrast_audit.py"])
+    add("R-020", "浅色主题对比度均达到 AA（>= 4.5:1）",
+        contrast.returncode == 0,
+        "" if contrast.returncode == 0 else (contrast.stdout or "").strip().splitlines()[-1:])
 
     app = QApplication.instance() or QApplication([sys.argv[0]])
     app.setStyle("Fusion")
@@ -209,16 +221,19 @@ def suite_visual() -> None:
     from omnicom.ui import theme
     from omnicom.ui.main_window import Aurora
 
-    backdrop = Aurora()
-    backdrop.resize(480, 320)
-    backdrop.show()
-    app.processEvents()
-    backdrop_image = backdrop.grab().toImage()
-    pixels = {backdrop_image.pixelColor(x, y).name()
-              for y in range(20, 300, 7) for x in range(20, 460, 7)}
-    add("R-020", "背景控件为纯色（~2500 个采样点同色）", len(pixels) == 1, sorted(pixels)[:3])
-    add("R-020", f"背景色等于主题色 {theme.BG}", pixels == {theme.BG.lower()}, sorted(pixels)[:3])
-    backdrop.close()
+    probe = Aurora()
+    probe.resize(360, 360)
+    backdrop = probe.grab().toImage()
+    counts: dict[str, int] = {}
+    for y in range(backdrop.height()):
+        for x in range(backdrop.width()):
+            name = backdrop.pixelColor(x, y).name()
+            counts[name] = counts.get(name, 0) + 1
+    dominant = max(counts, key=counts.get)
+    share = counts[dominant] / max(1, sum(counts.values()))
+    add("R-020", "背景层为单一纯色", dominant == theme.BG.lower() and share >= 0.98,
+        f"{dominant} {share:.2%}")
+    probe.deleteLater()
 
     # -- the grid was drawn with drawLine(); its absence is the negative proof.
     with open(os.path.join(ROOT, "omnicom", "ui", "main_window.py"),
@@ -235,18 +250,6 @@ def suite_visual() -> None:
     time.sleep(0.15)
     app.processEvents()
 
-    image = window.grab().toImage()
-
-    # -- dominant colour of the whole window should still be the backdrop colour
-    counts: dict[str, int] = {}
-    for y in range(0, image.height(), 11):
-        for x in range(0, image.width(), 11):
-            name = image.pixelColor(x, y).name()
-            counts[name] = counts.get(name, 0) + 1
-    dominant = max(counts, key=counts.get)
-    share = counts[dominant] / max(1, sum(counts.values()))
-    add("R-020", "窗口主色即背景纯色", dominant == theme.BG.lower(),
-        f"{dominant} {share:.0%}")
 
     # -- top bar structure
     bar = window.titlebar

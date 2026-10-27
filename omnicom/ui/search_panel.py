@@ -78,7 +78,7 @@ class SearchPanel(QWidget):
         header.setObjectName("SideHeader")
         header.setStyleSheet(
             "QWidget#SideHeader { background: transparent; border: 0;"
-            " border-bottom: 1px solid rgba(255,255,255,14); }")
+            f" border-bottom: 1px solid {theme.LINE_SOFT}; }}")
         layout = QHBoxLayout(header)
         layout.setContentsMargins(5, 6, 8, 6)
         layout.setSpacing(6)

@@ -119,13 +119,14 @@ class CommandRow(QFrame):
             layout.addWidget(button)
 
     def _apply_style(self, enabled: bool) -> None:
-        border = "rgba(94, 234, 212, 84)" if enabled else "rgba(255, 255, 255, 18)"
-        fill = "rgba(94, 234, 212, 18)" if enabled else "rgba(255, 255, 255, 10)"
+        border = "rgba(14, 148, 132, 110)" if enabled else theme.LINE
+        fill = theme.TEAL_SOFT if enabled else theme.CARD
+        hover = "#F0FBF9" if enabled else theme.WASH
         self.setStyleSheet(
             f"QFrame#CmdRow {{ background: {fill}; border: 1px solid {border};"
             f" border-radius: 11px; }}"
-            "QFrame#CmdRow:hover { background: rgba(255, 255, 255, 26);"
-            " border-color: rgba(255, 255, 255, 50); }")
+            f"QFrame#CmdRow:hover {{ background: {hover};"
+            f" border-color: {theme.LINE_STRONG}; }}")
 
 
 class CommandDialog(QDialog):
@@ -194,7 +195,7 @@ class CommandDialog(QDialog):
         layout.addLayout(footer)
 
         self.setStyleSheet(
-            "QDialog { background: #0A0E17; }"
+            f"QDialog {{ background: {theme.CARD}; }}"
             f"QLabel {{ color: {theme.INK}; }}")
 
     # -- helpers -----------------------------------------------------------
@@ -321,7 +322,7 @@ class CommandsPanel(QWidget):
         header.setObjectName("SideHeader")
         header.setStyleSheet(
             "QWidget#SideHeader { background: transparent; border: 0;"
-            " border-bottom: 1px solid rgba(255,255,255,14); }")
+            f" border-bottom: 1px solid {theme.LINE_SOFT}; }}")
         return header
 
     def _tool(self, text: str, tip: str) -> QPushButton:
@@ -348,8 +349,8 @@ class CommandsPanel(QWidget):
     def _build_drawer(self) -> QWidget:
         drawer = QFrame()
         drawer.setStyleSheet(
-            "QFrame { background: rgba(255,255,255,10);"
-            " border: 1px dashed rgba(255,255,255,36); border-radius: 11px; }")
+            f"QFrame {{ background: {theme.WASH};"
+            f" border: 1px dashed {theme.LINE_STRONG}; border-radius: 11px; }}")
         layout = QVBoxLayout(drawer)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)

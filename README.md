@@ -38,10 +38,11 @@ python -m pip install -r requirements.txt
 ## 自测
 
 ```bat
-python tools/acceptance_test.py      :: 全功能验收：20 条需求 / 84 项检查
+python tools/acceptance_test.py      :: 全功能验收：25 条需求 / 90 项检查
 python tools/protocol_selftest.py    :: X/Y/ZMODEM 环回（23 项）
-python tools/ui_selftest.py          :: GUI 验收（35 项，DEMO 端口）
+python tools/ui_selftest.py          :: GUI 验收（41 项，DEMO 端口）
 python tools/ui_snapshot.py          :: 渲染 .artifacts/ui.png 供目视检查
+python tools/contrast_audit.py       :: 白色主题文字对比度（需全部 >= 4.5:1）
 ```
 
 > 验收脚本会把 `ui_selftest.py` 的每条 `PASS/FAIL` 行按 `R-\d+` 归到需求上；不带需求号的

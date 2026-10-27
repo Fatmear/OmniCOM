@@ -10,13 +10,18 @@ Rules
 - **Do not build or ship an .exe (R-019)**: corporate endpoint policy blocks self-built executables.
   Run from source: `start.cmd`, or `python run.py`, or `python run.py --demo` (虚拟串口).
 - Verify commands: `python tools/protocol_selftest.py` (X/Y/ZMODEM loopback, 23 checks),
-  `python tools/ui_selftest.py` (35 GUI acceptance checks incl. DEMO port),
-  `python tools/acceptance_test.py` (84 checks covering R-001..R-020 + `.artifacts/acceptance.json`),
-  `python tools/ui_snapshot.py` (renders `.artifacts/ui.png` for visual review).
+  `python tools/ui_selftest.py` (41 GUI acceptance checks incl. DEMO port),
+  `python tools/acceptance_test.py` (90 checks covering R-001..R-025 + `.artifacts/acceptance.json`),
+  `python tools/ui_snapshot.py` (renders `.artifacts/ui.png` for visual review),
+  `python tools/contrast_audit.py` (light-theme text contrast must stay >= 4.5:1).
   GUI checks must start with their `R-0xx` id — an un-mapped check fails the run.
 - Lint: `python -m ruff check .` must be clean (config in `pyproject.toml`).
   Test harnesses use `OMNICOM_SETTINGS_SUFFIX` so they never touch the real UI settings.
 - Before ending a session: replace `HANDOFF.md`, append closed items to `LEDGER.md`.
 - CLI for agents: `python -m omnicom.cli <ports|info|send|read|monitor|send-file|transfer|session|selftest>`,
   stdout is one JSON document (R-022); full reference in `docs/CLI.md`. Use `--port DEMO` without hardware.
+- The theme is **light (white)**: `omnicom/ui/theme.py` holds every colour token. Never hardcode a
+  light-on-dark colour in a widget — run `python tools/contrast_audit.py` after touching the palette.
 - Background is a flat solid colour — do not reintroduce gradients, grids or blobs over the whole window (R-020).
+- Title-bar controls are painted by `GlyphButton`, not font glyphs: text inside a 30px button disappears
+  because `QPushButton` padding eats the label width, and symbol coverage depends on the font (L-023).
