@@ -10,8 +10,8 @@ Rules
 - **Do not build or ship an .exe (R-019)**: corporate endpoint policy blocks self-built executables.
   Run from source: `start.cmd`, or `python run.py`, or `python run.py --demo` (虚拟串口).
 - Verify commands: `python tools/protocol_selftest.py` (X/Y/ZMODEM loopback, 23 checks),
-  `python tools/ui_selftest.py` (96 GUI acceptance checks incl. DEMO port),
-  `python tools/acceptance_test.py` (145 checks covering R-001..R-036 + `.artifacts/acceptance.json`),
+  `python tools/ui_selftest.py` (112 GUI acceptance checks incl. DEMO port),
+  `python tools/acceptance_test.py` (160 checks covering R-001..R-048 + `.artifacts/acceptance.json`),
   `python tools/ui_snapshot.py` (renders `.artifacts/ui.png` for visual review),
   `python tools/contrast_audit.py` (light-theme text contrast must stay >= 4.5:1).
   GUI checks must start with their `R-0xx` id — an un-mapped check fails the run.
@@ -45,3 +45,9 @@ Rules
 - Radii come from `theme`: `RADIUS_CTRL` (5) for boxes/buttons, `CHECK_RADIUS` (6) for the checkbox
   indicator (≈ one third of `CHECK_SIZE`), `RADIUS_CARD` (9) for cards. Text boxes stay *sharper* than
   the checkboxes (R-036).
+- The three body columns live in `ui.body_split` (a `QSplitter`). Never set a column width from
+  `resizeEvent`, and never call `setSizes()` before the splitter has a real width — both were shipped
+  bugs (L-041, L-050). Use `reset_layout()` to restore the defaults.
+- Collapsing a command group must stay off the write path: call
+  `store.update_group(..., notify=False)`, flip `setVisible` in place, and let `closeEvent` flush it
+  (`R-041` / L-045). A 30 ms `os.replace` on the click path is a visible stutter.

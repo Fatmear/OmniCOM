@@ -73,6 +73,12 @@ TITLES = {
     "R-034": "帮助栏目：关于 + 使用文档弹窗",
     "R-035": "界面自适应缩放，控件不被裁剪",
     "R-036": "透明 logo + 控件圆角体系（勾选框大圆角）",
+    "R-037": "窗口外框四角都是直角",
+    "R-038": "左右侧栏可拖动调整宽度（自绘品牌标记）",
+    "R-039": "流控可读文案 + DTR/RTS 紧凑 + 波特率可自定义",
+    "R-040": "导出统一入口（选择框）+ 串口框跟随实际端口",
+    "R-041": "分组折叠即时响应（不重建、不写盘）",
+    "R-048": "串口重连后下拉框显示真正连上的端口",
 }
 
 
@@ -262,13 +268,22 @@ def suite_visual() -> None:
         f"{dominant} {share:.2%}")
     probe.deleteLater()
 
-    # -- the grid was drawn with drawLine(); its absence is the negative proof.
+    # -- The grid used to be drawn with drawLine() inside the backdrop's
+    #    paintEvent, so the proof is now scoped to that method: other widgets
+    #    (icons, the brand mark) legitimately draw lines.
     with open(os.path.join(ROOT, "omnicom", "ui", "main_window.py"),
               encoding="utf-8") as handle:
         source = handle.read()
-    add("R-020", "源码中已无网格绘制（drawLine / step = 46 / 网格）",
-        "drawLine(" not in source and "step = 46" not in source
-        and "subtle grid" not in source.lower())
+    backdrop_body = ""
+    if "class Aurora" in source:
+        start = source.index("class Aurora")
+        end = source.index("class BrandMark") if "class BrandMark" in source \
+            else len(source)
+        backdrop_body = source[start:end]
+    add("R-020", "背景层不再绘制网格（drawLine / step = 46 / 网格）",
+        "drawLine(" not in backdrop_body and "step = 46" not in backdrop_body
+        and "subtle grid" not in backdrop_body.lower(),
+        f"{len(backdrop_body)} chars scanned")
 
     window = OmniWindow(demo=False)
     window.resize(1100, 760)

@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import traceback
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -24,7 +25,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer  # noqa: E402
-from PySide6.QtGui import QColor  # noqa: E402
+from PySide6.QtGui import QColor, QImage  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton, QWidget  # noqa: E402
 
@@ -617,11 +618,12 @@ def main() -> int:
         store = window.command_store
 
         def row_count() -> int:
+            """Visible command rows (a collapse hides rows, it no longer rebuilds)."""
             layout = panel.list_layout
             total = 0
             for index in range(layout.count()):
                 widget = layout.itemAt(index).widget()
-                if isinstance(widget, CommandRow):
+                if isinstance(widget, CommandRow) and widget.isVisible():
                     total += 1
             return total
 
@@ -634,13 +636,40 @@ def main() -> int:
         check("R-031 分组支持备注", store.group_by_id(group["id"])["note"] != "")
 
         expanded = row_count()
+        start = time.perf_counter()
         panel.toggle_group(group["id"])
         app.processEvents()
+        elapsed = (time.perf_counter() - start) * 1000
         collapsed = row_count()
+        group_rows = panel._group_rows.get(group["id"], [])
+        hidden_ok = bool(group_rows) and not any(row.isVisible() for row in group_rows)
         panel.toggle_group(group["id"])
         app.processEvents()
         check("R-031 分组可折叠与展开", collapsed < expanded and row_count() == expanded,
               f"{expanded} -> {collapsed} -> {row_count()}")
+        check("R-041 折叠不重建列表（不卡顿）", elapsed < 40, f"{elapsed:.1f} ms")
+        check("R-041 折叠只隐藏该分组的行（其他分组不受影响）",
+              hidden_ok, f"{len(group_rows)} 行在该分组内")
+
+        # a command can be created straight inside a group
+        before_add = len(store.items)
+        page = panel.store.group_by_id(group["id"])
+        check("R-031 分组标题带「新增命令」入口",
+              hasattr(panel, "add_to_group") and page is not None)
+        store.add(["AT+INGROUP"], {"group": group["id"]})
+        panel.rebuild()
+        app.processEvents()
+        check("R-031 新建的命令直接落在分组里",
+              len(store.items) == before_add + 1
+              and store.items[-1]["group"] == group["id"])
+
+        # and moved between groups
+        other = store.add_group("第二组", "")
+        panel.move_item(store.items[-1]["id"], other["id"])
+        app.processEvents()
+        check("R-031 命令可移动到别的分组",
+              store.items[-1]["group"] == other["id"])
+        store.remove_group(other["id"])
 
         single = store.export_payload([store.items[0]])
         check("R-031 支持按条导出", len(single["items"]) == 1 and
@@ -810,17 +839,18 @@ def main() -> int:
         next_()
 
     def step_logo(next_):
-        """R-036: transparent logo in the title bar, big rounded controls."""
-        pixmap = window.titlebar.logo.pixmap()
-        check("R-036 标题栏使用真实 logo",
-              pixmap is not None and not pixmap.isNull(), window.titlebar.logo.text())
-        image = pixmap.toImage()
+        """R-036: the brand tile and the radius scale."""
+        mark = window.titlebar.logo
+        # widget.grab() bakes the parent's backdrop into the pixmap, so render
+        # into a transparent image instead - only the tile's own paint shows.
+        image = QImage(mark.size(), QImage.Format_ARGB32_Premultiplied)
+        image.fill(Qt.transparent)
+        mark.render(image)
         corner = image.pixelColor(0, 0)
-        check("R-036 logo 背景透明（不是白底方块）", corner.alpha() < 16,
+        check("R-036 品牌标记四角透明（圆角而非方块）", corner.alpha() < 40,
               f"alpha={corner.alpha()}")
-        check("R-036 logo 中间有内容", any(
-            image.pixelColor(x, image.height() // 2).alpha() > 200
-            for x in range(image.width())), "opaque row")
+        check("R-036 品牌标记中间有内容",
+              image.pixelColor(image.width() // 2, image.height() // 2).alpha() > 200)
         check("R-036 勾选框圆角足够大（半径 ≥ 尺寸 1/3）",
               theme.CHECK_RADIUS * 3 >= theme.CHECK_SIZE,
               f"r={theme.CHECK_RADIUS} s={theme.CHECK_SIZE}")
@@ -829,6 +859,64 @@ def main() -> int:
               f"{theme.RADIUS_CTRL} < {theme.CHECK_RADIUS}")
         check("R-036 应用图标已设置",
               not window.windowIcon().isNull())
+        check("R-036 标题栏使用自绘标记而不是图片",
+              type(window.titlebar.logo).__name__ == "BrandMark")
+        next_()
+
+    def step_shell(next_):
+        """R-037..R-040: square window, draggable columns, readable flow labels."""
+        corner = window.centralWidget().grab().toImage()
+        bottom = corner.pixelColor(2, corner.height() - 3)
+        check("R-037 窗口外框四角都是直角", bottom.alpha() > 200,
+              f"alpha={bottom.alpha()}")
+        check("R-038 左右侧栏可通过分隔条拖动", window.body_split.count() == 3
+              and window.body_split.handleWidth() > 0,
+              f"count={window.body_split.count()}")
+        before = window.rail.width()
+        # Move the handle the way a real drag does (setSizes can be overruled by
+        # the centre column's minimum width).
+        window.body_split.moveSplitter(before + 90, 1)
+        app.processEvents()
+        check("R-038 拖动分隔条能改变左栏宽度",
+              window.rail.width() > before, f"{before} -> {window.rail.width()}")
+        window.reset_layout()
+        app.processEvents()
+
+        from omnicom.ui.widgets import GlyphButton as _Glyph
+
+        commands = window.commands_panel
+        row_glyphs: list[str] = []
+        for index in range(commands.list_layout.count()):
+            widget = commands.list_layout.itemAt(index).widget()
+            if isinstance(widget, CommandRow):
+                row_glyphs.extend(button.glyph for button in widget.findChildren(_Glyph))
+        check("R-040 命令行里没有单独的导出按钮",
+              _Glyph.SAVE not in row_glyphs, str(sorted(set(row_glyphs))))
+        check("R-040 导出只有一个入口（顶部按钮打开选择框）",
+              hasattr(commands, "export_dialog"), type(commands).__name__)
+
+        labels = [window.flow.itemText(i) for i in range(window.flow.count())]
+        check("R-039 流控显示可读文案而不是变量名",
+              not any("flow." in text for text in labels), str(labels))
+        check("R-039 DTR/RTS 与开关靠在一起",
+              window.row_dtr.switch.x() - (window.row_dtr.label.x()
+                                           + window.row_dtr.label.width()) < 40,
+              str(window.row_dtr.switch.x()))
+        window.baud.setCurrentText("768000")
+        check("R-039 波特率可自定义", window._serial_opts()["baudrate"] == 768000)
+        window.baud.setCurrentText("999")
+        check("R-039 非法波特率被夹到合法范围",
+              window._serial_opts()["baudrate"] >= 50,
+              str(window._serial_opts()["baudrate"]))
+        window.baud.setCurrentText("115200")
+
+        # No processEvents(): the DEMO manager would immediately report its own
+        # status again and overwrite the value under test.
+        window._on_status({"connected": True, "port": "COM_TEST",
+                           "reconnecting": False})
+        check("R-048 串口框显示真正连上的端口",
+              window.port_combo.currentData() == "COM_TEST",
+              str(window.port_combo.currentData()))
         next_()
 
     runner.add("persist", step_persist)
@@ -843,6 +931,7 @@ def main() -> int:
     runner.add("help", step_help)
     runner.add("responsive", step_responsive)
     runner.add("logo", step_logo)
+    runner.add("shell", step_shell)
 
     runner.start()
     app.exec()

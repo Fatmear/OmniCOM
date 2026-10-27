@@ -1,4 +1,4 @@
-# OmniCOM 0.4.0
+# OmniCOM 0.6.0
 
 OmniCOM is a native Python serial workbench: no packaged exe, no local server,
 no browser. Double-click `start.cmd` and you are in.

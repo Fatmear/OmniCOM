@@ -100,6 +100,8 @@ class LogView(QPlainTextEdit):
         self.show_ts = True
         self.show_ctrl = False
         self.autoscroll = True
+        self._batching = 0
+        self._dirty = False
         self.trimmed = 0
         self._pending = False
         self._ts_format = self._make_format(theme.DIM)
@@ -137,6 +139,17 @@ class LogView(QPlainTextEdit):
         bar = self.verticalScrollBar()
         return bar.value() >= bar.maximum() - 4
 
+    # ----------------------------------------------------------------- batch
+    def begin_batch(self) -> None:
+        """Coalesce the geometry work of many appends into one pass."""
+        self._batching += 1
+
+    def end_batch(self) -> None:
+        self._batching = max(0, self._batching - 1)
+        if self._batching == 0 and self._dirty:
+            self._dirty = False
+            self._follow()
+
     def _follow(self, _was_at_bottom: bool = True) -> None:
         """自动滚动打开时**无条件**跟随最新一行.
 
@@ -145,6 +158,9 @@ class LogView(QPlainTextEdit):
         which is exactly what the user reported.  When the switch is off the
         view stays put and the floating pill offers a way back down.
         """
+        if self._batching:
+            self._dirty = True
+            return
         if not self.autoscroll:
             return
         bar = self.verticalScrollBar()

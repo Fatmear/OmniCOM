@@ -260,12 +260,27 @@ class CommandStore(QObject):
         self._commit()
         return group
 
-    def update_group(self, group_id: str, patch: dict) -> None:
+    def update_group(self, group_id: str, patch: dict,
+                     notify: bool = True) -> None:
         group = self.group_by_id(group_id)
         if group is None:
             return
         group.update(patch)
-        self._commit()
+        if notify:
+            self._commit()
+        else:
+            # Collapsing a group only changes how it is drawn.  Emitting
+            # `changed` rebuilt every row, and writing the file cost ~30 ms of
+            # `os.replace` - together that is the stutter the user reported.
+            # The flag is flushed lazily (see `flush`).
+            self._dirty = True
+
+
+    def flush(self) -> None:
+        """Write pending cosmetic changes (collapse state) to disk."""
+        if getattr(self, "_dirty", False):
+            self._dirty = False
+            self.save()
 
     def remove_group(self, group_id: str, drop_commands: bool = False) -> None:
         self.groups = [group for group in self.groups if group["id"] != group_id]

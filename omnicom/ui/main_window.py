@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import codecs
+import contextlib
 import os
 import subprocess
 import sys
 import time
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSettings, Qt, QTimer
-from PySide6.QtGui import QBrush, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSettings, Qt, QTimer
+from PySide6.QtGui import QBrush, QColor, QIcon, QIntValidator, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFileDialog,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QScrollArea,
+    QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -101,14 +103,58 @@ def human_size(value: float) -> str:
 
 
 class Aurora(QWidget):
-    """Solid backdrop - flat colour only, no grid, no blobs (R-020)."""
+    """Solid backdrop - flat colour only, no grid, no blobs (R-020).
+
+    Square edges on purpose: a rounded backdrop left the window with a square
+    title bar and a rounded bottom, which looked unfinished (R-044).
+    """
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(theme.BG)))
+        painter.drawRect(self.rect())
+
+
+class BrandMark(QWidget):
+    """The little rounded tile that stands in for the app logo.
+
+    Drawn with QPainter so it is font independent, has real antialiasing at any
+    size and matches the accent gradient used by primary buttons.
+    """
+
+    def __init__(self, size: int = 38, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        # No background of its own: only the rounded tile is painted, so the
+        # four corners stay transparent instead of showing a square plate.
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0)
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        gradient.setColorAt(0.0, QColor("#10A794"))
+        gradient.setColorAt(0.55, QColor("#4884F0"))
+        gradient.setColorAt(1.0, QColor("#7455F5"))
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(QColor(theme.BG)))
-        painter.drawRoundedRect(self.rect(), 18, 18)
+        painter.setBrush(QBrush(gradient))
+        painter.drawRoundedRect(rect, self.width() * 0.28, self.width() * 0.28)
+
+        # White arc + baseline: a compact "serial line" mark.
+        pen = QPen(QColor(255, 255, 255, 235), max(1.6, self.width() * 0.075))
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        inset = self.width() * 0.27
+        painter.drawArc(QRectF(inset, inset, self.width() - inset * 2,
+                               self.height() - inset * 2), 30 * 16, 240 * 16)
+        baseline = self.height() * 0.7
+        painter.drawLine(QPointF(self.width() * 0.3, baseline),
+                         QPointF(self.width() * 0.7, baseline))
 
 
 class TitleBar(GlassFrame):
@@ -127,16 +173,9 @@ class TitleBar(GlassFrame):
         # ---- brand (the real logo, with a transparent background) ----
         brand = QHBoxLayout()
         brand.setSpacing(10)
-        self.logo = QLabel()
-        self.logo.setFixedSize(38, 38)
-        self.logo.setAlignment(Qt.AlignCenter)
-        path = paths.resource_file("assets", "logo-64.png")
-        if path:
-            pixmap = QPixmap(path).scaled(38, 38, Qt.KeepAspectRatio,
-                                          Qt.SmoothTransformation)
-            self.logo.setPixmap(pixmap)
-        else:
-            self.logo.setText("◠")
+        # Painted mark, not an image: the generated logo looked bad at 38 px and
+        # an image cannot follow the theme (R-045).
+        self.logo = BrandMark(38, self)
         brand.addWidget(self.logo)
 
         names = QVBoxLayout()
@@ -362,6 +401,12 @@ class OmniWindow(QMainWindow):
         self._toasts: list[Toast] = []
         self._page_keys: list[str] = []
         self._plugin_pages: dict[str, QWidget] = {}
+        self._saved_split = False
+        self._rx_queue: list[tuple[float, bytes]] = []
+        self._rx_timer = QTimer(self)
+        self._rx_timer.setSingleShot(True)
+        self._rx_timer.setInterval(28)          # ~36 fps, cheaper than per-chunk
+        self._rx_timer.timeout.connect(self._flush_rx)
 
         self.plugins = PluginHost(notify=self.notify, log_line=self._plugin_log,
                                   parent=self)
@@ -385,12 +430,18 @@ class OmniWindow(QMainWindow):
         self.titlebar = TitleBar(self)
         root.addWidget(self.titlebar)
 
-        body = QHBoxLayout()
-        body.setSpacing(10)
-        root.addLayout(body, 1)
+        # A splitter, not a fixed-width HBox: the user drags either side column
+        # to whatever width they want (R-047).
+        self.body_split = QSplitter(Qt.Horizontal)
+        self.body_split.setObjectName("BodySplit")
+        self.body_split.setChildrenCollapsible(False)
+        self.body_split.setHandleWidth(6)
+        self.body_split.setStyleSheet(
+            "QSplitter#BodySplit::handle { background: transparent; }")
+        root.addWidget(self.body_split, 1)
 
         self.rail = self._build_rail()
-        body.addWidget(self.rail)
+        self.body_split.addWidget(self.rail)
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_terminal_page())
@@ -399,10 +450,15 @@ class OmniWindow(QMainWindow):
         self.stack.addWidget(self.console)
         self.transfer = TransferPanel(self.notify)
         self.stack.addWidget(self.transfer)
-        body.addWidget(self.stack, 1)
+        self.body_split.addWidget(self.stack)
 
         self.sidebar = self._build_sidebar()
-        body.addWidget(self.sidebar)
+        self.body_split.addWidget(self.sidebar)
+
+        self.body_split.setStretchFactor(0, 0)
+        self.body_split.setStretchFactor(1, 1)
+        self.body_split.setStretchFactor(2, 0)
+        self._split_ready = False
 
         self.status_strip = self._build_status_strip()
         root.addWidget(self.status_strip)
@@ -413,6 +469,7 @@ class OmniWindow(QMainWindow):
     def _build_rail(self) -> QWidget:
         rail = GlassFrame(radius=theme.RADIUS_CARD)
         rail.setMinimumWidth(240)
+        rail.setMaximumWidth(560)
         self.rail_box = QVBoxLayout(rail)
         self.rail_box.setContentsMargins(0, 0, 0, 0)
 
@@ -461,6 +518,11 @@ class OmniWindow(QMainWindow):
         self.baud = Combo(editable=True)
         self.baud.addItems(BAUD_RATES)
         self.baud.setCurrentText("115200")
+        # Custom rates must be safe to type: the validator keeps letters out and
+        # `_serial_opts` clamps whatever is left (R-046).
+        if self.baud.lineEdit() is not None:
+            self.baud.lineEdit().setValidator(QIntValidator(50, 12000000, self))
+            self.baud.lineEdit().setPlaceholderText("115200")
         self.baud.setToolTip(tr("rail.baud.tip"))
         left_col.addWidget(self.baud)
         self.lbl_databits = self._dim(tr("rail.databits"))
@@ -496,11 +558,14 @@ class OmniWindow(QMainWindow):
         layout.addWidget(self.flow)
 
         dtr_row = QHBoxLayout()
-        dtr_row.setSpacing(6)
-        self.row_dtr = SwitchRow("DTR", True)
-        self.row_rts = SwitchRow("RTS", True)
-        dtr_row.addWidget(self.row_dtr, 1)
-        dtr_row.addWidget(self.row_rts, 1)
+        dtr_row.setSpacing(18)
+        # compact: label and switch sit next to each other instead of being
+        # pushed to opposite ends of the column (R-039).
+        self.row_dtr = SwitchRow("DTR", True, compact=True)
+        self.row_rts = SwitchRow("RTS", True, compact=True)
+        dtr_row.addWidget(self.row_dtr)
+        dtr_row.addWidget(self.row_rts)
+        dtr_row.addStretch(1)
         layout.addLayout(dtr_row)
         layout.addWidget(self._divider())
 
@@ -640,7 +705,8 @@ class OmniWindow(QMainWindow):
     # --------------------------------------------------------------- sidebar
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
-        sidebar.setMinimumWidth(288)
+        sidebar.setMinimumWidth(260)
+        sidebar.setMaximumWidth(680)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
@@ -847,6 +913,12 @@ class OmniWindow(QMainWindow):
             self.restoreGeometry(geometry)
         if s.value("ui/sidebar", "1") == "0":
             self._sidebar_widget.hide()
+        sizes = s.value("ui/split")
+        self._saved_split = False
+        if isinstance(sizes, list) and len(sizes) == 3:
+            with contextlib.suppress(TypeError, ValueError):
+                self.body_split.setSizes([int(value) for value in sizes])
+                self._saved_split = True
         self.baud.setCurrentText(str(s.value("serial/baud", "115200")))
         index = self.bytesize.findText(str(s.value("serial/bytesize", "8")))
         self.bytesize.setCurrentIndex(max(0, index))
@@ -886,8 +958,13 @@ class OmniWindow(QMainWindow):
         s.setValue("ui/language", language())
 
     def _serial_opts(self) -> dict:
+        try:
+            baud = int(self.baud.currentText() or 115200)
+        except ValueError:
+            baud = 115200
+        baud = max(50, min(12_000_000, baud))
         return {
-            "baudrate": int(self.baud.currentText() or 115200),
+            "baudrate": baud,
             "bytesize": int(self.bytesize.currentText()),
             "stopbits": float(self.stopbits.currentText()),
             "parity": self.parity.currentData(),
@@ -963,11 +1040,17 @@ class OmniWindow(QMainWindow):
             self.meta_port.setText(status.get("port") or "—")
             self.status_line.setText(tr("status.connected", port=status.get("port"),
                                         baud=self.baud.currentText()))
+            # An auto-reconnect can land on a different device than the one the
+            # combo still shows, so the label follows reality, not the user's
+            # last pick (R-048).
+            self._sync_port_combo(str(status.get("port") or ""))
         elif status.get("reconnecting"):
             chip.set_state("retry", tr("status.chip.retry"))
             self.btn_connect.setText(tr("rail.cancel"))
             self.btn_connect.setObjectName("Primary")
             self.status_line.setText(tr("status.reconnecting"))
+            if status.get("port"):
+                self._sync_port_combo(str(status.get("port")))
         else:
             error = status.get("error")
             if error:
@@ -982,6 +1065,25 @@ class OmniWindow(QMainWindow):
         self.btn_connect.style().unpolish(self.btn_connect)
         self.btn_connect.style().polish(self.btn_connect)
 
+    def _sync_port_combo(self, port: str) -> None:
+        """Select ``port`` in the combo without triggering a re-open."""
+        if not port:
+            return
+        index = self.port_combo.findData(port)
+        if index < 0:
+            # The port is open but not (yet) in the list - show it anyway so the
+            # user can see which device is really connected.
+            self.port_combo.blockSignals(True)
+            self.port_combo.insertItem(0, port, port)
+            self.port_combo.setCurrentIndex(0)
+            self.port_combo.blockSignals(False)
+            return
+        if self.port_combo.currentIndex() == index:
+            return
+        self.port_combo.blockSignals(True)
+        self.port_combo.setCurrentIndex(index)
+        self.port_combo.blockSignals(False)
+
     def _on_stats(self, stats: dict) -> None:
         self.titlebar.set_counters(stats.get("rx", 0), stats.get("tx", 0))
 
@@ -990,11 +1092,29 @@ class OmniWindow(QMainWindow):
 
     # ------------------------------------------------------------------- rx
     def _on_rx(self, ts: float, data: bytes) -> None:
-        # No pause buffer: every chunk is printed immediately, so nothing can
-        # ever be dropped here (R-017).
-        self._feed(ts, data)
-        if self.console.isVisible():
-            self.console.feed(data)
+        # Nothing may be dropped (R-017), but *printing* can be coalesced: at
+        # 921600 baud the port delivers a chunk every few milliseconds and each
+        # append relayouts the whole view, which is what made scrolling feel
+        # sticky (R-049).  Chunks are accumulated and flushed once per frame.
+        if not data:
+            return
+        self._rx_queue.append((ts, data))
+        if not self._rx_timer.isActive():
+            self._rx_timer.start()
+
+    def _flush_rx(self) -> None:
+        if not self._rx_queue:
+            return
+        queue, self._rx_queue = self._rx_queue, []
+        console = self.console.isVisible()
+        self.log.begin_batch()
+        try:
+            for ts, data in queue:
+                self._feed(ts, data)
+                if console:
+                    self.console.feed(data)
+        finally:
+            self.log.end_batch()
 
     def _feed(self, ts: float, data: bytes) -> None:
         if not data:
@@ -1176,23 +1296,13 @@ class OmniWindow(QMainWindow):
 
     # ------------------------------------------------------------ responsive
     def _apply_responsive(self) -> None:
-        """Both side columns scale with the window so nothing is clipped (R-031).
+        """Only hide decorations on narrow windows.
 
-        Every call must be idempotent: ``setFixedWidth`` / ``setMaximumWidth``
-        themselves schedule a resize, which lands in ``resizeEvent`` again.  An
-        unconditional implementation therefore loops forever (each iteration
-        printing "This plugin does not support propagateSizeHints()").
+        Column widths are owned by the splitter the user drags, so this method
+        must never set a width: doing that from ``resizeEvent`` fights the
+        layout and loops forever (L-041).
         """
         width = self.width()
-        rail = max(236, min(320, int(width * 0.21)))
-        if self.rail.width() != rail:
-            self.rail.setFixedWidth(rail)
-
-        if not self._sidebar_widget.isHidden():
-            side = max(280, min(392, int(width * 0.26)))
-            if self._sidebar_widget.maximumWidth() != side:
-                self._sidebar_widget.setFixedWidth(side)
-
         show_subtitle = width >= 1120
         if self.titlebar.subtitle.isVisible() != show_subtitle:
             self.titlebar.subtitle.setVisible(show_subtitle)
@@ -1204,6 +1314,36 @@ class OmniWindow(QMainWindow):
         show_chip = width >= 1060
         if self.titlebar.status_chip.isVisible() != show_chip:
             self.titlebar.status_chip.setVisible(show_chip)
+
+    def reset_layout(self) -> None:
+        """Put the three columns back to their default widths."""
+        self._sidebar_widget.show()
+        self._apply_default_split()
+
+    def _apply_default_split(self) -> None:
+        total = max(600, self.body_split.width())
+        rail = max(266, min(340, int(total * 0.20)))
+        side = max(300, min(410, int(total * 0.26)))
+        self.body_split.setSizes([rail, max(360, total - rail - side), side])
+
+    def _split_looks_degenerate(self) -> bool:
+        """True when the persisted sizes do not fit the window any more."""
+        sizes = self.body_split.sizes()
+        if len(sizes) != 3:
+            return True
+        total = sum(sizes)
+        if total < 300:
+            return True
+        return abs(total - self.body_split.width()) > max(120, total * 0.35)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._split_ready:
+            self._split_ready = True
+            # The splitter only has a real width once the first show happened;
+            # setSizes() in __init__ was silently clamped to the minimums.
+            if self._split_looks_degenerate() or not self._saved_split:
+                self._apply_default_split()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -1496,6 +1636,9 @@ class OmniWindow(QMainWindow):
         self.baud.setToolTip(tr("rail.baud.tip"))
         for index, (_key, label_key) in enumerate(FLOW_KEYS):
             self.flow.setItemText(index, tr(label_key))
+        # The "flow" meta row mirrors the combo, so it must be refreshed too -
+        # otherwise it kept the previous language's text.
+        self.meta_flow.setText(self.flow.currentText())
         self.sec_display.setText(tr("rail.display"))
         for row, key in ((self.row_hex, "rail.hex"), (self.row_ts, "rail.ts"),
                          (self.row_ctrl, "rail.ctrl"), (self.row_echo, "rail.echo"),
@@ -1537,10 +1680,12 @@ class OmniWindow(QMainWindow):
             self.titlebar.sync_max_button()
 
     def closeEvent(self, event) -> None:
+        self.command_store.flush()
         self.settings.setValue("ui/geometry", self.saveGeometry())
         self._save_settings()
         self.settings.setValue("ui/sidebar",
                               "0" if self._sidebar_widget.isHidden() else "1")
+        self.settings.setValue("ui/split", self.body_split.sizes())
         if self._transfer is not None and self._transfer.isRunning():
             self._transfer.cancel()
             self._transfer.wait(2000)

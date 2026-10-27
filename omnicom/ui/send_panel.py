@@ -55,6 +55,20 @@ class SendPanel(GlassFrame):
         top.setSpacing(10)
 
         self.input = SendInput()
+        # A QPlainTextEdit draws its frame rounded but leaves the *viewport* a
+        # square, opaque rectangle on top - the "圆角混直角" the user saw.  The
+        # viewport is made transparent so only the styled frame is visible.
+        self.input.setObjectName("SendInput")
+        self.input.setFrameShape(QPlainTextEdit.NoFrame)
+        self.input.setAttribute(Qt.WA_StyledBackground, True)
+        self.input.viewport().setAutoFillBackground(False)
+        self.input.viewport().setStyleSheet("background: transparent;")
+        self.input.setStyleSheet(
+            f"QPlainTextEdit#SendInput {{ background: {theme.CARD};"
+            f" border: 1px solid {theme.LINE};"
+            f" border-radius: {theme.RADIUS_CTRL}px;"
+            f" padding: 6px 10px; }}"
+            f"QPlainTextEdit#SendInput:focus {{ border: 1px solid {theme.TEAL}; }}")
         self.input.setPlaceholderText(tr("send.placeholder"))
         self.input.setFixedHeight(64)
         self.input.sendTriggered.connect(self.emit_current)

@@ -12,7 +12,7 @@ import sys
 import traceback
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("OMNICOM_SETTINGS_SUFFIX", "-test")
+os.environ.setdefault("OMNICOM_SETTINGS_SUFFIX", "-snapshot")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:

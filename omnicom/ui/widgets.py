@@ -9,6 +9,7 @@ from PySide6.QtCore import (
     QEasingCurve,
     QEvent,
     QPoint,
+    QPointF,
     QPropertyAnimation,
     QRectF,
     QSize,
@@ -174,21 +175,28 @@ class ToggleSwitch(QWidget):
 
 
 class SwitchRow(QWidget):
-    """Label on the left, switch on the right."""
+    """Label plus switch.  ``compact`` keeps them adjacent instead of pinned
+    to opposite ends, which is what a short label like "DTR" needs (R-039)."""
 
     toggled = Signal(bool)
 
     def __init__(self, text: str, checked: bool = False, parent=None,
-                 tooltip: str = "") -> None:
+                 tooltip: str = "", compact: bool = False) -> None:
         super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(2, 3, 2, 3)
         layout.setSpacing(8)
         self.label = QLabel(text)
         self.label.setStyleSheet(f"color: {theme.INK2}; font-size: 12.5px;")
-        layout.addWidget(self.label, 1)
-        self.switch = ToggleSwitch(self, checked=checked)
-        layout.addWidget(self.switch, 0, Qt.AlignRight)
+        if compact:
+            layout.addWidget(self.label, 0)
+            self.switch = ToggleSwitch(self, checked=checked)
+            layout.addWidget(self.switch, 0)
+            layout.addStretch(1)
+        else:
+            layout.addWidget(self.label, 1)
+            self.switch = ToggleSwitch(self, checked=checked)
+            layout.addWidget(self.switch, 0, Qt.AlignRight)
         self.switch.toggled.connect(self.toggled.emit)
         self.label.setCursor(Qt.PointingHandCursor)
         if tooltip:
@@ -469,14 +477,13 @@ class GlyphButton(QPushButton):
             painter.drawLine(int(cx + half * 0.55), int(cy),
                              int(cx - half * 0.55), int(cy + half))
         elif glyph == self.CLEAR:
-            box = QRectF(cx - half, cy - half, half * 2, half * 2)
-            painter.drawRoundedRect(box, 2.5, 2.5)
-            painter.drawLine(int(cx - half * 0.5), int(cy + half),
-                             int(cx - half * 0.5), int(cy + half * 0.1))
-            painter.drawLine(int(cx + half * 0.5), int(cy + half),
-                             int(cx + half * 0.5), int(cy + half * 0.1))
-            painter.drawLine(int(cx - half), int(cy + half * 0.1),
-                             int(cx + half), int(cy + half * 0.1))
+            # A crossed-out circle: unambiguous "clear", and nothing like the
+            # floppy/save box it used to be (R-038).
+            radius = half * 0.95
+            painter.drawEllipse(QPointF(cx, cy), radius, radius)
+            offset = radius * 0.62
+            painter.drawLine(QPointF(cx - offset, cy - offset),
+                             QPointF(cx + offset, cy + offset))
         elif glyph in (self.EXPAND, self.SHRINK):
             outward = glyph == self.EXPAND
             inner = half * 0.45
@@ -488,12 +495,25 @@ class GlyphButton(QPushButton):
                 painter.drawLine(int(sx), int(sy), int(ex), int(sy))
                 painter.drawLine(int(sx), int(sy), int(sx), int(ey))
         elif glyph == self.REFRESH:
+            # One open arc plus a two-stroke arrowhead at the arc's end.  The
+            # old version hard-coded the head against the bounding box, which
+            # left stray pixels outside the circle ("有点脏"); the head is now
+            # placed with trig so it always sits exactly on the arc (R-038).
+            import math
+
             rect = QRectF(cx - half, cy - half, half * 2, half * 2)
-            painter.drawArc(rect, 40 * 16, 260 * 16)
-            painter.drawLine(int(cx + half * 0.75), int(cy - half * 0.95),
-                             int(cx + half * 1.05), int(cy - half * 0.25))
-            painter.drawLine(int(cx + half * 0.75), int(cy - half * 0.95),
-                             int(cx + half * 0.1), int(cy - half * 0.62))
+            start_deg, span_deg = 55.0, 270.0
+            painter.drawArc(rect, int(start_deg * 16), int(span_deg * 16))
+            end_deg = start_deg + span_deg
+            angle = math.radians(end_deg)
+            tip_x = cx + half * math.cos(angle)
+            tip_y = cy - half * math.sin(angle)
+            head = half * 0.55
+            for delta in (60, 120):
+                a = math.radians(end_deg - delta)
+                painter.drawLine(
+                    QPointF(tip_x, tip_y),
+                    QPointF(tip_x + head * math.cos(a), tip_y - head * math.sin(a)))
         elif glyph == self.FOLDER:
             path = QPainterPath()
             path.moveTo(cx - half, cy - half * 0.7)
@@ -605,6 +625,15 @@ class Combo(QComboBox):
         view = self.view()
         view.setUniformItemSizes(True)
         view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # The popup is a top-level frame drawn by the style, so its square border
+        # showed *outside* our rounded item view (a rounded list with a square
+        # grey rectangle behind it).  Make the popup frameless/translucent so
+        # only the rounded container is visible (R-037).
+        container = view.window()
+        container.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint
+                                 | Qt.NoDropShadowWindowHint)
+        container.setAttribute(Qt.WA_TranslucentBackground, True)
+        container.setAttribute(Qt.WA_StyledBackground, True)
         self._chevron = _Chevron(self)
         if editable and self.lineEdit() is not None:
             self.lineEdit().installEventFilter(self)
@@ -650,11 +679,31 @@ class _Chevron(QWidget):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._open = False
+        self._angle = 0.0          # animated 0 (closed) -> 180 (open)
+        self._anim: QPropertyAnimation | None = None
+
+    def _get_angle(self) -> float:
+        return self._angle
+
+    def _set_angle(self, value: float) -> None:
+        self._angle = float(value)
+        self.update()
+
+    angle = Property(float, _get_angle, _set_angle)
 
     def set_open(self, value: bool) -> None:
-        if value != self._open:
-            self._open = value
-            self.update()
+        if value == self._open:
+            return
+        self._open = value
+        # A rotated arrow reads as "this opened" without costing more than a
+        # 20x20 repaint (R-043).
+        animation = QPropertyAnimation(self, b"angle", self)
+        animation.setDuration(140)
+        animation.setEasingCurve(QEasingCurve.OutCubic)
+        animation.setStartValue(self._angle)
+        animation.setEndValue(180.0 if value else 0.0)
+        animation.start()
+        self._anim = animation
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -663,19 +712,11 @@ class _Chevron(QWidget):
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(pen)
-        cx = self.width() / 2.0
-        cy = self.height() / 2.0
+        painter.translate(self.width() / 2.0, self.height() / 2.0)
+        painter.rotate(self._angle)
         half = 3.6
-        if self._open:
-            painter.drawLine(int(cx - half), int(cy + half * 0.55),
-                             int(cx), int(cy - half * 0.55))
-            painter.drawLine(int(cx), int(cy - half * 0.55),
-                             int(cx + half), int(cy + half * 0.55))
-        else:
-            painter.drawLine(int(cx - half), int(cy - half * 0.55),
-                             int(cx), int(cy + half * 0.55))
-            painter.drawLine(int(cx), int(cy + half * 0.55),
-                             int(cx + half), int(cy - half * 0.55))
+        painter.drawLine(QPointF(-half, -half * 0.55), QPointF(0, half * 0.55))
+        painter.drawLine(QPointF(0, half * 0.55), QPointF(half, -half * 0.55))
 
 
 class ScrollBottomPill(QPushButton):

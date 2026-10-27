@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import paths
-from ..commands import CommandStore, payload_for
+from ..commands import UNGROUPED, CommandStore, payload_for
 from ..i18n import tr
 from . import theme
 from .widgets import Badge, Combo, GlyphButton
@@ -139,7 +139,6 @@ class CommandRow(QWidget):
         for glyph, tip, slot in (
                 (GlyphButton.SEND, tr("cmd.send"), lambda: self.send.emit(item)),
                 (GlyphButton.EDIT, tr("cmd.edit"), lambda: self.edit.emit(item)),
-                (GlyphButton.SAVE, tr("cmd.export"), lambda: self.exportOne.emit(item)),
                 (GlyphButton.TRASH, tr("cmd.delete"), lambda: self.remove.emit(item["id"]))):
             button = GlyphButton(glyph, self, size=theme.ICON_SM)
             button.setToolTip(tip)
@@ -189,6 +188,7 @@ class GroupHeader(QWidget):
     rename = Signal(str)
     exportGroup = Signal(str)
     remove = Signal(str)
+    addCommand = Signal(str)
 
     def __init__(self, group: dict, count: int, parent=None) -> None:
         super().__init__(parent)
@@ -220,10 +220,10 @@ class GroupHeader(QWidget):
             info.setToolTip(note)
             layout.addWidget(info)
 
-        self.export_btn = GlyphButton(GlyphButton.SAVE, self, size=20)
-        self.export_btn.setToolTip(tr("cmd.dialog.exportgroup"))
-        self.export_btn.clicked.connect(lambda: self.exportGroup.emit(group["id"]))
-        layout.addWidget(self.export_btn)
+        self.add_btn = GlyphButton(GlyphButton.PLUS, self, size=20)
+        self.add_btn.setToolTip(tr("cmd.addtogroup"))
+        self.add_btn.clicked.connect(lambda: self.addCommand.emit(group["id"]))
+        layout.addWidget(self.add_btn)
 
         self.edit_btn = GlyphButton(GlyphButton.EDIT, self, size=20)
         self.edit_btn.setToolTip(tr("cmd.edit"))
@@ -232,6 +232,8 @@ class GroupHeader(QWidget):
 
     def contextMenuEvent(self, event) -> None:
         menu = QMenu(self)
+        menu.addAction(tr("cmd.addtogroup"),
+                       lambda: self.addCommand.emit(self.group["id"]))
         menu.addAction(tr("cmd.dialog.exportgroup"),
                        lambda: self.exportGroup.emit(self.group["id"]))
         menu.addAction(tr("cmd.edit"), lambda: self.rename.emit(self.group["id"]))
@@ -653,6 +655,10 @@ class CommandsPanel(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
 
+        # ``_group_rows`` lets a collapse flip visibility instead of rebuilding
+        # the whole list.  Rebuilding 20+ rows (each with its own buttons) on
+        # every chevron click was the visible stutter (R-041).
+        self._group_rows: dict[str, list[QWidget]] = {}
         for group, items in self.store.groups_with_items():
             if group is not None:
                 header = GroupHeader(group, len(items))
@@ -660,7 +666,9 @@ class CommandsPanel(QWidget):
                 header.rename.connect(self.edit_group)
                 header.exportGroup.connect(self.export_dialog)
                 header.remove.connect(self.remove_group)
+                header.addCommand.connect(self.add_to_group)
                 self.list_layout.insertWidget(self.list_layout.count() - 1, header)
+                self._group_rows[group["id"]] = []
                 if group.get("collapsed"):
                     continue
             for entry in items:
@@ -670,8 +678,10 @@ class CommandsPanel(QWidget):
                 row.remove.connect(self.remove_item)
                 row.toggled.connect(self.set_enabled)
                 row.exportOne.connect(self.export_one)
-                row.moveTo.connect(self.store.move_to_group)
+                row.moveTo.connect(self.move_item)
                 self.list_layout.insertWidget(self.list_layout.count() - 1, row)
+                if group is not None:
+                    self._group_rows.setdefault(group["id"], []).append(row)
 
         count = len(self.store.items)
         self.count.setText(str(count))
@@ -685,11 +695,34 @@ class CommandsPanel(QWidget):
         group = self.store.group_by_id(group_id)
         if group is None:
             return
-        self.store.update_group(group_id, {"collapsed": not group.get("collapsed")})
-        # The rows live in the layout (not in a per-group container), so the
-        # panel has to re-emit itself for the collapse to be visible.
-        self.rebuild()
+        collapsed = not group.get("collapsed")
+        self.store.update_group(group_id, {"collapsed": collapsed}, notify=False)
+        rows = getattr(self, "_group_rows", {}).get(group_id, [])
+        for row in rows:
+            row.setVisible(not collapsed)
+        # Flip the chevron in place: no rebuild, so no stutter.
+        for index in range(self.list_layout.count()):
+            widget = self.list_layout.itemAt(index).widget()
+            if isinstance(widget, GroupHeader) and widget.group["id"] == group_id:
+                widget.chevron.set_glyph(GlyphButton.CHEVRON_RIGHT if collapsed
+                                         else GlyphButton.CHEVRON_DOWN)
+                widget.group["collapsed"] = collapsed
+                break
+        self.sync_timers()
 
+    def add_to_group(self, group_id: str) -> None:
+        """Create a command that lands directly inside ``group_id`` (R-042)."""
+        self.open_editor(None, group_id)
+
+    def move_item(self, item_id: str, group_id: str) -> None:
+        self.store.move_to_group(item_id, group_id)
+        name = ""
+        group = self.store.group_by_id(group_id)
+        if group is not None:
+            name = group.get("name") or group_id
+        self.notify(tr("cmd.moved", name=name or tr("cmd.ungrouped")), "ok")
+
+    # ------------------------------------------------------------------- actions
     def new_group(self) -> None:
         dialog = GroupDialog(self)
         if dialog.exec() != QDialog.Accepted:
@@ -789,6 +822,7 @@ class CommandsPanel(QWidget):
                 return
 
     # ---------------------------------------------------------------- actions
+
     def send_item(self, item: dict) -> None:
         payload = payload_of(item)
         if not payload:
@@ -821,8 +855,11 @@ class CommandsPanel(QWidget):
     def set_enabled(self, item_id: str, enabled: bool) -> None:
         self.store.update(item_id, {"enabled": enabled})
 
-    def open_editor(self, item: dict | None) -> None:
-        dialog = CommandDialog(self, item, self.store.groups)
+    def open_editor(self, item: dict | None, group_id: str = "") -> None:
+        preset: dict | None = None
+        if group_id and group_id not in ("", UNGROUPED):
+            preset = {"group": group_id}
+        dialog = CommandDialog(self, item or preset, self.store.groups)
         if dialog.exec() != QDialog.Accepted:
             return
         patch = dialog.result_item()
