@@ -208,6 +208,7 @@ class PortManager:
         self._ports_sig: tuple | None = None
         self._reconnecting = False
         self._last_error: str | None = None
+        self._retry_notice = 0.0
         self._opened_at = 0.0
 
         self.rx_bytes = 0
@@ -364,16 +365,30 @@ class PortManager:
                 self._emit({"t": "rx", "d": data})
 
     def _handle_loss(self, exc: Exception) -> None:
+        port = self._want or "串口"
+        present = self._port_present(port)
         with self._lock:
             ser, self._ser = self._ser, None
             self._port = None
-            self._last_error = _friendly_error(exc, self._want or "串口")
+            self._last_error = _friendly_error(exc, port, present)
+            auto = bool(self._opts.get("autoReconnect", True))
+            # Enter the retry state immediately, otherwise the UI flashes
+            # "连接失败" for the whole time the device is being re-plugged.
+            self._reconnecting = auto
         if ser is not None:
             with contextlib.suppress(Exception):
                 ser.close()
         self._drain_raw()
-        self._emit({"t": "notice", "level": "warn", "text": f"串口断开：{self._last_error}"})
+        detail = "设备已拔出，" if not present else ""
+        self._emit({"t": "notice", "level": "warn",
+                    "text": f"串口断开：{detail}{self._last_error}"
+                            + ("（自动重连已开启，插回后会自动恢复）" if auto else "")})
         self._emit_status()
+
+    def _port_present(self, port: str) -> bool:
+        if port == DEMO_PORT:
+            return True
+        return any(item["name"] == port for item in self._ports)
 
     # ----------------------------------------------------------------- monitor
     def _monitor_loop(self) -> None:
@@ -402,10 +417,15 @@ class PortManager:
                 if want and not connected and auto:
                     target = self._resolve_target(want, ports)
                     if target:
-                        self._reconnecting = target != want
-                        self._open_now(target, self._opts, announce=False)
+                        with self._lock:
+                            self._reconnecting = True
+                        if self._open_now(target, self._opts, announce=False):
+                            self._retry_notice = 0.0
+                        else:
+                            self._notify_retry_throttled()
                 elif want and not connected:
-                    self._reconnecting = False
+                    with self._lock:
+                        self._reconnecting = False
             except Exception:
                 pass
             time.sleep(0.4)
@@ -542,11 +562,28 @@ def _normalise(opts: dict) -> dict:
     return out
 
 
-def _friendly_error(exc: Exception, port: str) -> str:
+def _friendly_error(exc: Exception, port: str, present: bool | None = None) -> str:
+    """Human wording for a pyserial failure.
+
+    On Windows an unplugged USB-serial adapter raises ``PermissionError`` with
+    "拒绝访问" - exactly the same exception a genuinely occupied port raises.
+    Telling the user "被其他程序占用" when the device is simply gone sends them
+    hunting for a phantom program, so the caller passes whether the port is
+    still enumerated and the message follows that fact instead of the errno.
+    """
     text = str(exc)
-    if "PermissionError" in type(exc).__name__ or "拒绝访问" in text or "Access is denied" in text:
+    denied = ("PermissionError" in type(exc).__name__
+              or "拒绝访问" in text or "Access is denied" in text)
+    missing = ("FileNotFoundError" in type(exc).__name__
+               or "could not open port" in text.lower()
+               or "系统找不到指定的文件" in text)
+    if denied:
+        if present is False:
+            return f"{port} 已拔出（设备不在串口列表中）"
         return f"{port} 被其他程序占用"
-    if "FileNotFoundError" in type(exc).__name__ or "could not open port" in text.lower():
+    if missing:
+        if present is False:
+            return f"{port} 已拔出"
         return f"无法打开 {port}（设备可能已拔出）"
     return text or type(exc).__name__
 
@@ -611,3 +648,16 @@ class Recorder:
         if not silent:
             self._emit({"t": "record", **self.state()})
         return self.state()
+
+    def _notify_retry_throttled(self) -> None:
+        """Report a failed reconnect attempt at most once every 4 seconds.
+
+        The monitor retries every 0.4 s; without this the notice feed would be
+        flooded while a device is unplugged.
+        """
+        now = time.time()
+        if now - self._retry_notice < 4.0:
+            return
+        self._retry_notice = now
+        self._emit({"t": "notice", "level": "warn",
+                    "text": f"重连失败：{self._last_error}（仍在重试）"})

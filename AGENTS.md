@@ -10,8 +10,8 @@ Rules
 - **Do not build or ship an .exe (R-019)**: corporate endpoint policy blocks self-built executables.
   Run from source: `start.cmd`, or `python run.py`, or `python run.py --demo` (虚拟串口).
 - Verify commands: `python tools/protocol_selftest.py` (X/Y/ZMODEM loopback, 23 checks),
-  `python tools/ui_selftest.py` (41 GUI acceptance checks incl. DEMO port),
-  `python tools/acceptance_test.py` (90 checks covering R-001..R-025 + `.artifacts/acceptance.json`),
+  `python tools/ui_selftest.py` (57 GUI acceptance checks incl. DEMO port),
+  `python tools/acceptance_test.py` (106 checks covering R-001..R-029 + `.artifacts/acceptance.json`),
   `python tools/ui_snapshot.py` (renders `.artifacts/ui.png` for visual review),
   `python tools/contrast_audit.py` (light-theme text contrast must stay >= 4.5:1).
   GUI checks must start with their `R-0xx` id — an un-mapped check fails the run.
@@ -23,5 +23,9 @@ Rules
 - The theme is **light (white)**: `omnicom/ui/theme.py` holds every colour token. Never hardcode a
   light-on-dark colour in a widget — run `python tools/contrast_audit.py` after touching the palette.
 - Background is a flat solid colour — do not reintroduce gradients, grids or blobs over the whole window (R-020).
-- Title-bar controls are painted by `GlyphButton`, not font glyphs: text inside a 30px button disappears
-  because `QPushButton` padding eats the label width, and symbol coverage depends on the font (L-023).
+- Title-bar / icon controls are painted by `GlyphButton`, never font glyphs: text inside a small
+  `QPushButton` is elided away by its padding, and symbol coverage depends on the font (L-023, L-033).
+- Every drop-down must be `widgets.Combo`. Never use `setFixedWidth/Height` on a button that carries text;
+  control metrics live in `theme` (`CTRL_H`, `ICON_SM`, `ICON_MD`, `ICON_SIZE`).
+- The log/terminal face comes from `theme.mono_font()` **and** must be pinned in the widget stylesheet,
+  because the global `*` selector in `app_stylesheet()` beats `setFont()` (L-032).

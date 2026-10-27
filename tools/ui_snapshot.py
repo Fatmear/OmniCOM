@@ -61,9 +61,11 @@ def main() -> int:
         guard("search.add2", lambda: window.search_panel.add_keyword("vbat"))
         guard("command.send", lambda: window.commands_panel.send_item(
             window.command_store.items[0]))
-        guard("transfer.tab", lambda: window.stack.setCurrentIndex(1))
+        guard("console.tab", lambda: window.switch_page("console"))
+        guard("console.back", lambda: window.switch_page("terminal"))
+        guard("transfer.tab", lambda: window.stack.setCurrentIndex(2))
         guard("transfer.back", lambda: window.stack.setCurrentIndex(0))
-        guard("pause.on", window.toggle_pause)
+        guard("autoscroll.off", lambda: window.row_scroll.setChecked(False))
 
     def snapshot() -> None:
         try:
@@ -80,8 +82,8 @@ def main() -> int:
             for line in window.log.plain_text().splitlines()[:4]:
                 print("   ", line)
             print("hits sample:")
-            for line in window.search_panel.hits_view.plain_text().splitlines()[:3]:
-                print("   ", line)
+            for row in range(min(3, window.search_panel.results.count())):
+                print("   ", window.search_panel.results.item(row).text())
             print("geometry:")
             for name, widget in (("rail", window.rail),
                                  ("stack", window.stack),
@@ -89,7 +91,7 @@ def main() -> int:
                                  ("cmd_block", window.cmd_block),
                                  ("search_block", window.search_block),
                                  ("cmd_list", window.commands_panel.scroll),
-                                 ("hits", window.search_panel.hits_view),
+                                 ("hits", window.search_panel.results),
                                  ("send", window.send_panel),
                                  ("log", window.log)):
                 rect = widget.geometry()
@@ -104,7 +106,7 @@ def main() -> int:
     QTimer.singleShot(300, connect_demo)
     QTimer.singleShot(1400, lambda: guard("send", lambda: window.send_payload(b"AT\r\n", "AT")))
     QTimer.singleShot(2600, exercise)
-    QTimer.singleShot(3600, lambda: guard("pause.off", window.toggle_pause))
+    QTimer.singleShot(3600, lambda: guard("autoscroll.on", lambda: window.row_scroll.setChecked(True)))
     QTimer.singleShot(6200, snapshot)
 
     app.exec()

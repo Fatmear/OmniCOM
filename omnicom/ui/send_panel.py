@@ -7,7 +7,6 @@ import os
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -20,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from ..commands import decode_escapes, parse_hex
 from . import theme
-from .widgets import GlassFrame, ToggleSwitch
+from .widgets import Combo, GlassFrame, ToggleSwitch
 
 LINE_ENDS = {"crlf": b"\r\n", "lf": b"\n", "cr": b"\r", "none": b""}
 
@@ -65,18 +64,16 @@ class SendPanel(GlassFrame):
         side.setSpacing(7)
         self.btn_send = QPushButton("发送")
         self.btn_send.setObjectName("Primary")
-        self.btn_send.setMinimumHeight(34)
         self.btn_send.setCursor(Qt.PointingHandCursor)
         self.btn_send.clicked.connect(self.emit_current)
         side.addWidget(self.btn_send, 1)
 
         opts = QHBoxLayout()
         opts.setSpacing(6)
-        self.line_end = QComboBox()
+        self.line_end = Combo()
         for key, label in (("none", "无行尾"), ("cr", "\\r"), ("lf", "\\n"), ("crlf", "\\r\\n")):
             self.line_end.addItem(label, key)
         self.line_end.setCurrentIndex(self.line_end.findData("crlf"))
-        self.line_end.setFixedHeight(28)
         self.line_end.setToolTip("发送时自动追加的行尾")
         opts.addWidget(self.line_end, 1)
 
@@ -104,8 +101,7 @@ class SendPanel(GlassFrame):
         self.interval.setRange(10, 3600000)
         self.interval.setSingleStep(10)
         self.interval.setValue(1000)
-        self.interval.setFixedWidth(88)
-        self.interval.setFixedHeight(28)
+        self.interval.setFixedWidth(92)
         foot.addWidget(self.interval)
 
         unit = QLabel("ms")
@@ -114,7 +110,6 @@ class SendPanel(GlassFrame):
 
         self.btn_timed = QPushButton("开始")
         self.btn_timed.setObjectName("Ghost")
-        self.btn_timed.setFixedHeight(28)
         self.btn_timed.setCursor(Qt.PointingHandCursor)
         self.btn_timed.clicked.connect(self.toggle_timed)
         foot.addWidget(self.btn_timed)
@@ -123,14 +118,12 @@ class SendPanel(GlassFrame):
 
         self.btn_file = QPushButton("发送文件")
         self.btn_file.setObjectName("Ghost")
-        self.btn_file.setFixedHeight(28)
         self.btn_file.setCursor(Qt.PointingHandCursor)
         self.btn_file.clicked.connect(self.pick_file)
         foot.addWidget(self.btn_file)
 
         self.btn_abort = QPushButton("停止")
         self.btn_abort.setObjectName("Danger")
-        self.btn_abort.setFixedHeight(28)
         self.btn_abort.setCursor(Qt.PointingHandCursor)
         self.btn_abort.clicked.connect(self.abortRequested.emit)
         self.btn_abort.hide()

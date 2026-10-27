@@ -18,6 +18,7 @@ of its checks failed.  A JSON report is written to ``.artifacts/acceptance.json`
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -47,7 +48,7 @@ TITLES = {
     "R-009": "粘贴多行自动填入命令列表",
     "R-010": "毫秒时间戳，可开关",
     "R-011": "定时发送",
-    "R-012": "暂停/继续（后台接收 + 补印）",
+    "R-012": "自动滚动到最新（暂停打印已移除）",
     "R-013": "接收保存到文件",
     "R-014": "多关键字搜索右侧汇总",
     "R-015": "显示 \\r\\n 等不可见字符",
@@ -61,6 +62,10 @@ TITLES = {
     "R-023": "CLI 支持 DEMO 虚拟端口",
     "R-024": "日志格式 [时间]发→/收←",
     "R-025": "开启后发送内容也显示不可见字符",
+    "R-026": "终端模式（linux 串口交互）",
+    "R-027": "Notepad++ 式查找全部 + 全屏 + 双击跳转",
+    "R-028": "下拉框统一风格 + 点击弹出候选 + 可自定义输入",
+    "R-029": "日志等宽字体",
 }
 
 
@@ -72,9 +77,24 @@ def add(req: str, name: str, ok: bool, detail: object = "") -> None:
     print(f"  [{mark}] {req} {name}" + (f"   [{detail}]" if detail else ""))
 
 
+def _utf8_console() -> None:
+    """Never let a console code page crash the report.
+
+    On a GBK console a single U+FFFD (produced when a child prints in its own
+    locale encoding) raised UnicodeEncodeError and killed the whole run, which
+    looked like a test failure.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def run(args: list[str], timeout: int = 180) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"       # children emit UTF-8 into the pipe
     return subprocess.run([sys.executable, *args], cwd=ROOT, capture_output=True,
-                          text=True, encoding="utf-8", errors="replace", timeout=timeout)
+                          text=True, encoding="utf-8", errors="replace",
+                          timeout=timeout, env=env)
 
 
 # ------------------------------------------------------------------ suites
@@ -350,6 +370,7 @@ def report() -> int:
 
 
 def main() -> int:
+    _utf8_console()
     parser = argparse.ArgumentParser(description="OmniCOM 全功能验收测试")
     parser.add_argument("--fast", action="store_true", help="跳过耗时最长的 GUI 套件")
     parser.add_argument("--only", choices=["protocol", "cli", "gui", "visual"],

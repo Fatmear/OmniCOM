@@ -7,10 +7,13 @@ from typing import ClassVar
 from PySide6.QtCore import (
     Property,
     QEasingCurve,
+    QEvent,
+    QPoint,
     QPropertyAnimation,
     QRectF,
     QSize,
     Qt,
+    QTimer,
     Signal,
 )
 from PySide6.QtGui import (
@@ -23,8 +26,10 @@ from PySide6.QtGui import (
     QRadialGradient,
 )
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLayout,
@@ -306,15 +311,19 @@ class FlowLayout(QLayout):
         self._layout(QRectF(rect), apply=True)
 
     def sizeHint(self) -> QSize:
-        return self.minimumSize()
-
-    def minimumSize(self) -> QSize:
+        # NOTE: this used to call a hand-written ``MinimumSize()`` which in turn
+        # called ``QWidgetItem.MinimumSize()`` - a method that does not exist in
+        # PySide6.  It only ever surfaced the first time a chips layout was
+        # asked for its size hint (i.e. when the search panel was resized).
         size = QSize()
         for item in self._items:
-            size = size.expandedTo(item.MinimumSize())
+            size = size.expandedTo(item.sizeHint())
         margins = self.contentsMargins()
         return size + QSize(margins.left() + margins.right(),
                             margins.top() + margins.bottom())
+
+    def minimumSize(self) -> QSize:
+        return self.sizeHint()
 
     def _layout(self, rect: QRectF, apply: bool) -> int:
         margins = self.contentsMargins()
@@ -374,13 +383,31 @@ class GlyphButton(QPushButton):
     RESTORE = "restore"
     CLOSE = "close"
     SIDEBAR = "sidebar"
+    CHEVRON_DOWN = "chevron_down"
+    CHEVRON_RIGHT = "chevron_right"
+    DOWN = "down"
+    CLEAR = "clear"
+    EXPAND = "expand"
+    SHRINK = "shrink"
+    REFRESH = "refresh"
+    FOLDER = "folder"
+    SAVE = "save"
+    SEARCH = "search"
+    SEND = "send"
+    EDIT = "edit"
+    TRASH = "trash"
+    PLUS = "plus"
+    PASTE = "paste"
 
-    def __init__(self, glyph: str, parent=None, danger: bool = False) -> None:
+    def __init__(self, glyph: str, parent=None, danger: bool = False,
+                 size: int = 30, object_name: str | None = None) -> None:
         super().__init__(parent)
         self.glyph = glyph
         self.danger = danger
-        self.setObjectName("TopIconClose" if danger else "TopIcon")
-        self.setFixedSize(30, 30)
+        if object_name is None:
+            object_name = "TopIconClose" if danger else "TopIcon"
+        self.setObjectName(object_name)
+        self.setFixedSize(size, size)
         self.setCursor(Qt.PointingHandCursor)
         self.setFlat(True)
 
@@ -402,15 +429,18 @@ class GlyphButton(QPushButton):
         painter.setRenderHint(QPainter.Antialiasing, True)
         pen = QPen(self._ink(), 1.4)
         pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(pen)
 
         cx, cy = self.width() / 2.0, self.height() / 2.0
-        half = 4.5
-        if self.glyph == self.MINIMIZE:
+        # The icon box scales with the button so all icons look the same weight.
+        half = min(self.width(), self.height()) * 0.17
+        glyph = self.glyph
+        if glyph == self.MINIMIZE:
             painter.drawLine(int(cx - half), int(cy), int(cx + half), int(cy))
-        elif self.glyph == self.MAXIMIZE:
+        elif glyph == self.MAXIMIZE:
             painter.drawRect(QRectF(cx - half, cy - half, half * 2, half * 2))
-        elif self.glyph == self.RESTORE:
+        elif glyph == self.RESTORE:
             painter.drawRect(QRectF(cx - half, cy - half + 2, half * 2 - 2, half * 2 - 2))
             painter.drawLine(int(cx - half + 2), int(cy - half + 2),
                              int(cx - half + 2), int(cy - half))
@@ -418,38 +448,375 @@ class GlyphButton(QPushButton):
                              int(cx + half), int(cy - half))
             painter.drawLine(int(cx + half), int(cy - half),
                              int(cx + half), int(cy + half - 2))
-        elif self.glyph == self.SIDEBAR:
+        elif glyph == self.SIDEBAR:
             painter.drawRoundedRect(
                 QRectF(cx - half - 0.5, cy - half, half * 2 + 1, half * 2), 1.5, 1.5)
             painter.drawLine(int(cx + 1), int(cy - half), int(cx + 1), int(cy + half))
+        elif glyph in (self.CHEVRON_DOWN, self.DOWN):
+            painter.drawLine(int(cx - half), int(cy - half * 0.55),
+                             int(cx), int(cy + half * 0.55))
+            painter.drawLine(int(cx), int(cy + half * 0.55),
+                             int(cx + half), int(cy - half * 0.55))
+            if glyph == self.DOWN:
+                painter.drawLine(int(cx), int(cy - half * 1.15), int(cx), int(cy + half * 0.3))
+        elif glyph == self.CHEVRON_RIGHT:
+            painter.drawLine(int(cx - half * 0.55), int(cy - half),
+                             int(cx + half * 0.55), int(cy))
+            painter.drawLine(int(cx + half * 0.55), int(cy),
+                             int(cx - half * 0.55), int(cy + half))
+        elif glyph == self.CLEAR:
+            box = QRectF(cx - half, cy - half, half * 2, half * 2)
+            painter.drawRoundedRect(box, 2.5, 2.5)
+            painter.drawLine(int(cx - half * 0.5), int(cy + half),
+                             int(cx - half * 0.5), int(cy + half * 0.1))
+            painter.drawLine(int(cx + half * 0.5), int(cy + half),
+                             int(cx + half * 0.5), int(cy + half * 0.1))
+            painter.drawLine(int(cx - half), int(cy + half * 0.1),
+                             int(cx + half), int(cy + half * 0.1))
+        elif glyph in (self.EXPAND, self.SHRINK):
+            outward = glyph == self.EXPAND
+            inner = half * 0.45
+            for dx, dy in ((-1, -1), (1, 1)):
+                sx = cx + dx * (half if outward else inner)
+                sy = cy + dy * (half if outward else inner)
+                ex = cx + dx * (inner if outward else half)
+                ey = cy + dy * (inner if outward else half)
+                painter.drawLine(int(sx), int(sy), int(ex), int(sy))
+                painter.drawLine(int(sx), int(sy), int(sx), int(ey))
+        elif glyph == self.REFRESH:
+            rect = QRectF(cx - half, cy - half, half * 2, half * 2)
+            painter.drawArc(rect, 40 * 16, 260 * 16)
+            painter.drawLine(int(cx + half * 0.75), int(cy - half * 0.95),
+                             int(cx + half * 1.05), int(cy - half * 0.25))
+            painter.drawLine(int(cx + half * 0.75), int(cy - half * 0.95),
+                             int(cx + half * 0.1), int(cy - half * 0.62))
+        elif glyph == self.FOLDER:
+            path = QPainterPath()
+            path.moveTo(cx - half, cy - half * 0.7)
+            path.lineTo(cx - half * 0.15, cy - half * 0.7)
+            path.lineTo(cx + half * 0.1, cy - half * 0.35)
+            path.lineTo(cx + half, cy - half * 0.35)
+            path.lineTo(cx + half, cy + half * 0.8)
+            path.lineTo(cx - half, cy + half * 0.8)
+            path.closeSubpath()
+            painter.drawPath(path)
+        elif glyph == self.SAVE:
+            painter.drawRoundedRect(
+                QRectF(cx - half, cy - half, half * 2, half * 2), 2, 2)
+            painter.drawRect(QRectF(cx - half * 0.5, cy - half, half, half * 0.8))
+            painter.drawLine(int(cx - half * 0.6), int(cy + half * 0.9),
+                             int(cx + half * 0.6), int(cy + half * 0.9))
+        elif glyph == self.SEARCH:
+            painter.drawEllipse(
+                QRectF(cx - half, cy - half, half * 1.6, half * 1.6))
+            painter.drawLine(int(cx + half * 0.35), int(cy + half * 0.35),
+                             int(cx + half), int(cy + half))
+        elif glyph == self.SEND:
+            path = QPainterPath()
+            path.moveTo(cx - half, cy - half * 0.9)
+            path.lineTo(cx + half, cy)
+            path.lineTo(cx - half, cy + half * 0.9)
+            path.lineTo(cx - half * 0.45, cy)
+            path.closeSubpath()
+            painter.drawPath(path)
+        elif glyph == self.EDIT:
+            painter.drawLine(int(cx - half), int(cy + half),
+                             int(cx + half * 0.5), int(cy - half))
+            painter.drawLine(int(cx - half * 0.15), int(cy + half * 1.05),
+                             int(cx - half * 0.75), int(cy + half * 1.05))
+            painter.drawLine(int(cx - half * 0.75), int(cy + half * 1.05),
+                             int(cx - half * 0.75), int(cy + half * 0.45))
+        elif glyph == self.TRASH:
+            painter.drawLine(int(cx - half), int(cy - half * 0.7),
+                             int(cx + half), int(cy - half * 0.7))
+            painter.drawLine(int(cx - half * 0.35), int(cy - half),
+                             int(cx + half * 0.35), int(cy - half))
+            painter.drawLine(int(cx - half * 0.65), int(cy - half * 0.7),
+                             int(cx - half * 0.5), int(cy + half))
+            painter.drawLine(int(cx + half * 0.65), int(cy - half * 0.7),
+                             int(cx + half * 0.5), int(cy + half))
+            painter.drawLine(int(cx - half * 0.5), int(cy + half),
+                             int(cx + half * 0.5), int(cy + half))
+        elif glyph == self.PLUS:
+            painter.drawLine(int(cx - half), int(cy), int(cx + half), int(cy))
+            painter.drawLine(int(cx), int(cy - half), int(cx), int(cy + half))
+        elif glyph == self.PASTE:
+            painter.drawRoundedRect(
+                QRectF(cx - half * 0.9, cy - half, half * 1.8, half * 2), 1.5, 1.5)
+            painter.drawLine(int(cx - half * 0.35), int(cy - half * 0.25),
+                             int(cx + half * 0.4), int(cy - half * 0.25))
+            painter.drawLine(int(cx - half * 0.35), int(cy + half * 0.35),
+                             int(cx + half * 0.4), int(cy + half * 0.35))
         else:  # close
             painter.drawLine(int(cx - half), int(cy - half), int(cx + half), int(cy + half))
             painter.drawLine(int(cx + half), int(cy - half), int(cx - half), int(cy + half))
 
 
+class Combo(QComboBox):
+    """Combo box with a painted chevron, and click-anywhere-to-open.
+
+    Two problems this fixes:
+
+    * the platform arrow was drawn with the *style* font and looked nothing
+      like the rest of the icons, so every combo now paints its own chevron;
+    * on an **editable** combo (the baud rate) clicking the field only placed
+      the text cursor - the list never appeared.  Clicking now opens the list
+      while typing still works, which is the behaviour a serial tool needs.
+    """
+
+    def __init__(self, parent=None, editable: bool = False) -> None:
+        super().__init__(parent)
+        self.setEditable(editable)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMaxVisibleItems(14)
+        view = self.view()
+        view.setUniformItemSizes(True)
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._chevron = _Chevron(self)
+        if editable and self.lineEdit() is not None:
+            self.lineEdit().installEventFilter(self)
+            self.lineEdit().setCursor(Qt.IBeamCursor)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        height = max(10, self.height() - 10)
+        self._chevron.setGeometry(self.width() - 26, 5, 20, height)
+        self._chevron.raise_()
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.lineEdit() and event.type() == QEvent.MouseButtonRelease:
+            # Click selects the whole value and opens the list: typing then
+            # replaces the number instead of appending to it, which is what a
+            # baud field needs ("不影响手动输入").
+            self.lineEdit().setFocus()
+            self.lineEdit().selectAll()
+            self.showPopup()
+            return True
+        if obj is self.lineEdit() and event.type() == QEvent.KeyPress:
+            # Once the user starts typing, get the list out of the way: with an
+            # open popup Enter would activate the highlighted row and throw the
+            # typed value away.  Custom baud rates must be safe to type.
+            if self.view().isVisible() and event.text():
+                self.hidePopup()
+            return False
+        return super().eventFilter(obj, event)
+
+    def showPopup(self) -> None:
+        super().showPopup()
+        self._chevron.set_open(True)
+
+    def hidePopup(self) -> None:
+        super().hidePopup()
+        self._chevron.set_open(False)
+
+
+class _Chevron(QWidget):
+    """The little arrow inside a Combo, painted like every other icon."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._open = False
+
+    def set_open(self, value: bool) -> None:
+        if value != self._open:
+            self._open = value
+            self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor(theme.INK2), 1.5)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        cx = self.width() / 2.0
+        cy = self.height() / 2.0
+        half = 3.6
+        if self._open:
+            painter.drawLine(int(cx - half), int(cy + half * 0.55),
+                             int(cx), int(cy - half * 0.55))
+            painter.drawLine(int(cx), int(cy - half * 0.55),
+                             int(cx + half), int(cy + half * 0.55))
+        else:
+            painter.drawLine(int(cx - half), int(cy - half * 0.55),
+                             int(cx), int(cy + half * 0.55))
+            painter.drawLine(int(cx), int(cy + half * 0.55),
+                             int(cx + half), int(cy - half * 0.55))
+
+
+class ScrollBottomPill(QPushButton):
+    """Floating "jump to latest" bubble, like the one web chat UIs show.
+
+    Appears only while the view is scrolled away from the bottom, then fades +
+    slides in.  It is deliberately not an arrow glyph in a toolbar: the user
+    asked for the animated bubble used on web pages.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ScrollPill")
+        self.setFixedSize(38, 38)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("回到底部 / 最新")
+        self._effect = QGraphicsOpacityEffect(self)
+        self._effect.setOpacity(0.0)
+        self.setGraphicsEffect(self._effect)
+        self._fade = QPropertyAnimation(self._effect, b"opacity", self)
+        self._fade.setDuration(160)
+        self._fade.setEasingCurve(QEasingCurve.OutCubic)
+        self._slide = QPropertyAnimation(self, b"pos", self)
+        self._slide.setDuration(180)
+        self._slide.setEasingCurve(QEasingCurve.OutCubic)
+        self._visible = False
+        self.hide()
+
+    # ------------------------------------------------------------------ state
+    def show_pill(self, anchor: QPoint) -> None:
+        target = anchor - QPoint(self.width() // 2, self.height())
+        if self._visible:
+            self.move(target)
+            return
+        self._visible = True
+        self.show()
+        self.raise_()
+        self.move(target + QPoint(0, 10))
+        self._slide.stop()
+        self._slide.setStartValue(target + QPoint(0, 10))
+        self._slide.setEndValue(target)
+        self._slide.start()
+        self._fade.stop()
+        self._fade.setStartValue(self._effect.opacity())
+        self._fade.setEndValue(1.0)
+        self._fade.start()
+
+    def hide_pill(self) -> None:
+        if not self._visible:
+            return
+        self._visible = False
+        self._fade.stop()
+        self._fade.setStartValue(self._effect.opacity())
+        self._fade.setEndValue(0.0)
+        self._fade.start()
+        QTimer.singleShot(170, self._finish_hide)
+
+    def _finish_hide(self) -> None:
+        if not self._visible:
+            self.hide()
+
+    # ------------------------------------------------------------------ paint
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = QRectF(1.5, 1.5, self.width() - 3, self.height() - 3)
+
+        # soft shadow (a couple of translucent rings)
+        hovered = self.underMouse()
+        for index, alpha in ((3.0, 12), (2.0, 18)):
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(18, 26, 43, alpha))
+            painter.drawEllipse(rect.adjusted(-index, -index + 2, index, index + 2))
+
+        painter.setBrush(QColor(theme.CARD if not hovered else "#F4F8FD"))
+        painter.setPen(QPen(QColor(theme.INK2 if hovered else "#C7D0DE"), 1.0))
+        painter.drawEllipse(rect)
+
+        pen = QPen(QColor(theme.TEAL if hovered else theme.INK2), 1.6)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        cx = self.width() / 2.0
+        cy = self.height() / 2.0
+        half = 4.6
+        painter.drawLine(int(cx - half), int(cy - half * 0.5),
+                         int(cx), int(cy + half * 0.55))
+        painter.drawLine(int(cx), int(cy + half * 0.55),
+                         int(cx + half), int(cy - half * 0.5))
+
+
 class Toast(QWidget):
-    """Transient message bubble anchored inside the main window."""
+    """Transient message card anchored inside the main window."""
+
+    LEVELS: ClassVar[dict[str, tuple[str, str, str]]] = {
+        "ok": ("成功", theme.OK, theme.OK_SOFT),
+        "info": ("提示", theme.BLUE, "#E8F0FE"),
+        "warn": ("警告", theme.AMBER, theme.AMBER_SOFT),
+        "error": ("错误", theme.DANGER, theme.DANGER_SOFT),
+    }
 
     def __init__(self, parent, text: str, level: str = "info", timeout: int = 3200) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._level = level
+        title, accent, soft = self.LEVELS.get(level, self.LEVELS["info"])
+        self._accent = accent
+        self._soft = soft
+
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
-        label = QLabel(text)
-        label.setWordWrap(True)
-        label.setStyleSheet(f"color: {theme.INK}; font-size: 12.3px;")
-        layout.addWidget(label)
-        accent = {"ok": theme.OK, "warn": theme.AMBER, "error": theme.DANGER}.get(level, theme.BLUE)
-        self.setStyleSheet(
-            f"QWidget {{ background: {theme.CARD};"
-            f" border: 1px solid {theme.LINE};"
-            f" border-left: 3px solid {accent}; border-radius: 12px; }}")
+        layout.setContentsMargins(14, 12, 12, 12)
+        layout.setSpacing(11)
+
+        self.badge = QLabel(title)
+        self.badge.setAlignment(Qt.AlignCenter)
+        self.badge.setFixedSize(48, 22)
+        self.badge.setStyleSheet(
+            f"color: {accent}; background: {soft}; border-radius: 11px;"
+            f" font-size: 11.5px; font-weight: 650;")
+        layout.addWidget(self.badge, 0, Qt.AlignTop)
+
+        self.message = QLabel(text)
+        self.message.setWordWrap(True)
+        self.message.setStyleSheet(f"color: {theme.INK}; font-size: 12.5px;")
+        layout.addWidget(self.message, 1)
+
         self.adjustSize()
-        self.setFixedWidth(min(420, max(240, self.sizeHint().width() + 8)))
+        self.setFixedWidth(min(460, max(280, self.sizeHint().width() + 10)))
         self.adjustSize()
+
+        # Slide-in instead of a QGraphicsOpacityEffect: a graphics effect makes
+        # QWidget.grab() return a blank pixmap, so the toast would be invisible
+        # in screenshots and in the acceptance artefacts.
+        self._slide = QPropertyAnimation(self, b"pos", self)
+        self._slide.setDuration(190)
+        self._slide.setEasingCurve(QEasingCurve.OutCubic)
+        self._home: QPoint | None = None
         self.show()
         self.raise_()
 
+    def play_in(self) -> None:
+        """Slide up from a few pixels below the final position."""
+        self._home = self.pos()
+        self._slide.stop()
+        self._slide.setStartValue(self._home + QPoint(0, 14))
+        self._slide.setEndValue(self._home)
+        self._slide.start()
+
+    def dismiss(self) -> None:
+        """Slide down and delete."""
+        if self._home is not None:
+            self._slide.stop()
+            self._slide.setStartValue(self.pos())
+            self._slide.setEndValue(self._home + QPoint(0, 12))
+            self._slide.start()
+        QTimer.singleShot(150, self.deleteLater)
+
     def paintEvent(self, event) -> None:
-        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        rect = QRectF(1.5, 1.5, self.width() - 3, self.height() - 3)
+
+        # soft drop shadow
+        painter.setPen(Qt.NoPen)
+        for offset, alpha in ((4, 10), (2, 16)):
+            painter.setBrush(QColor(18, 26, 43, alpha))
+            painter.drawRoundedRect(rect.adjusted(-1, offset - 1, 1, offset + 1), 15, 15)
+
+        painter.setBrush(QColor(theme.CARD))
+        painter.setPen(QPen(QColor("#D7DEE9"), 1.0))
+        painter.drawRoundedRect(rect, 14, 14)
+
+        accent = QColor(self._accent)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(accent)
+        painter.drawRoundedRect(QRectF(rect.left(), rect.top() + 12, 3.5,
+                                       rect.height() - 24), 1.75, 1.75)

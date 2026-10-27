@@ -36,6 +36,11 @@ from omnicom.ui.theme import app_stylesheet  # noqa: E402
 RESULTS: list[tuple[bool, str, str]] = []
 STAMP_RE = re.compile(r"^\[\d{2}:\d{2}:\d{2}\.\d{3}\]")
 
+def _utf8_console() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
 
 def check(name: str, ok: bool, detail: str = "") -> None:
     RESULTS.append((bool(ok), name, detail))
@@ -74,6 +79,7 @@ def wait(ms: int, then) -> None:
 
 
 def main() -> int:
+    _utf8_console()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet(app_stylesheet())
@@ -174,33 +180,46 @@ def main() -> int:
         window.row_hex.setChecked(False)
         wait(700, next_)
 
-    # ------------------------------------------------------------- pause/resume
-    def step_pause(next_):
-        window.toggle_pause()
-        state["appended_pause"] = window._appended
-        state["rx_pause"] = window.bridge.manager.rx_bytes
-        wait(1800, next_)
-
-    def step_pause_check(next_):
-        appended = window._appended
-        rx_now = window.bridge.manager.rx_bytes
-        check("R-012 暂停时界面不再新增行", appended == state["appended_pause"],
-              f"{state['appended_pause']} -> {appended}")
-        check("R-012 暂停期间串口仍在接收", rx_now > state["rx_pause"],
-              f"+{rx_now - state['rx_pause']} B")
-        check("R-012 暂停提示可见", window.pause_badge.isVisible())
-        state["rx_resume"] = rx_now
-        state["appended_resume"] = appended
-        window.toggle_pause()
+    # ------------------------------------------------- follow / scroll behaviour
+    def step_follow(next_):
+        # R-012 was redefined by the user: the pause button is gone and the
+        # "自动滚动到最新" switch is the only print control.
+        check("R-012 暂停打印已移除", not hasattr(window, "toggle_pause")
+              and not hasattr(window, "btn_pause"))
+        check("R-012 自动滚动开关存在", window.row_scroll.isChecked())
+        window.row_scroll.setChecked(True)
+        state["appended_follow"] = window._appended
+        state["rx_follow"] = window.bridge.manager.rx_bytes
         wait(1500, next_)
 
-    def step_resume_check(next_):
-        added = window._appended - state["appended_resume"]
-        check("R-012 继续后补印暂停期间的数据", added >= 2, f"+{added} 行")
-        check("R-017 暂停期间没有丢字节",
-              window.bridge.manager.rx_bytes >= state["rx_resume"]
-              and window._lost_bytes == 0,
-              f"appended={window._appended} lost={window._lost_bytes}")
+    def step_follow_check(next_):
+        added = window._appended - state["appended_follow"]
+        rx_now = window.bridge.manager.rx_bytes
+        check("R-012 自动滚动打开时始终跟随最新行",
+              window.log._at_bottom() and added > 0,
+              f"+{added} 行 bottom={window.log._at_bottom()}")
+        check("R-017 接收端没有丢字节（无暂停缓冲）",
+              rx_now >= state["rx_follow"] and not hasattr(window, "_lost_bytes"),
+              f"+{rx_now - state['rx_follow']} B")
+        # make sure the view can actually scroll, then scroll up while following
+        for _ in range(200):
+            window.log.append_line(0.0, "RX", "filler line " + "z" * 60, "rx")
+        app.processEvents()
+        bar = window.log.verticalScrollBar()
+        bar.setValue(0)
+        window.log.append_line(0.0, "RX", "follow probe", "rx")
+        app.processEvents()
+        check("R-012 手动上滑后新数据仍滚到底部", window.log._at_bottom(),
+              f"max={bar.maximum()} value={bar.value()}")
+        window.row_scroll.setChecked(False)
+        app.processEvents()
+        bar.setValue(0)
+        app.processEvents()
+        check("R-012 关闭后浮出「回到最新」按钮", window.scroll_pill.isVisible(),
+              f"max={bar.maximum()} value={bar.value()}")
+        window.jump_to_latest()
+        check("R-012 「回到最新」可滚到底部", window.log._at_bottom())
+        window.row_scroll.setChecked(True)
         next_()
 
     # ------------------------------------------------------------- timed send
@@ -225,21 +244,51 @@ def main() -> int:
 
     # ------------------------------------------------------------------ search
     def step_search(next_):
-        window.search_panel.add_keyword("temp")
-        window.search_panel.add_keyword("vbat")
-        wait(1500, next_)
+        # Notepad++-style "find all" over the *whole* log, including history.
+        window.log.append_line(0.0, "RX", "AT+CSQ", "rx")
+        window.log.append_line(0.0, "RX", "AT+QSSLCLOSE=0", "rx")
+        window.log.append_line(0.0, "RX", "unrelated telemetry", "rx")
+        window.search_panel.add_keyword("AT")
+        wait(400, next_)
 
     def step_search_check(next_):
-        hits = window.search_panel.hits
-        check("R-014 多关键字命中写入右侧栏", hits > 0, f"{hits} 条")
-        check("R-014 关键字以 chip 形式展示", window.search_panel.chip_layout.count() == 2)
-        window.search_panel.mode_box.setCurrentIndex(1)   # 全部匹配
-        state["all_hits"] = hits
-        wait(1600, next_)
+        panel = window.search_panel
+        check("R-014 关键字以 chip 形式展示", panel.chip_layout.count() == 1,
+              f"{panel.chip_layout.count()} chip")
+        check("R-014 命中写入结果列表", panel.hits > 0, f"{panel.hits} 条")
+        check("R-027 搜索结果覆盖历史行（不只是新数据）",
+              panel.results.count() == panel.hits and panel.hits >= 3,
+              f"rows={panel.results.count()} hits={panel.hits}")
+
+        # every listed row must carry a jump target
+        item = panel.results.item(panel.results.count() - 1)
+        block = item.data(Qt.UserRole)
+        panel._activate(item)
+        check("R-027 双击结果可跳到日志原文",
+              isinstance(block, int) and block >= 0
+              and window.log.textCursor().blockNumber() == block,
+              f"block={block} cursor={window.log.textCursor().blockNumber()}")
+        state["search_hits"] = panel.hits
+
+        panel.set_fullscreen(True)
+        app.processEvents()
+        check("R-027 搜索结果支持全屏显示",
+              window._search_overlay is not None
+              and panel.width() > window.sidebar.width(),
+              f"panel={panel.width()}px sidebar={window.sidebar.width()}px")
+        panel.set_fullscreen(False)
+        app.processEvents()
+        check("R-027 退出全屏后回到右侧栏",
+              window._search_overlay is None
+              and panel.parentWidget() is not None,
+              type(panel.parentWidget()).__name__)
+        next_()
 
     def step_search_all(next_):
-        grew = window.search_panel.hits > state["all_hits"]
-        check("R-014 「全部匹配」模式可用", grew, f"{state['all_hits']} -> {window.search_panel.hits}")
+        grown = window.search_panel.hits >= state["search_hits"]
+        check("R-014 结果列表随新数据增长", grown, f"{state['search_hits']} -> {window.search_panel.hits}")
+        window.search_panel.remove_keyword("AT")
+        check("R-014 移除关键字后结果清空", window.search_panel.hits == 0)
         next_()
 
     # --------------------------------------------------------------- commands
@@ -440,9 +489,8 @@ def main() -> int:
     runner.add("ctrl_check", step_ctrl_check)
     runner.add("hex", step_hex)
     runner.add("hex_check", step_hex_check)
-    runner.add("pause", step_pause)
-    runner.add("pause_check", step_pause_check)
-    runner.add("resume_check", step_resume_check)
+    runner.add("follow", step_follow)
+    runner.add("follow_check", step_follow_check)
     runner.add("timed_send", step_timed_send)
     runner.add("timed_check", step_timed_check)
     runner.add("timed_stop", step_timed_stop)
@@ -462,7 +510,66 @@ def main() -> int:
     runner.add("send_file_check", step_send_file_check)
     runner.add("sidebar", step_sidebar)
     runner.add("sidebar_check", step_sidebar_check)
+    # -------------------------------------------------------------- combo boxes
+    def step_combo(next_):
+        box = window.baud
+        shot = box.grab().toImage()
+        corner = shot.pixelColor(1, 1).name()
+        ink = sum(1 for y in range(shot.height()) for x in range(shot.width())
+                  if shot.pixelColor(x, y).name() != corner)
+        check("R-028 下拉框自绘箭头可见", ink > 20, f"ink={ink}px")
+        check("R-028 波特率可手动输入", box.isEditable())
+        box.showPopup()
+        app.processEvents()
+        opened = box.view().isVisible()
+        box.hidePopup()
+        app.processEvents()
+        check("R-028 点击输入框即弹出候选列表", opened)
+        # typing must take over: the open list closes so Enter keeps the text
+        box.showPopup()
+        box.lineEdit().selectAll()
+        app.processEvents()
+        QTest.keyClicks(box.lineEdit(), "768000")
+        app.processEvents()
+        check("R-028 手动输入时候选列表自动收起", not box.view().isVisible(),
+              f"visible={box.view().isVisible()}")
+        check("R-028 自定义输入不被列表覆盖",
+              box.lineEdit().text() == "768000", box.lineEdit().text())
+        box.setCurrentText("115200")
+        next_()
+
+    def step_font(next_):
+        metrics = window.log.fontMetrics()
+        check("R-029 日志使用等宽字体",
+              metrics.horizontalAdvance("i") == metrics.horizontalAdvance("W"),
+              f"{metrics.horizontalAdvance('i')} vs {metrics.horizontalAdvance('W')}")
+        next_()
+
+    def step_terminal(next_):
+        window.switch_page("console")
+        app.processEvents()
+        check("R-026 存在独立的终端模式页", window.stack.count() == 3
+              and window.console.isVisible())
+        state["tx_term"] = window.bridge.manager.tx_bytes
+        window.console.feed(b"login: ")
+        window.console.feed(b"root\r\n")
+        window.console.feed(b"\x1b[32mOK\x1b[0m\r\n")
+        text = window.console.view.toPlainText()
+        check("R-026 终端解释 CR 与 ANSI 颜色序列",
+              "login: root" in text and "OK" in text and "\x1b" not in text,
+              text.replace("\n", "|")[:60])
+        window._on_terminal_keys(b"AT\r")
+        grew = window.bridge.manager.tx_bytes - state["tx_term"]
+        check("R-026 键盘输入直达串口", grew == 3, f"+{grew} B")
+        window.console.view.reset()
+        window.switch_page("terminal")
+        app.processEvents()
+        next_()
+
     runner.add("persist", step_persist)
+    runner.add("combo", step_combo)
+    runner.add("font", step_font)
+    runner.add("terminal", step_terminal)
     runner.add("ui_polish", step_ui_polish)
 
     runner.start()

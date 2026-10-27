@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 
 from ..commands import CommandStore, payload_of
 from . import theme
-from .widgets import Badge, SwitchRow, ToggleSwitch
+from .widgets import Badge, GlyphButton, SwitchRow, ToggleSwitch
 
 LINE_END_LABELS = [("crlf", "\\r\\n"), ("lf", "\\n"), ("cr", "\\r"), ("none", "无")]
 
@@ -80,43 +80,51 @@ class CommandRow(QFrame):
         self.item = item
         self.setObjectName("CmdRow")
         self._apply_style(item.get("enabled", True))
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 6, 6, 6)
-        layout.setSpacing(7)
 
+        # Two lines per row.  Putting the three action buttons on the same line
+        # as the command text left ~105 px for the name, so every long AT
+        # command was elided - the "字显示不全" the user reported.  The name now
+        # gets the full row width and the controls sit underneath it.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(9, 6, 7, 6)
+        outer.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setSpacing(7)
         self.check = QCheckBox()
         self.check.setChecked(bool(item.get("enabled", True)))
         self.check.setToolTip("勾选后参与「依次发送」")
         self.check.toggled.connect(lambda value: self.toggled.emit(item["id"], value))
-        layout.addWidget(self.check)
+        top.addWidget(self.check)
 
         text = item.get("text", "")
         self.label = ElidedLabel(f"[HEX] {text}" if item.get("hex") else text)
         self.label.setCursor(Qt.PointingHandCursor)
+        self.label.setToolTip(text)
         self.label.mouseReleaseEvent = lambda _event: self.send.emit(item)
-        layout.addWidget(self.label, 1)
+        top.addWidget(self.label, 1)
+        outer.addLayout(top)
 
-        meta = QHBoxLayout()
-        meta.setSpacing(4)
+        bottom = QHBoxLayout()
+        bottom.setSpacing(4)
         delay = QLabel(f"{item.get('delay', 0)}ms")
         delay.setObjectName("Badge")
-        meta.addWidget(delay)
+        bottom.addWidget(delay)
         if item.get("timer"):
             timer = QLabel(f"↻{item.get('interval', 1000)}ms")
             timer.setObjectName("BadgeWarn")
-            meta.addWidget(timer)
-        layout.addLayout(meta)
+            bottom.addWidget(timer)
+        bottom.addStretch(1)
 
-        for icon, tip, slot in (("▶", "发送", lambda: self.send.emit(item)),
-                                ("✎", "编辑：行尾 / 延时 / 定时", lambda: self.edit.emit(item)),
-                                ("✕", "删除", lambda: self.remove.emit(item["id"]))):
-            button = QPushButton(icon)
-            button.setObjectName("IconBtn")
-            button.setFixedSize(22, 22)
+        for glyph, tip, slot in (
+                (GlyphButton.SEND, "发送", lambda: self.send.emit(item)),
+                (GlyphButton.EDIT, "编辑：行尾 / 延时 / 定时", lambda: self.edit.emit(item)),
+                (GlyphButton.TRASH, "删除", lambda: self.remove.emit(item["id"]))):
+            button = GlyphButton(glyph, self, size=theme.ICON_SM, object_name="IconBtn")
             button.setToolTip(tip)
-            button.setCursor(Qt.PointingHandCursor)
             button.clicked.connect(slot)
-            layout.addWidget(button)
+            bottom.addWidget(button)
+        outer.addLayout(bottom)
 
     def _apply_style(self, enabled: bool) -> None:
         border = "rgba(14, 148, 132, 110)" if enabled else theme.LINE
@@ -289,10 +297,9 @@ class CommandsPanel(QWidget):
         layout.setContentsMargins(5, 6, 8, 6)
         layout.setSpacing(6)
 
-        self.chevron = QPushButton("▾")
+        self.chevron = GlyphButton(GlyphButton.CHEVRON_DOWN, self, size=theme.ICON_MD,
+                                   object_name="IconBtn")
         self.chevron.setObjectName("IconBtn")
-        self.chevron.setFixedSize(22, 22)
-        self.chevron.setCursor(Qt.PointingHandCursor)
         self.chevron.clicked.connect(self.toggle_collapsed)
         layout.addWidget(self.chevron)
 
@@ -304,17 +311,16 @@ class CommandsPanel(QWidget):
         layout.addWidget(self.count)
         layout.addStretch(1)
 
-        self.btn_paste = self._tool("⧉", "粘贴多行命令，自动拆分导入")
+        self.btn_paste = self._tool(GlyphButton.PASTE, "粘贴多行命令，自动拆分导入")
         self.btn_paste.clicked.connect(self.show_drawer)
-        self.btn_add = self._tool("+", "新增命令")
+        self.btn_add = self._tool(GlyphButton.PLUS, "新增命令")
         self.btn_add.clicked.connect(lambda: self.open_editor(None))
         layout.addWidget(self.btn_paste)
         layout.addWidget(self.btn_add)
 
         self.btn_all = QPushButton("依次发送")
         self.btn_all.setObjectName("Ghost")
-        self.btn_all.setFixedHeight(24)
-        self.btn_all.setStyleSheet("font-size: 11px; padding: 0 9px;")
+        self.btn_all.setObjectName("Ghost")
         self.btn_all.setCursor(Qt.PointingHandCursor)
         self.btn_all.clicked.connect(self.send_all)
         layout.addWidget(self.btn_all)
@@ -325,18 +331,16 @@ class CommandsPanel(QWidget):
             f" border-bottom: 1px solid {theme.LINE_SOFT}; }}")
         return header
 
-    def _tool(self, text: str, tip: str) -> QPushButton:
-        button = QPushButton(text)
-        button.setObjectName("IconBtn")
-        button.setFixedSize(22, 22)
+    def _tool(self, glyph: str, tip: str) -> GlyphButton:
+        button = GlyphButton(glyph, self, size=theme.ICON_MD, object_name="IconBtn")
         button.setToolTip(tip)
-        button.setCursor(Qt.PointingHandCursor)
         return button
 
     def toggle_collapsed(self) -> None:
         self._collapsed = not self._collapsed
         self.body.setVisible(not self._collapsed)
-        self.chevron.setText("▸" if self._collapsed else "▾")
+        self.chevron.set_glyph(
+            GlyphButton.CHEVRON_RIGHT if self._collapsed else GlyphButton.CHEVRON_DOWN)
         parent = self.parentWidget()
         while parent is not None and not hasattr(parent, "relayout_sidebar"):
             parent = parent.parentWidget()

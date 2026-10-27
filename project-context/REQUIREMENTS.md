@@ -16,7 +16,7 @@ Source of R-001..R-017: user request on 2026-10-27 (project kickoff). Do not wea
 | R-009 | MUST | UI | Paste a newline-separated block into a box → auto-fills the command list | paste 5 lines → 5 entries | active |
 | R-010 | MUST | UI | Timestamp display with millisecond precision, with an on/off switch | `HH:mm:ss.mmm` column toggles | active |
 | R-011 | MUST | UI | Timed/periodic send | interval fires, stop works | active |
-| R-012 | MUST | UI | One pause/resume button: RX continues in background, resuming prints everything captured during the pause | pause → data arrives → resume → backlog printed | active |
+| R-012 | MUST | UI | **Auto-scroll to latest** switch is the only print control (the pause/backfill button was withdrawn by the user). With it on, the view always follows the newest line — even after the user scrolls up. With it off the view stays put and a floating pill offers a jump back | `ui_selftest`: follows after a manual scroll-up; pill appears when off; `toggle_pause` must not exist | active |
 | R-013 | MUST | IO | Save received data to a file | file grows with received bytes | active |
 | R-014 | MUST | UI | Multi-keyword search; hits printed in a right-hand panel; appends live unless printing is paused; resume backfills the pause window | 2 keywords, pause, resume → hits present | active |
 | R-015 | MUST | UI | Toggle to print raw/invisible characters (`\r`, `\n`, `\0`, …) | toggling changes rendering only, never the stored bytes | active |
@@ -29,6 +29,10 @@ Source of R-001..R-017: user request on 2026-10-27 (project kickoff). Do not wea
 | R-022 | MUST | CLI | CLI prints **one JSON document on stdout** (`ok` + `error` on failure), human text on stderr, exit 0/1/2 | acceptance suite: success and failure both parse as JSON; failure exit code is 1 | active |
 | R-024 | MUST | UI | Each log line reads `[HH:mm:ss.mmm]发→◇payload` for TX and `[HH:mm:ss.mmm]收←◇payload` for RX | `ui_selftest`: regex match on both directions | active |
 | R-025 | MUST | UI | With the invisible-character toggle on, **both** RX and TX render `\r \n \0 \xNN`; TX describes the bytes that actually left the port (line end included) | `ui_selftest`: send `AT+...\r\n` with the toggle on → `\r\n` visible on the 发→ line | active |
+| R-026 | MUST | UI | **Terminal mode**: a real serial console page where keystrokes go straight out, CR/LF/BS move the cursor, ANSI SGR colours are honoured and CSI junk is swallowed | `ui_selftest`: `login: ` + `root\r\n` renders on one line; ANSI stripped; a key press increments TX | active |
+| R-027 | MUST | UI | **Notepad++ style find-all**: searching matches the whole log (history included), every hit is listed with its line number, the list can be blown up to the full window, and double-clicking a hit jumps the log to that line | `ui_selftest`: rows == hits, block jump lands on the right line, fullscreen toggles | active |
+| R-028 | MUST | UI | Every drop-down shares one style (painted chevron, same height). For the editable baud box, clicking the field opens the candidate list **and** manual typing still works | `ui_selftest`: chevron paints ink, popup opens on click, `921600` survives as typed text | active |
+| R-029 | MUST | UI | The log, terminal and result list use an installed **monospace** font, never the proportional UI face | `ui_selftest`: `horizontalAdvance("i") == horizontalAdvance("W")` | active |
 | R-023 | MUST | CLI | CLI can run against the virtual `DEMO` port so an agent can verify behaviour without hardware | `python -m omnicom.cli selftest` (28 checks) returns `ok:true` | active |
 
 Superseded:
@@ -40,5 +44,9 @@ Superseded:
   "纯色背景，不要搞网格背景", 2026-10-27. See LEDGER L-013.
 - R-020 (dark → light): the flat colour is now a light page tone and all surfaces are white. Reason:
   user asked "改为白色主题", 2026-10-27. See LEDGER L-022.
+- R-012 (pause/backfill → auto-scroll): the user withdrew the pause button outright ("暂停打印这个功能不需要了，
+  我其实要的就是自动滚动开关那个功能"), 2026-10-27. See LEDGER L-028.
+- R-002 (single port per session → live switch): picking another port while one is open now switches
+  immediately. Reason: user asked "在串口选择框选择了 140，要求能立刻切到 140", 2026-10-27. See LEDGER L-030.
 - R-001 (glyph → painted) / R-002 (whole row clickable): user reported the title-bar symbols were
   invisible and a switch could only be toggled by clicking its label, 2026-10-27. See LEDGER L-023/L-024.

@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from datetime import datetime
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QPlainTextEdit, QWidget
 
@@ -70,15 +70,15 @@ class LogView(QPlainTextEdit):
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.setFrameShape(QPlainTextEdit.NoFrame)
         self.setWordWrapMode(self.wordWrapMode())
-        font = QFont("Cascadia Code")
-        font.setStyleHint(QFont.Monospace)
-        font.setPixelSize(pixel_size)
-        font.setFixedPitch(True)
-        self.setFont(font)
+        self.setFont(theme.mono_font(pixel_size))
+        # The font *must* also be declared in the widget stylesheet: the global
+        # ``*`` selector in app_stylesheet() wins over setFont(), which left the
+        # log rendering in the proportional UI face.
         self.setStyleSheet(
-            "QPlainTextEdit#Log { background: transparent; border: 0;"
+            f"QPlainTextEdit#Log {{ background: transparent; border: 0;"
+            f' font-family: "{theme.resolve_mono()}"; font-size: {pixel_size}px;'
             " padding: 2px 10px 8px 12px;"
-            " selection-background-color: rgba(46, 196, 176, 90); }")
+            " selection-background-color: rgba(11, 122, 110, 60); }")
         self.show_ts = True
         self.show_ctrl = False
         self.autoscroll = True
@@ -88,6 +88,11 @@ class LogView(QPlainTextEdit):
         self._mark_format = self._make_format("#0A3F3A", background="#BFF0E6")
         self._marker_format = self._make_format(theme.DIM)
         self._pending_format = self._make_format("#5A6A85")
+        self._flash_format = self._make_format(
+            theme.INK, background="#FFE9A8", bold=True)
+
+        # The floating "back to latest" pill listens to these.
+        self.viewport().installEventFilter(self)
 
     # ------------------------------------------------------------------ setup
     @staticmethod
@@ -102,19 +107,34 @@ class LogView(QPlainTextEdit):
         fmt.setFontItalic(italic)
         return fmt
 
+    def set_pixel_size(self, size: int) -> None:
+        self.setFont(theme.mono_font(size))
+        self.setStyleSheet(
+            f"QPlainTextEdit#Log {{ background: transparent; border: 0;"
+            f' font-family: "{theme.resolve_mono()}"; font-size: {size}px;'
+            " padding: 2px 10px 8px 12px;"
+            " selection-background-color: rgba(11, 122, 110, 60); }")
+
     def _at_bottom(self) -> bool:
         bar = self.verticalScrollBar()
         return bar.value() >= bar.maximum() - 4
 
-    def _follow(self, was_at_bottom: bool) -> None:
-        if self.autoscroll and was_at_bottom:
-            bar = self.verticalScrollBar()
-            bar.setValue(bar.maximum())
+    def _follow(self, _was_at_bottom: bool = True) -> None:
+        """自动滚动打开时**无条件**跟随最新一行.
+
+        Earlier this only followed when the view happened to already be at the
+        bottom, so scrolling up once silently disabled auto-scroll for good -
+        which is exactly what the user reported.  When the switch is off the
+        view stays put and the floating pill offers a way back down.
+        """
+        if not self.autoscroll:
+            return
+        bar = self.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     # ------------------------------------------------------------------ lines
     def append_line(self, ts: float, direction: str, text: str, kind: str = "rx",
                     keywords: Iterable[str] = (), lite: bool = False) -> None:
-        at_bottom = self._at_bottom()
         self._clear_pending_internal()
 
         cursor = QTextCursor(self.document())
@@ -138,7 +158,7 @@ class LogView(QPlainTextEdit):
         else:
             cursor.insertText(text, body_format)
 
-        self._follow(at_bottom)
+        self._follow()
 
     def _insert_marked(self, cursor: QTextCursor, text: str, words: list[str],
                        base: QTextCharFormat) -> None:
@@ -174,7 +194,6 @@ class LogView(QPlainTextEdit):
 
     # ---------------------------------------------------------------- pending
     def set_pending(self, text: str) -> None:
-        at_bottom = self._at_bottom()
         cursor = QTextCursor(self.document())
         if not self._pending:
             cursor.movePosition(QTextCursor.End)
@@ -185,7 +204,7 @@ class LogView(QPlainTextEdit):
             cursor.movePosition(QTextCursor.End)
             cursor.movePosition(QTextCursor.StartOfBlock, QTextCursor.KeepAnchor)
         cursor.insertText(text, self._pending_format)
-        self._follow(at_bottom)
+        self._follow()
 
     def clear_pending(self) -> None:
         if self._pending:
@@ -199,6 +218,31 @@ class LogView(QPlainTextEdit):
         cursor.movePosition(QTextCursor.StartOfBlock, QTextCursor.KeepAnchor)
         cursor.removeSelectedText()
         self._pending = False
+
+    # ---------------------------------------------------------------- locate
+    def line_texts(self) -> list[str]:
+        """Every rendered line, in document order (block index == list index)."""
+        return self.toPlainText().split("\n")
+
+    def goto_block(self, block: int, flash: bool = True) -> None:
+        """Scroll to a block, put the cursor on it and flash it once."""
+        document = self.document()
+        if block < 0 or block >= document.blockCount():
+            return
+        cursor = QTextCursor(document.findBlockByNumber(block))
+        cursor.select(QTextCursor.LineUnderCursor)
+        self.setTextCursor(cursor)
+        self.centerCursor()
+        if not flash:
+            return
+        char_format = self._flash_format
+        held = QTextCursor(document.findBlockByNumber(block))
+        held.movePosition(QTextCursor.EndOfBlock, QTextCursor.KeepAnchor)
+        QTimer.singleShot(0, lambda: self._apply_flash(held, char_format))
+
+    def _apply_flash(self, cursor: QTextCursor, char_format: QTextCharFormat) -> None:
+        if cursor.hasSelection():
+            cursor.mergeCharFormat(char_format)
 
     # ------------------------------------------------------------------ misc
     def clear_all(self) -> None:
@@ -219,6 +263,9 @@ class LogView(QPlainTextEdit):
     def keyPressEvent(self, event) -> None:
         # Ctrl+C already copies; block edits so the log stays a faithful view.
         if event.matches(event.StandardKey.Copy):
+            super().keyPressEvent(event)
+            return
+        if event.matches(event.StandardKey.SelectAll):
             super().keyPressEvent(event)
             return
         if event.key() in (Qt.Key_Backspace, Qt.Key_Delete) or event.text().isprintable():

@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-from PySide6.QtCore import QEvent, QPoint, QSettings, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QRect, QSettings, Qt, QTimer
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -16,7 +16,6 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QButtonGroup,
-    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -36,11 +35,14 @@ from .commands_panel import CommandsPanel
 from .log_view import LogView
 from .search_panel import SearchPanel
 from .send_panel import SendPanel
+from .terminal import TerminalPage
 from .transfer_panel import TransferPanel
 from .widgets import (
     Badge,
+    Combo,
     GlassFrame,
     GlyphButton,
+    ScrollBottomPill,
     SectionTitle,
     StatusPill,
     SwitchRow,
@@ -69,7 +71,6 @@ BAUD_RATES = ["9600", "19200", "38400", "57600", "115200", "230400", "460800",
 PARITIES = [("N", "None"), ("E", "Even"), ("O", "Odd"), ("M", "Mark"), ("S", "Space")]
 FLOWS = [("none", "无"), ("rtscts", "硬件 RTS/CTS"), ("xonxoff", "软件 XON/XOFF")]
 
-MAX_BACKLOG = 64 * 1024 * 1024     # bytes of pause buffer before we must surface a loss
 VIEW_LINES = 20000
 
 
@@ -150,9 +151,12 @@ class TitleBar(GlassFrame):
         tab_layout = QHBoxLayout(tab_box)
         tab_layout.setContentsMargins(4, 4, 4, 4)
         tab_layout.setSpacing(2)
-        for index, (key, label) in enumerate((("terminal", "终端"), ("transfer", "文件传输"))):
+        for index, (key, label) in enumerate((("terminal", "串口日志"),
+                                             ("console", "终端模式"),
+                                             ("transfer", "文件传输"))):
             button = QPushButton(label)
             button.setObjectName("Seg")
+            button.setFixedHeight(28)
             button.setCheckable(True)
             button.setCursor(Qt.PointingHandCursor)
             button.setProperty("page", key)
@@ -161,8 +165,7 @@ class TitleBar(GlassFrame):
             self.tabs.addButton(button)
             tab_layout.addWidget(button)
         self.tabs.buttonClicked.connect(
-            lambda button: window.stack.setCurrentIndex(
-                0 if button.property("page") == "terminal" else 1))
+            lambda button: window.switch_page(button.property("page")))
         layout.addWidget(tab_box)
 
         layout.addStretch(1)
@@ -278,11 +281,8 @@ class OmniWindow(QMainWindow):
         self._pending_ts = 0.0
         self._hex_partial = b""
         self._hex_offset = 0
-        self._paused = False
-        self._backlog: list[tuple[float, bytes]] = []
-        self._backlog_bytes = 0
-        self._lost_bytes = 0
-        self._replay_queue: list[tuple[float, bytes]] = []
+        self._search_overlay: QWidget | None = None
+        self._toasts: list[Toast] = []
         self._appended = 0
         self._status = {}
         self._transfer: TransferWorker | None = None
@@ -314,6 +314,9 @@ class OmniWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_terminal_page())
+        self.console = TerminalPage()
+        self.console.keyBytes.connect(self._on_terminal_keys)
+        self.stack.addWidget(self.console)
         self.transfer = TransferPanel(self.notify)
         self.stack.addWidget(self.transfer)
         body.addWidget(self.stack, 1)
@@ -321,7 +324,8 @@ class OmniWindow(QMainWindow):
         self.sidebar = self._build_sidebar()
         body.addWidget(self.sidebar)
 
-        root.addWidget(self._build_status_strip())
+        self.status_strip = self._build_status_strip()
+        root.addWidget(self.status_strip)
 
     # ------------------------------------------------------------------ rail
     def _build_rail(self) -> QWidget:
@@ -342,24 +346,22 @@ class OmniWindow(QMainWindow):
         layout.addWidget(SectionTitle("连接"))
         row = QHBoxLayout()
         row.setSpacing(6)
-        self.port_combo = QComboBox()
-        self.port_combo.setMinimumHeight(32)
+        self.port_combo = Combo()
+        self.port_combo.setToolTip("选择串口；已打开时切换会自动关闭旧串口并连上新串口")
+        self.port_combo.currentIndexChanged.connect(self._on_port_picked)
         row.addWidget(self.port_combo, 1)
-        self.btn_refresh = QPushButton("⟳")
-        self.btn_refresh.setObjectName("IconBtn")
-        self.btn_refresh.setFixedSize(32, 32)
+        self.btn_refresh = GlyphButton(GlyphButton.REFRESH, self, size=theme.CTRL_H,
+                                       object_name="IconBtn")
         self.btn_refresh.setToolTip("刷新串口列表")
-        self.btn_refresh.setCursor(Qt.PointingHandCursor)
         row.addWidget(self.btn_refresh)
         layout.addLayout(row)
 
         self.btn_connect = QPushButton("打开串口")
         self.btn_connect.setObjectName("Primary")
-        self.btn_connect.setMinimumHeight(34)
         self.btn_connect.setCursor(Qt.PointingHandCursor)
         layout.addWidget(self.btn_connect)
 
-        self.row_auto = SwitchRow("自动重连 / 拔插恢复", True,
+        self.row_auto = SwitchRow("自动重连", True,
                                   tooltip="串口被拔出后，重新插入会自动打开（按路径或序列号识别）")
         layout.addWidget(self.row_auto)
         layout.addWidget(self._divider())
@@ -371,13 +373,13 @@ class OmniWindow(QMainWindow):
         left_col = QVBoxLayout()
         left_col.setSpacing(6)
         left_col.addWidget(self._dim("波特率"))
-        self.baud = QComboBox()
-        self.baud.setEditable(True)
+        self.baud = Combo(editable=True)
         self.baud.addItems(BAUD_RATES)
         self.baud.setCurrentText("115200")
+        self.baud.setToolTip("点一下弹出常用波特率；也可以直接输入任意数值")
         left_col.addWidget(self.baud)
         left_col.addWidget(self._dim("数据位"))
-        self.bytesize = QComboBox()
+        self.bytesize = Combo()
         for value in ("8", "7", "6", "5"):
             self.bytesize.addItem(value)
         left_col.addWidget(self.bytesize)
@@ -386,12 +388,12 @@ class OmniWindow(QMainWindow):
         right_col = QVBoxLayout()
         right_col.setSpacing(6)
         right_col.addWidget(self._dim("校验位"))
-        self.parity = QComboBox()
+        self.parity = Combo()
         for key, label in PARITIES:
             self.parity.addItem(label, key)
         right_col.addWidget(self.parity)
         right_col.addWidget(self._dim("停止位"))
-        self.stopbits = QComboBox()
+        self.stopbits = Combo()
         for value in ("1", "1.5", "2"):
             self.stopbits.addItem(value)
         right_col.addWidget(self.stopbits)
@@ -399,7 +401,7 @@ class OmniWindow(QMainWindow):
         layout.addLayout(grid)
 
         layout.addWidget(self._dim("流控"))
-        self.flow = QComboBox()
+        self.flow = Combo()
         for key, label in FLOWS:
             self.flow.addItem(label, key)
         layout.addWidget(self.flow)
@@ -420,7 +422,9 @@ class OmniWindow(QMainWindow):
         self.row_ctrl = SwitchRow("显示 \\r \\n 等控制字符", False,
                                   tooltip="打开后把不可见字符按 \\r \\n \\0 \\xNN 显示为文本")
         self.row_echo = SwitchRow("回显发送内容", True)
-        self.row_scroll = SwitchRow("自动滚动", True)
+        self.row_scroll = SwitchRow("自动滚动到最新", True,
+                                    tooltip="打开后始终跟着最新一行；关闭后可自由翻阅历史，"
+                                            "底部会浮出「回到最新」按钮")
         for row_widget in (self.row_hex, self.row_ts, self.row_ctrl, self.row_echo, self.row_scroll):
             layout.addWidget(row_widget)
         layout.addWidget(self._divider())
@@ -502,39 +506,36 @@ class OmniWindow(QMainWindow):
         log_layout.setSpacing(6)
 
         toolbar = QHBoxLayout()
-        toolbar.setSpacing(6)
-        self.btn_pause = QPushButton("⏸  暂停打印")
-        self.btn_pause.setObjectName("Ghost")
-        self.btn_pause.setMinimumHeight(28)
-        self.btn_pause.setCursor(Qt.PointingHandCursor)
-        self.btn_pause.setToolTip("暂停只影响界面打印；数据在后台继续接收，继续后会把期间的数据全部补印")
-        toolbar.addWidget(self.btn_pause)
-
+        toolbar.setSpacing(8)
         self.btn_clear = QPushButton("清空")
         self.btn_clear.setObjectName("Ghost")
-        self.btn_clear.setMinimumHeight(28)
         self.btn_clear.setCursor(Qt.PointingHandCursor)
         toolbar.addWidget(self.btn_clear)
-        toolbar.addStretch(1)
 
-        self.pause_badge = Badge("")
-        self.pause_badge.show_text("已暂停 · 后台仍在接收", "BadgeWarn")
-        self.pause_badge.hide()
-        toolbar.addWidget(self.pause_badge)
+        self.btn_save_log = QPushButton("保存视图")
+        self.btn_save_log.setObjectName("Ghost")
+        self.btn_save_log.setCursor(Qt.PointingHandCursor)
+        toolbar.addWidget(self.btn_save_log)
+
+        toolbar.addStretch(1)
 
         self.trim_badge = Badge("")
         toolbar.addWidget(self.trim_badge)
-
-        self.btn_bottom = QPushButton("↓")
-        self.btn_bottom.setObjectName("IconBtn")
-        self.btn_bottom.setFixedSize(26, 26)
-        self.btn_bottom.setToolTip("滚动到底部")
-        self.btn_bottom.setCursor(Qt.PointingHandCursor)
-        toolbar.addWidget(self.btn_bottom)
         log_layout.addLayout(toolbar)
 
+        log_host = QWidget()
+        log_host_layout = QVBoxLayout(log_host)
+        log_host_layout.setContentsMargins(0, 0, 0, 0)
+        log_host_layout.setSpacing(0)
+
         self.log = LogView()
-        log_layout.addWidget(self.log, 1)
+        log_host_layout.addWidget(self.log)
+
+        self.scroll_pill = ScrollBottomPill(log_host)
+        self.scroll_pill.clicked.connect(self.jump_to_latest)
+        self.log.verticalScrollBar().valueChanged.connect(self._on_log_scrolled)
+        self.log.verticalScrollBar().rangeChanged.connect(lambda *_: self._on_log_scrolled())
+        log_layout.addWidget(log_host, 1)
 
         self.log_hint = QLabel("选择串口并打开，接收的数据会实时出现在这里")
         self.log_hint.setAlignment(Qt.AlignCenter)
@@ -635,9 +636,12 @@ class OmniWindow(QMainWindow):
         self.btn_refresh.clicked.connect(lambda: self._on_ports(self.bridge.manager.ports()))
         self.btn_connect.clicked.connect(self.toggle_connection)
 
-        self.btn_pause.clicked.connect(self.toggle_pause)
         self.btn_clear.clicked.connect(self.clear_log)
-        self.btn_bottom.clicked.connect(self.log.scroll_bottom)
+        self.btn_save_log.clicked.connect(self.save_view)
+
+        self.search_panel.attach_log(self.log)
+        self.search_panel.hitActivated.connect(self.log.goto_block)
+        self.search_panel.fullscreenToggled.connect(self.set_search_fullscreen)
 
         self.row_auto.toggled.connect(lambda _: self._push_opts())
         for row in (self.row_dtr, self.row_rts):
@@ -650,7 +654,7 @@ class OmniWindow(QMainWindow):
         self.row_ts.toggled.connect(lambda value: setattr(self.log, "show_ts", value))
         self.row_ctrl.toggled.connect(self._on_ctrl_mode)
         self.row_echo.toggled.connect(self._save_settings)
-        self.row_scroll.toggled.connect(lambda value: setattr(self.log, "autoscroll", value))
+        self.row_scroll.toggled.connect(self._on_autoscroll)
 
         self.btn_record.clicked.connect(self.toggle_record)
         self.btn_open_dir.clicked.connect(self.open_data_dir)
@@ -668,8 +672,6 @@ class OmniWindow(QMainWindow):
         self.stats_timer.timeout.connect(self._refresh_stats)
         self.stats_timer.start(500)
 
-        self.replay_timer = QTimer(self)
-        self.replay_timer.timeout.connect(self._replay_step)
 
     # ------------------------------------------------------------- settings
     def _restore_settings(self) -> None:
@@ -773,6 +775,25 @@ class OmniWindow(QMainWindow):
         self.settings.setValue("serial/lastPort", port)
         self.bridge.manager.open(port, self._serial_opts())
 
+    def _on_port_picked(self, _index: int) -> None:
+        """Switching the combo while a port is open re-opens on the new one.
+
+        A serial debugger must not require close -> select -> open: picking a
+        different port is an explicit instruction to go there.
+        """
+        port = self.port_combo.currentData()
+        if not port:
+            return
+        self.settings.setValue("serial/lastPort", port)
+        status = self._status
+        if not (status.get("connected") or status.get("reconnecting")):
+            return
+        if port == status.get("port"):
+            return
+        self.console.reset()
+        self.notify(f"正在切换到 {port} ...", "info")
+        self.bridge.manager.open(port, self._serial_opts())
+
     def _on_status(self, status: dict) -> None:
         self._status = status
         chip = self.titlebar.status_chip
@@ -811,18 +832,11 @@ class OmniWindow(QMainWindow):
 
     # ------------------------------------------------------------------- rx
     def _on_rx(self, ts: float, data: bytes) -> None:
-        if self._paused:
-            self._backlog.append((ts, data))
-            self._backlog_bytes += len(data)
-            if self._backlog_bytes > MAX_BACKLOG:
-                # Surface the loss instead of hiding it (R-017).
-                while self._backlog_bytes > MAX_BACKLOG and len(self._backlog) > 1:
-                    _old_ts, old = self._backlog.pop(0)
-                    self._backlog_bytes -= len(old)
-                    self._lost_bytes += len(old)
-            self._update_pause_badge()
-            return
+        # No pause buffer any more: every chunk is printed immediately, which
+        # also means nothing can ever be dropped here (R-017).
         self._feed(ts, data)
+        if self.console.isVisible():
+            self.console.feed(data)
 
     def _feed(self, ts: float, data: bytes) -> None:
         if not data:
@@ -913,48 +927,112 @@ class OmniWindow(QMainWindow):
             self.trim_badge.show_text(f"视图已隐藏较早的 {hidden} 行", "Badge")
             self.status_trim.setText(f"视图已隐藏 {hidden} 行（建议开启记录到文件）")
 
-    # ----------------------------------------------------------------- pause
-    def toggle_pause(self) -> None:
-        self._paused = not self._paused
-        self.btn_pause.setText("▶  继续打印" if self._paused else "⏸  暂停打印")
-        self.btn_pause.setObjectName("Primary" if self._paused else "Ghost")
-        self.btn_pause.style().unpolish(self.btn_pause)
-        self.btn_pause.style().polish(self.btn_pause)
-        if self._paused:
-            self.pause_badge.show_text("已暂停 · 后台仍在接收", "BadgeWarn")
-        else:
-            self.pause_badge.hide()
-            self._start_replay()
+    # -------------------------------------------------------------- following
+    def _on_autoscroll(self, value: bool) -> None:
+        self.log.autoscroll = value
+        if value:
+            self.log.scroll_bottom()
+        self._save_settings()
+        self._on_log_scrolled()
 
-    def _update_pause_badge(self) -> None:
-        extra = f" · 超限已丢弃 {human_bytes(self._lost_bytes)}" if self._lost_bytes else ""
-        self.pause_badge.show_text(
-            f"已暂停 · 已缓存 {human_bytes(self._backlog_bytes)}{extra}", "BadgeWarn")
-        self.status_trim.setText(
-            f"暂停缓存 {human_bytes(self._backlog_bytes)}{extra}" if self._paused else "")
-
-    def _start_replay(self) -> None:
-        if not self._backlog:
-            self._backlog_bytes = 0
-            self._lost_bytes = 0
-            self.status_trim.setText("")
+    def _on_log_scrolled(self) -> None:
+        """Show the floating pill whenever the newest line is off screen."""
+        if self.log.autoscroll:
+            self.scroll_pill.hide_pill()
             return
-        self._replay_queue = self._backlog
-        self._backlog = []
-        self._backlog_bytes = 0
-        self.status_line.setText(f"正在补印暂停期间的 {len(self._replay_queue)} 个数据块…")
-        self.replay_timer.start(16)
+        if self.log._at_bottom():
+            self.scroll_pill.hide_pill()
+            return
+        self.scroll_pill.show_pill(self._pill_anchor())
 
-    def _replay_step(self) -> None:
-        for _ in range(48):
-            if not self._replay_queue:
-                self.replay_timer.stop()
-                self.status_line.setText("补印完成")
-                self._lost_bytes = 0
-                self.status_trim.setText("")
+    def _pill_anchor(self) -> QPoint:
+        host = self.scroll_pill.parentWidget()
+        return QPoint(host.width() - 34, host.height() - 18)
+
+    def jump_to_latest(self) -> None:
+        self.log.scroll_bottom()
+        self.scroll_pill.hide_pill()
+
+    def switch_page(self, page: str) -> None:
+        pages = {"terminal": 0, "console": 1, "transfer": 2}
+        self.stack.setCurrentIndex(pages.get(page, 0))
+        if page == "console":
+            self.console.view.setFocus()
+
+    def _on_terminal_keys(self, data: bytes) -> None:
+        if not data:
+            return
+        if not self._status.get("connected"):
+            self.notify("请先打开串口再使用终端模式", "warn")
+            return
+        try:
+            self.bridge.manager.write(data)
+        except Exception as exc:
+            self.notify(str(exc), "warn")
+
+    # ------------------------------------------------------- search fullscreen
+    def set_search_fullscreen(self, value: bool) -> None:
+        """Move the search panel into a window-sized overlay and back."""
+        if value:
+            if self._search_overlay is not None:
                 return
-            ts, data = self._replay_queue.pop(0)
-            self._feed(ts, data)
+            overlay = QWidget(self.centralWidget())
+            overlay.setObjectName("SearchOverlay")
+            overlay.setStyleSheet(
+                f"QWidget#SearchOverlay {{ background: {theme.BG};"
+                f" border-radius: 18px; }}")
+            layout = QVBoxLayout(overlay)
+            layout.setContentsMargins(16, 14, 16, 14)
+            layout.setSpacing(10)
+
+            head = QHBoxLayout()
+            title = QLabel("搜索结果 · 全窗口")
+            title.setStyleSheet(f"color: {theme.INK}; font-size: 14px; font-weight: 650;")
+            head.addWidget(title)
+            head.addStretch(1)
+            close = QPushButton("退出全屏")
+            close.setObjectName("Ghost")
+            close.setCursor(Qt.PointingHandCursor)
+            close.clicked.connect(lambda: self.search_panel.set_fullscreen(False))
+            head.addWidget(close)
+            layout.addLayout(head)
+
+            self.search_block.setParent(overlay)
+            self.search_block.setMaximumHeight(1 << 20)
+            layout.addWidget(self.search_block, 1)
+
+            overlay.setGeometry(self._overlay_rect())
+            overlay.show()
+            overlay.raise_()
+            self._search_overlay = overlay
+            self.search_panel.show_full_hint()
+            return
+
+        overlay = self._search_overlay
+        if overlay is None:
+            return
+        self.search_block.setParent(self.sidebar)
+        self.sidebar_box.addWidget(self.search_block, 2)
+        self.relayout_sidebar()
+        overlay.deleteLater()
+        self._search_overlay = None
+
+    def _overlay_rect(self) -> QRect:
+        """Body area only, so the title bar stays reachable."""
+        central = self.centralWidget().rect()
+        top = self.titlebar.geometry().bottom() + 10
+        bottom = self.status_strip.geometry().top() - 4
+        return QRect(central.left() + 10, top,
+                     central.width() - 20, max(120, bottom - top))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._search_overlay is not None:
+            self._search_overlay.setGeometry(self._overlay_rect())
+        if self.scroll_pill.isVisible() and not self.log.autoscroll:
+            self.scroll_pill.move(
+                self._pill_anchor() - QPoint(self.scroll_pill.width() // 2,
+                                             self.scroll_pill.height()))
 
     def clear_log(self) -> None:
         self.log.clear_all()
@@ -965,6 +1043,7 @@ class OmniWindow(QMainWindow):
         self.trim_badge.hide()
         self.status_trim.setText("")
         self.log_hint.show()
+        self.scroll_pill.hide_pill()
 
     def _on_hex_mode(self, enabled: bool) -> None:
         self._save_settings()
@@ -1149,31 +1228,47 @@ class OmniWindow(QMainWindow):
     def save_view(self) -> None:
         text = self.log.plain_text()
         if not text.strip():
-            self.notify("当前视图为空", "warn")
+            self.notify("当前视图为空，没有可保存的内容", "warn")
             return
         default = os.path.join(paths.data_dir(),
                                time.strftime("omnicom-view-%Y%m%d-%H%M%S.log"))
-        path, _ = QFileDialog.getSaveFileName(self, "保存视图", default, "日志文件 (*.log *.txt)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保存当前视图", default, "日志文件 (*.log);;文本文件 (*.txt);;所有文件 (*)")
         if not path:
             return
         try:
             with open(path, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(text)
-            self.notify(f"已保存到 {path}", "ok")
         except OSError as exc:
             self.notify(f"保存失败：{exc}", "error")
+            return
+        lines = text.count("\n") + 1
+        self.notify(f"已保存 {lines} 行到 {os.path.basename(path)}", "ok")
 
     # ----------------------------------------------------------------- toast
-    def notify(self, text: str, level: str = "info", timeout: int = 3200) -> None:
+    def notify(self, text: str, level: str = "info", timeout: int = 3600) -> None:
         if not text:
             return
         if level in ("warn", "error"):
             self.log.append_line(time.time() * 1000, "!!", text, "evt")
         toast = Toast(self, text, level, timeout)
-        x = self.width() - toast.width() - 26
-        y = self.height() - toast.height() - 52 - len(self.findChildren(Toast)) * 6
-        toast.move(max(16, x), max(60, y))
-        QTimer.singleShot(timeout, toast.deleteLater)
+        # A dismissed toast has already been deleteLater()'d, so touching it
+        # raises RuntimeError("Internal C++ object already deleted").
+        alive = []
+        for item in self._toasts:
+            try:
+                if item.isVisible():
+                    alive.append(item)
+            except RuntimeError:
+                continue
+        self._toasts = alive
+        offset = sum(item.height() + 10 for item in self._toasts)
+        x = max(16, self.width() - toast.width() - 26)
+        y = max(70, self.height() - toast.height() - 54 - offset)
+        toast.move(x, y)
+        toast.play_in()
+        self._toasts.append(toast)
+        QTimer.singleShot(timeout, toast.dismiss)
 
     # -------------------------------------------------------------- window
     def toggle_maximize(self) -> None:
