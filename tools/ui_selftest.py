@@ -103,14 +103,31 @@ def main() -> int:
         next_()
 
     def step_rx(next_):
-        state["rx0"] = window.bridge.manager.rx_bytes
-        state["appended0"] = window._appended
-        lines = window.log.plain_text().splitlines()
-        check("R-004 收到数据并打印", state["rx0"] > 0 and len(lines) > 0, f"{state['rx0']} B")
-        check("R-010 时间戳精确到毫秒（HH:MM:SS.mmm）",
-              any(STAMP_RE.match(line) for line in lines),
-              lines[0] if lines else "")
-        next_()
+        # DEMO emits telemetry every ~700 ms; poll instead of assuming a fixed delay
+        waited = {"ms": 0}
+
+        def poll():
+            waited["ms"] += 100
+            if window.bridge.manager.rx_bytes > 0 and window._appended > 0:
+                check_rx()
+                return
+            if waited["ms"] > 4000:
+                check_rx()
+                return
+            QTimer.singleShot(100, poll)
+
+        def check_rx():
+            state["rx0"] = window.bridge.manager.rx_bytes
+            state["appended0"] = window._appended
+            lines = window.log.plain_text().splitlines()
+            check("R-004 收到数据并打印", state["rx0"] > 0 and len(lines) > 0,
+                  f"{state['rx0']} B / {len(lines)} 行 / 等 {waited['ms']}ms")
+            check("R-010 时间戳精确到毫秒（HH:MM:SS.mmm）",
+                  any(STAMP_RE.match(line) for line in lines),
+                  lines[0] if lines else "")
+            next_()
+
+        poll()
 
     # ------------------------------------------------------------------- send
     def step_send(next_):
@@ -178,8 +195,29 @@ def main() -> int:
         added = window._appended - state["appended_resume"]
         check("R-012 继续后补印暂停期间的数据", added >= 2, f"+{added} 行")
         check("R-017 暂停期间没有丢字节",
-              window.bridge.manager.rx_bytes >= state["rx_resume"],
-              "appended=" + str(window._appended))
+              window.bridge.manager.rx_bytes >= state["rx_resume"]
+              and window._lost_bytes == 0,
+              f"appended={window._appended} lost={window._lost_bytes}")
+        next_()
+
+    # ------------------------------------------------------------- timed send
+    def step_timed_send(next_):
+        window.send_panel.input.setPlainText("PING")
+        state["tx_timed"] = window.bridge.manager.tx_bytes
+        window.send_panel.interval.setValue(80)
+        window.send_panel.toggle_timed()
+        wait(600, next_)
+
+    def step_timed_check(next_):
+        grew = window.bridge.manager.tx_bytes - state["tx_timed"]
+        check("R-011 定时发送连续发出", grew >= 6, f"+{grew} B")
+        window.send_panel.toggle_timed()
+        state["tx_timed_off"] = window.bridge.manager.tx_bytes
+        wait(500, next_)
+
+    def step_timed_stop(next_):
+        grew = window.bridge.manager.tx_bytes - state["tx_timed_off"]
+        check("R-011 定时发送可停止", grew == 0, f"+{grew} B")
         next_()
 
     # ------------------------------------------------------------------ search
@@ -325,6 +363,9 @@ def main() -> int:
     runner.add("pause", step_pause)
     runner.add("pause_check", step_pause_check)
     runner.add("resume_check", step_resume_check)
+    runner.add("timed_send", step_timed_send)
+    runner.add("timed_check", step_timed_check)
+    runner.add("timed_stop", step_timed_stop)
     runner.add("search", step_search)
     runner.add("search_check", step_search_check)
     runner.add("search_all", step_search_all)

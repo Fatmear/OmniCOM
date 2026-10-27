@@ -25,7 +25,7 @@ from .log_view import LogView
 from .search_panel import SearchPanel
 from .send_panel import SendPanel
 from .transfer_panel import TransferPanel
-from .widgets import Badge, GlassFrame, SectionTitle, SwitchRow, Toast
+from .widgets import Badge, GlassFrame, SectionTitle, StatusPill, SwitchRow, Toast
 from .workers import SerialBridge, TransferWorker
 
 BAUD_RATES = ["9600", "19200", "38400", "57600", "115200", "230400", "460800",
@@ -53,94 +53,71 @@ def human_bytes(value: float) -> str:
 
 
 class Aurora(QWidget):
-    """Painted background: dark gradient plus drifting light blobs."""
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.acrylic = False
+    """Solid backdrop — flat colour only, no grid, no blobs (R-020)."""
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        rect = self.rect()
-        radius = 18
-
-        base = QColor(4, 5, 10, 96 if self.acrylic else 246)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(base)
-        painter.drawRoundedRect(rect, radius, radius)
-
-        blobs = [
-            (-0.10, -0.18, 0.62, (31, 122, 140, 120)),
-            (0.72, -0.24, 0.58, (91, 63, 168, 130)),
-            (0.16, 0.62, 0.66, (18, 60, 94, 120)),
-            (0.74, 0.66, 0.46, (44, 111, 92, 92)),
-        ]
-        width, height = max(1, rect.width()), max(1, rect.height())
-        for fx, fy, fs, color in blobs:
-            center = QPoint(int(width * (fx + fs / 2)), int(height * (fy + fs / 2)))
-            gradient = QRadialGradient(center, int(width * fs * 0.8))
-            gradient.setColorAt(0.0, QColor(*color))
-            gradient.setColorAt(1.0, QColor(color[0], color[1], color[2], 0))
-            painter.setBrush(QBrush(gradient))
-            painter.drawEllipse(center, int(width * fs * 0.8), int(width * fs * 0.8))
-
-        # subtle grid
-        painter.setBrush(Qt.NoBrush)
-        painter.setPen(QColor(255, 255, 255, 14))
-        step = 46
-        for x in range(0, rect.width(), step):
-            painter.drawLine(x, 0, x, rect.height())
-        for y in range(0, rect.height(), step):
-            painter.drawLine(0, y, rect.width(), y)
+        painter.setBrush(QBrush(QColor(theme.BG)))
+        painter.drawRoundedRect(self.rect(), 18, 18)
 
 
-class TitleBar(QWidget):
+class TitleBar(GlassFrame):
+    """Single glass bar: brand, page tabs, connection state, counters, controls."""
+
     def __init__(self, window: "OmniWindow") -> None:
-        super().__init__()
+        super().__init__(None, radius=16, strong=True, shadow=True)
         self.window_ref = window
         self._drag: Optional[QPoint] = None
-        self.setFixedHeight(58)
+        self.setFixedHeight(62)
+
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(14, 0, 10, 0)
+        layout.setContentsMargins(13, 0, 12, 0)
         layout.setSpacing(14)
 
+        # ---- brand
         brand = QHBoxLayout()
-        brand.setSpacing(9)
+        brand.setSpacing(10)
         logo = QLabel("◠")
-        logo.setFixedSize(34, 34)
+        logo.setFixedSize(38, 38)
         logo.setAlignment(Qt.AlignCenter)
         logo.setStyleSheet(
-            "QLabel { border-radius: 12px; font-size: 19px; color: #9DF3E4;"
+            "QLabel { border-radius: 13px; font-size: 21px; color: #A9F7EA;"
             " background: qlineargradient(x1:0, y1:0, x2:1, y2:1,"
-            " stop:0 rgba(94,234,212,60), stop:1 rgba(167,139,250,50));"
-            " border: 1px solid rgba(255,255,255,42); }")
+            " stop:0 rgba(94,234,212,72), stop:1 rgba(167,139,250,58));"
+            " border: 1px solid rgba(255,255,255,58); }")
         brand.addWidget(logo)
         names = QVBoxLayout()
-        names.setSpacing(0)
+        names.setSpacing(1)
         title = QLabel("OmniCOM")
-        title.setStyleSheet("font-size: 14.5px; font-weight: 650; letter-spacing: .4px;")
+        title.setStyleSheet("font-size: 15px; font-weight: 650; letter-spacing: .5px;")
         subtitle = QLabel("EMBEDDED SERIAL DEBUGGER")
-        subtitle.setStyleSheet(f"color: {theme.DIM}; font-size: 9px; letter-spacing: 1.1px;")
+        subtitle.setStyleSheet(
+            f"color: {theme.DIM}; font-size: 8.5px; letter-spacing: 1.3px;")
         names.addWidget(title)
         names.addWidget(subtitle)
         brand.addLayout(names)
         layout.addLayout(brand)
 
+        layout.addWidget(self._vline())
+
+        # ---- page tabs
         self.tabs = QButtonGroup(self)
         self.tabs.setExclusive(True)
         tab_box = QFrame()
+        tab_box.setObjectName("TabBox")
+        tab_box.setFixedHeight(38)
         tab_box.setStyleSheet(
-            "QFrame { background: rgba(255,255,255,12);"
-            " border: 1px solid rgba(255,255,255,18); border-radius: 15px; }")
+            "QFrame#TabBox { background: rgba(255,255,255,10);"
+            " border: 1px solid rgba(255,255,255,20); border-radius: 14px; }")
         tab_layout = QHBoxLayout(tab_box)
         tab_layout.setContentsMargins(4, 4, 4, 4)
-        tab_layout.setSpacing(3)
+        tab_layout.setSpacing(2)
         for index, (key, label) in enumerate((("terminal", "终端"), ("transfer", "文件传输"))):
             button = QPushButton(label)
-            button.setObjectName("Seg")
+            button.setObjectName("TabSeg")
             button.setCheckable(True)
-            button.setMinimumHeight(28)
             button.setCursor(Qt.PointingHandCursor)
             button.setProperty("page", key)
             if index == 0:
@@ -154,48 +131,54 @@ class TitleBar(QWidget):
 
         layout.addStretch(1)
 
-        self.status_chip = Badge("未连接")
-        self.status_chip.show()
-        self.status_chip.setStyleSheet(
-            "QLabel { color: %s; background: rgba(255,255,255,14);"
-            " border: 1px solid rgba(255,255,255,22); border-radius: 15px;"
-            " padding: 5px 12px; font-size: 11.5px; }" % theme.INK2)
+        # ---- right cluster
+        self.status_chip = StatusPill(self, "未连接")
         layout.addWidget(self.status_chip)
 
-        self.counter = QLabel("RX 0 B   TX 0 B")
-        self.counter.setStyleSheet(f"color: {theme.DIM}; font-size: 11.5px; font-family: {theme.MONO_FONT};")
+        self.counter = QLabel()
+        self.counter.setTextFormat(Qt.RichText)
+        self.counter.setStyleSheet(
+            f"color: {theme.DIM}; font-size: 11.5px; font-family: {theme.MONO_FONT};")
         layout.addWidget(self.counter)
+        self.set_counters(0, 0)
+
+        layout.addWidget(self._vline())
 
         self.btn_sidebar = self._tool("▤", "显示 / 隐藏右侧栏")
         self.btn_sidebar.clicked.connect(window.toggle_sidebar)
         layout.addWidget(self.btn_sidebar)
 
-        layout.addWidget(self._separator())
-        for text, tip, slot in (("—", "最小化", window.showMinimized),
-                                ("□", "最大化 / 还原", window.toggle_maximize),
-                                ("✕", "关闭", window.close)):
-            button = self._tool(text, tip, close=text == "✕")
+        for text, tip, slot, close in (
+                ("—", "最小化", window.showMinimized, False),
+                ("❐", "最大化 / 还原", window.toggle_maximize, False),
+                ("✕", "关闭", window.close, True)):
+            button = self._tool(text, tip, close=close)
             button.clicked.connect(slot)
             layout.addWidget(button)
 
+    # ------------------------------------------------------------------ parts
     @staticmethod
-    def _separator() -> QFrame:
+    def _vline() -> QFrame:
         line = QFrame()
-        line.setFixedSize(1, 20)
-        line.setStyleSheet("background: rgba(255,255,255,26);")
+        line.setFixedSize(1, 22)
+        line.setStyleSheet("background: rgba(255,255,255,24); border: 0;")
         return line
 
     def _tool(self, text: str, tip: str, close: bool = False) -> QPushButton:
         button = QPushButton(text)
-        button.setObjectName("IconBtn")
+        button.setObjectName("TopIconClose" if close else "TopIcon")
         button.setFixedSize(28, 28)
         button.setToolTip(tip)
-        hover = "rgba(248,113,113,140)" if close else "rgba(255,255,255,40)"
-        button.setStyleSheet(
-            "QPushButton { color: #B6C2DC; font-size: 13px; border-radius: 9px;"
-            " background: transparent; border: 1px solid transparent; }"
-            f"QPushButton:hover {{ background: {hover}; color: #FFFFFF; }}")
+        button.setCursor(Qt.PointingHandCursor)
         return button
+
+    def set_counters(self, rx: int, tx: int) -> None:
+        self.counter.setText(
+            f'<span style="color:{theme.DIM}">RX</span> '
+            f'<span style="color:#9DF3E4">{human_size(rx)}</span>'
+            f'<span style="color:{theme.DIM}"> &nbsp;·&nbsp; </span>'
+            f'<span style="color:{theme.DIM}">TX</span> '
+            f'<span style="color:#C4B5FD">{human_size(tx)}</span>')
 
     # -- window drag --------------------------------------------------------
     def mousePressEvent(self, event) -> None:  # noqa: N802
@@ -206,7 +189,7 @@ class TitleBar(QWidget):
         if self._drag is not None and event.buttons() & Qt.LeftButton:
             if self.window_ref.isMaximized():
                 self.window_ref.showNormal()
-                self._drag = QPoint(self.window_ref.width() // 2, 28)
+                self._drag = QPoint(self.window_ref.width() // 2, 30)
             self.window_ref.move(event.globalPosition().toPoint() - self._drag)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
@@ -216,6 +199,18 @@ class TitleBar(QWidget):
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.LeftButton:
             self.window_ref.toggle_maximize()
+
+
+def human_size(value: float) -> str:
+    """Compact byte count for the top bar (3 significant-ish characters)."""
+    value = float(value or 0)
+    if value < 1024:
+        return f"{int(value)} B"
+    if value < 1024 ** 2:
+        return f"{value / 1024:.1f} K"
+    if value < 1024 ** 3:
+        return f"{value / 1048576:.2f} M"
+    return f"{value / 1073741824:.2f} G"
 
 
 class OmniWindow(QMainWindow):
@@ -251,7 +246,6 @@ class OmniWindow(QMainWindow):
         self._build_ui()
         self._wire()
         self._restore_settings()
-        QTimer.singleShot(120, self._enable_glass)
         QTimer.singleShot(240, self._push_opts)
 
     # ------------------------------------------------------------------- UI
@@ -738,54 +732,37 @@ class OmniWindow(QMainWindow):
         self._status = status
         chip = self.titlebar.status_chip
         if status.get("connected"):
-            chip.setText(f"● {status.get('port')} 已连接")
-            chip.setStyleSheet(
-                "QLabel { color: %s; background: rgba(255,255,255,14);"
-                " border: 1px solid rgba(255,255,255,22); border-radius: 15px;"
-                " padding: 5px 12px; font-size: 11.5px; }" % theme.INK2)
+            chip.set_state("ok", f"{status.get('port')} 已连接")
             self.btn_connect.setText("关闭串口")
             self.btn_connect.setObjectName("Ghost")
             self.meta_port.setText(status.get("port") or "—")
             self.status_line.setText(f"已连接 {status.get('port')} · {self.baud.currentText()} bps")
         elif status.get("reconnecting"):
-            chip.setText("◌ 正在重新连接…")
+            chip.set_state("retry", "正在重新连接…")
             self.btn_connect.setText("取消重连")
             self.btn_connect.setObjectName("Primary")
             self.status_line.setText("串口已断开，等待设备重新插入…")
         else:
-            chip.setText("未连接")
-            chip.setStyleSheet(
-                f"QLabel {{ color: {theme.INK2}; background: rgba(255,255,255,14);"
-                " border: 1px solid rgba(255,255,255,22); border-radius: 15px;"
-                " padding: 5px 12px; font-size: 11.5px; }}")
+            error = status.get("error")
+            if error:
+                chip.set_state("error", "连接失败")
+                self.status_line.setText(str(error))
+            else:
+                chip.set_state("idle", "未连接")
+                self.status_line.setText("就绪")
             self.btn_connect.setText("打开串口")
             self.btn_connect.setObjectName("Primary")
             self.meta_port.setText("—")
-            if status.get("error"):
-                self.status_line.setText(str(status["error"]))
-            else:
-                self.status_line.setText("就绪")
-        for widget in (self.btn_connect, chip):
-            widget.style().unpolish(widget)
-            widget.style().polish(widget)
+        self.btn_connect.style().unpolish(self.btn_connect)
+        self.btn_connect.style().polish(self.btn_connect)
 
     def _on_stats(self, stats: dict) -> None:
         self._stats = stats
-        self.titlebar.counter.setText(
-            f"RX {human_bytes(stats.get('rx', 0))}   TX {human_bytes(stats.get('tx', 0))}")
+        self.titlebar.set_counters(stats.get("rx", 0), stats.get("tx", 0))
 
     def _refresh_stats(self) -> None:
         stats = self.bridge.manager.stats()
         self._on_stats(stats)
-
-    def _enable_glass(self) -> None:
-        try:
-            handle = int(self.winId())
-        except Exception:
-            return
-        enabled = theme.enable_windows_glass(handle)
-        self.centralWidget().acrylic = enabled
-        self.centralWidget().update()
 
     # ------------------------------------------------------------------- rx
     def _on_rx(self, ts: float, data: bytes) -> None:

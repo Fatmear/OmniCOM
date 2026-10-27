@@ -1,0 +1,13 @@
+{
+  "steps": [
+    { "note": "OmniCOM CLI session smoke test" },
+    { "drain": 0.3 },
+    { "send": "AT", "line_end": "crlf", "wait": 1.5, "expect": ["OK"] },
+    { "send": "AT+CGMR", "wait": 1.5, "expect": ["DEMO"] },
+    { "send_hex": "41 54 0D 0A", "wait": 1.2, "expect_regex": "OK" },
+    { "delay": 0.2 },
+    { "record": "start" },
+    { "drain": 1.2 },
+    { "record": "stop" }
+  ]
+}

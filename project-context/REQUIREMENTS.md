@@ -23,10 +23,16 @@ Source of R-001..R-017: user request on 2026-10-27 (project kickoff). Do not wea
 | R-016 | MUST | UI | Command list items support per-item delay and per-item timed send | delay honoured in "send all"; timer repeats | active |
 | R-017 | MUST NOT | IO | Never silently drop received bytes, including while printing is paused | code has no discard path; any cap raises a visible notice + counter | active |
 | R-018 | MUST | Delivery | Run as a **native Python GUI application** (`python run.py` / `start.cmd`); no browser page, no local web server | window opens from `start.cmd` | active |
-| R-019 | MUST NOT | Delivery | Do not ship or depend on a self-built `.exe` — corporate endpoint policy blocks locally built executables | repo contains no `dist/`; `build.py` is documentation only | active |
+| R-019 | MUST NOT | Delivery | Do not ship or depend on a self-built `.exe` — corporate endpoint policy blocks locally built executables | repo contains no `dist/`; `build.py` refuses to run without `--i-understand-policy` | active |
+| R-020 | MUST | UI | Window background is a **flat solid colour**; no grid, no dot pattern, no animated blobs | `tools/acceptance_test.py --only visual` samples the backdrop widget: every pixel identical | active |
+| R-021 | MUST | CLI | Ship a CLI that an AI agent can drive unattended, plus documentation written for AI consumption | `python -m omnicom.cli --help`; `python tools/acceptance_test.py` CLI suite; `docs/CLI.md` exists | active |
+| R-022 | MUST | CLI | CLI prints **one JSON document on stdout** (`ok` + `error` on failure), human text on stderr, exit 0/1/2 | acceptance suite: success and failure both parse as JSON; failure exit code is 1 | active |
+| R-023 | MUST | CLI | CLI can run against the virtual `DEMO` port so an agent can verify behaviour without hardware | `python -m omnicom.cli selftest` (28 checks) returns `ok:true` | active |
 
 Superseded:
 - R-018 (old: browser UI + local HTTP/WS service) → R-018 (native Qt GUI). Reason: user required a real
   Python GUI ("不是网页版的，是用 python 图形用户界面做"), 2026-10-27.
 - R-020 (old: "package to exe with PyInstaller") → withdrawn into R-019. Reason: the built exe is blocked
   by corporate security policy at run time, 2026-10-27. See LEDGER L-006.
+- Background: earlier "aurora blobs + 46px grid" look → R-020 flat solid colour. Reason: user asked for
+  "纯色背景，不要搞网格背景", 2026-10-27. See LEDGER L-013.

@@ -18,3 +18,8 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 | L-010 | Could not parse stylesheet / 徽标样式失效 | FIXED-verified | An f-string with `{{ }}` covered only the first line of a multi-line QSS, leaving stray braces | `ui/main_window.py` status chip |
 | L-011 | 侧栏标题边框外溢 / 整块变粗线 | FIXED-verified | Unscoped `border-bottom` on a container applied to all children; now scoped to `#SideHeader` | `ui/commands_panel.py`, `ui/search_panel.py` |
 | L-012 | QFontDatabase cannot find font directory | RULED-OUT | Harmless offscreen-only warning; Qt ships no fonts. Real windows use system fonts | `tools/*selftest*.py` logs |
+| L-013 | 网格背景 / 背景太花 / grid | FIXED-verified | `Aurora` now paints one flat colour; grid loop and radial blobs removed. Proven by pixel sampling of the backdrop widget | `tools/acceptance_test.py --only visual` R-020 4/4 |
+| L-014 | 顶部栏难看 / 元素散乱 / 标题重复应用名 | FIXED-verified | Top bar became one `GlassFrame` bar (h=62) with brand tile, segmented tabs, `StatusPill`, rich-text counters and icon buttons; `applicationDisplayName` removed (Qt appended it to the title) | R-001 checks in acceptance report |
+| L-015 | GUI 自测首帧偶发 0 字节 / 时好时坏 | FIXED-verified | Test read `rx_bytes` after a fixed 700 ms while DEMO emits every ~700 ms — replaced with a 4 s poll | `tools/ui_selftest.py::step_rx` |
+| L-016 | 验收脚本少跑一段检查 / 结果缺 R-001/R-019 | FIXED-verified | An edit replaced the function tail, silently dropping the top-bar/delivery checks; restored and added token-count assertions to the patch script | `tools/acceptance_test.py` 79 checks |
+| L-017 | CLI 与 GUI 传输行为可能不一致 | FIXED-verified | Transfer code moved to `omnicom/transfer.py` (Qt free); GUI worker and CLI both call `run_transfer()` | `omnicom/transfer.py`, `omnicom/ui/workers.py` |

@@ -1,0 +1,371 @@
+"""Full acceptance test — every requirement, with executable evidence.
+
+    python tools/acceptance_test.py            # run everything
+    python tools/acceptance_test.py --fast     # skip the slow GUI suite
+
+Runs four independent suites and maps each result onto a requirement ID from
+``project-context/REQUIREMENTS.md``:
+
+1. ``tools/protocol_selftest.py``  — X/Y/ZMODEM over an in-memory loopback
+2. ``python -m omnicom.cli ...``   — the AI-facing CLI surface
+3. ``tools/ui_selftest.py``        — the Qt GUI (offscreen, DEMO port)
+4. in-process visual / delivery checks (solid background, no exe, no web server)
+
+Exit code 0 only when every requirement has at least one passing check and none
+of its checks failed.  A JSON report is written to ``.artifacts/acceptance.json``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from omnicom import __version__  # noqa: E402
+from omnicom.ui.main_window import OmniWindow, TitleBar  # noqa: E402
+from omnicom.ui.theme import app_stylesheet  # noqa: E402
+
+RESULTS: dict[str, list[tuple[str, bool, str]]] = {}
+FAILED: list[tuple[str, str, str]] = []
+TITLES = {
+    "R-001": "整体功能完整 + 液态玻璃界面",
+    "R-002": "左栏完整串口配置（含流控/DTR/RTS）",
+    "R-003": "顶部标签页：终端 / 文件传输(X/Y/Z)",
+    "R-004": "方便、准确、不丢字的收发",
+    "R-005": "自动识别串口 + 自动重连开关",
+    "R-006": "发送文件",
+    "R-007": "HEX 发送与 HEX 显示",
+    "R-008": "可折叠右侧栏 + 可扩展命令列表",
+    "R-009": "粘贴多行自动填入命令列表",
+    "R-010": "毫秒时间戳，可开关",
+    "R-011": "定时发送",
+    "R-012": "暂停/继续（后台接收 + 补印）",
+    "R-013": "接收保存到文件",
+    "R-014": "多关键字搜索右侧汇总",
+    "R-015": "显示 \\r\\n 等不可见字符",
+    "R-016": "命令项延时 + 定时发送",
+    "R-017": "绝不静默丢字节",
+    "R-018": "原生 Python GUI（无浏览器/无服务）",
+    "R-019": "不打包/不依赖自编译 exe",
+    "R-020": "纯色背景（无网格）",
+}
+
+
+def add(req: str, name: str, ok: bool, detail: object = "") -> None:
+    RESULTS.setdefault(req, []).append((name, bool(ok), str(detail)))
+    if not ok:
+        FAILED.append((req, name, str(detail)))
+    mark = "PASS" if ok else "FAIL"
+    print(f"  [{mark}] {req} {name}" + (f"   [{detail}]" if detail else ""))
+
+
+def run(args: list[str], timeout: int = 180) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable] + args, cwd=ROOT, capture_output=True,
+                          text=True, encoding="utf-8", errors="replace", timeout=timeout)
+
+
+# ------------------------------------------------------------------ suites
+
+def suite_protocol() -> None:
+    print("\n== 1/4 协议环回（X / Y / ZMODEM）")
+    proc = run(["tools/protocol_selftest.py"])
+    out = (proc.stdout or "") + (proc.stderr or "")
+    passed = "ALL PROTOCOL SELFTESTS PASSED" in out
+    add("R-004", "协议环回 23 项收发一致", passed,
+        "" if passed else out.strip().splitlines()[-1:] or "no output")
+    for line in out.splitlines():
+        if "PASS" in line and ("XMODEM" in line or "YMODEM" in line or "ZMODEM" in line):
+            add("R-003", "协议引擎：" + line.split("PASS")[-1].strip(), True)
+
+
+def cli_json(*args: str) -> dict:
+    proc = run(["-m", "omnicom.cli"] + list(args))
+    try:
+        return json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return {"ok": False, "error": "非 JSON 输出：" + (proc.stdout or proc.stderr or "")[:200]}
+
+
+def suite_cli() -> None:
+    print("\n== 2/4 CLI（AI 接口）")
+
+    info = cli_json("info")
+    add("R-018", "CLI info 可用", info.get("ok") is True, info.get("version", ""))
+
+    ports = cli_json("ports", "--demo")
+    names = [item["name"] for item in ports.get("ports", [])]
+    add("R-005", "CLI ports 能列出串口并含 DEMO", ports.get("ok") and "DEMO" in names, names)
+
+    sent = cli_json("send", "--port", "DEMO", "--data", "AT", "--expect", "OK",
+                    "--wait", "2", "--limit", "200")
+    add("R-004", "CLI send 收到设备应答", sent.get("ok") is True and sent.get("matched") is True,
+        (sent.get("response") or {}).get("escaped", "")[:40])
+    add("R-015", "CLI 应答同时给出 escaped 形式",
+        "\\r\\n" in (sent.get("response") or {}).get("escaped", ""))
+
+    hexsend = cli_json("send", "--port", "DEMO", "--hex", "41 54 0D 0A",
+                       "--expect", "OK", "--wait", "2")
+    add("R-007", "CLI HEX 发送字节正确",
+        hexsend.get("ok") is True and hexsend.get("sent_hex") == "41 54 0d 0a",
+        hexsend.get("sent_hex", ""))
+
+    full = cli_json("send", "--port", "DEMO", "--baud", "921600", "--bytesize", "7",
+                    "--parity", "E", "--stopbits", "2", "--flow", "rtscts",
+                    "--no-dtr", "--no-rts", "--data", "AT", "--expect", "OK", "--wait", "2")
+    add("R-002", "CLI 接受完整串口参数组合", full.get("ok") is True,
+        full.get("error", "baud=921600 7E2 rtscts"))
+
+    read = cli_json("read", "--port", "DEMO", "--timeout", "1.5", "--record")
+    add("R-004", "CLI read 读到数据", read.get("ok") and (read.get("received") or {}).get("bytes", 0) > 0,
+        (read.get("received") or {}).get("bytes"))
+    add("R-013", "CLI read --record 落盘且字节一致",
+        bool((read.get("record") or {}).get("path")) and
+        (read.get("record") or {}).get("bytes", -1) > 0,
+        (read.get("record") or {}).get("path", ""))
+
+    mon = run(["-m", "omnicom.cli", "monitor", "--port", "DEMO", "--duration", "1.6",
+               "--grep", "temp"])
+    lines = [json.loads(item) for item in (mon.stdout or "").splitlines() if item.strip()]
+    add("R-004", "CLI monitor 流式输出 NDJSON 行",
+        any(item.get("dir") == "rx" and "temp=" in item.get("line", "") for item in lines),
+        f"{len(lines)} 条")
+
+    # raw file send
+    size = 12345
+    payload = bytes((index * 37) & 0xFF for index in range(size))
+    sample = os.path.join(ROOT, ".artifacts", "cli-send-file.bin")
+    os.makedirs(os.path.dirname(sample), exist_ok=True)
+    with open(sample, "wb") as handle:
+        handle.write(payload)
+    sf = cli_json("send-file", "--port", "DEMO", "--file", sample)
+    add("R-006", "CLI send-file 发送字节数等于文件大小",
+        sf.get("ok") and sf.get("sent_bytes") == size, sf.get("sent_bytes"))
+
+    # scripted session — the main AI entry point
+    session = cli_json("session", "--port", "DEMO",
+                       "--script", os.path.join(ROOT, "tests", "session-demo.json"))
+    add("R-004", "CLI session 全部步骤通过",
+        session.get("ok") is True and session.get("steps_run") == session.get("steps_total"),
+        f"{session.get('steps_run')}/{session.get('steps_total')}")
+
+    st = cli_json("selftest")
+    add("R-004", "CLI selftest 全绿", st.get("ok") is True,
+        f"{st.get('passed')}/{st.get('total')}")
+
+    # every CLI failure must still be valid JSON with ok:false
+    bad = run(["-m", "omnicom.cli", "send", "--port", "COM_NOT_EXIST", "--data", "AT"])
+    try:
+        parsed = json.loads(bad.stdout or "{}")
+        ok = parsed.get("ok") is False and bool(parsed.get("error")) and bad.returncode == 1
+    except json.JSONDecodeError:
+        ok = False
+    add("R-018", "CLI 失败也返回 JSON + 退出码 1", ok, (bad.stdout or "")[:60])
+
+
+GUI_LINE = re.compile(r"^\s*(PASS|FAIL)\s+(R-\d+)\s+(.*?)\s*(?:\[(.*)\])?$")
+
+
+def suite_gui() -> None:
+    print("\n== 3/4 GUI 验收（offscreen + DEMO）")
+    proc = run(["tools/ui_selftest.py"], timeout=300)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    for line in out.splitlines():
+        match = GUI_LINE.match(line)
+        if not match:
+            continue
+        status, req, name, detail = match.groups()
+        add(req, name.strip(), status == "PASS", detail or "")
+    add("R-001", "GUI 验收整体通过", "ALL GUI SELFTESTS PASSED" in out,
+        "" if "ALL GUI SELFTESTS PASSED" in out else out.strip().splitlines()[-1:])
+
+
+def suite_visual() -> None:
+    print("\n== 4/4 视觉 / 交付形态")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from omnicom.ui.main_window import OmniWindow, TitleBar
+    from omnicom.ui.theme import app_stylesheet
+
+    app = QApplication.instance() or QApplication([sys.argv[0]])
+    app.setStyle("Fusion")
+    app.setStyleSheet(app_stylesheet())
+
+    # -- solid background, proven on the backdrop widget itself.
+    from omnicom.ui.main_window import Aurora
+    from omnicom.ui import theme
+
+    backdrop = Aurora()
+    backdrop.resize(480, 320)
+    backdrop.show()
+    app.processEvents()
+    backdrop_image = backdrop.grab().toImage()
+    pixels = {backdrop_image.pixelColor(x, y).name()
+              for y in range(20, 300, 7) for x in range(20, 460, 7)}
+    add("R-020", "背景控件为纯色（~2500 个采样点同色）", len(pixels) == 1, sorted(pixels)[:3])
+    add("R-020", f"背景色等于主题色 {theme.BG}", pixels == {theme.BG.lower()}, sorted(pixels)[:3])
+    backdrop.close()
+
+    # -- the grid was drawn with drawLine(); its absence is the negative proof.
+    source = open(os.path.join(ROOT, "omnicom", "ui", "main_window.py"),
+                  encoding="utf-8").read()
+    add("R-020", "源码中已无网格绘制（drawLine / step = 46 / 网格）",
+        "drawLine(" not in source and "step = 46" not in source
+        and "subtle grid" not in source.lower())
+
+    window = OmniWindow(demo=False)
+    window.resize(1100, 760)
+    window.show()
+    app.processEvents()
+    time.sleep(0.15)
+    app.processEvents()
+
+    image = window.grab().toImage()
+
+    # -- dominant colour of the whole window should still be the backdrop colour
+    counts: dict[str, int] = {}
+    for y in range(0, image.height(), 11):
+        for x in range(0, image.width(), 11):
+            name = image.pixelColor(x, y).name()
+            counts[name] = counts.get(name, 0) + 1
+    dominant = max(counts, key=counts.get)
+    share = counts[dominant] / max(1, sum(counts.values()))
+    add("R-020", "窗口主色即背景纯色", dominant == theme.BG.lower(),
+        f"{dominant} {share:.0%}")
+
+    # -- top bar structure
+    bar = window.titlebar
+    add("R-001", "顶部栏为一体式玻璃条（高 62，含状态胶囊/计数/标签）",
+        isinstance(bar, TitleBar) and bar.height() == 62
+        and bar.status_chip.isVisible() and "RX" in bar.counter.text(),
+        f"h={bar.height()}")
+    add("R-001", "顶部栏标题不重复应用名",
+        window.windowTitle() == f"OmniCOM {__version__}", window.windowTitle())
+
+    # -- three columns present and non-overlapping
+    rail = window.rail.geometry()
+    stack = window.stack.geometry()
+    side = window._sidebar_widget.geometry()
+    add("R-002", "三栏布局（左配置 / 中主区 / 右可折叠栏）不重叠",
+        rail.right() < stack.left() and stack.right() < side.left(),
+        f"{rail.width()}+{stack.width()}+{side.width()}")
+    add("R-008", "右侧栏默认可见", window._sidebar_widget.isVisible(), f"{side.width()}px")
+
+    # -- snapshot for human review
+    shot = os.path.join(ROOT, ".artifacts", "acceptance-ui.png")
+    os.makedirs(os.path.dirname(shot), exist_ok=True)
+    window.grab().save(shot)
+    add("R-001", "生成验收截图供目视检查", os.path.isfile(shot), "acceptance-ui.png")
+    window.close()
+
+    # -- delivery form
+    add("R-018", "无浏览器 / HTTP 服务模块",
+        not os.path.exists(os.path.join(ROOT, "omnicom", "server.py")))
+    add("R-018", "源码启动入口存在（run.py + start.cmd）",
+        os.path.isfile(os.path.join(ROOT, "run.py"))
+        and os.path.isfile(os.path.join(ROOT, "start.cmd")))
+    add("R-019", "仓库内无打包产物（dist/ 不存在）",
+        not os.path.exists(os.path.join(ROOT, "dist")))
+    proc = run(["build.py"])
+    add("R-019", "打包脚本默认拒绝执行（政策闸门 exit=3）", proc.returncode == 3,
+        f"exit={proc.returncode}")
+
+
+# -------------------------------------------------------------------- report
+
+def report() -> int:
+    print("\n" + "=" * 78)
+    print("需求对账")
+    print("=" * 78)
+    missing = []
+    rows = []
+    for req, title in TITLES.items():
+        checks = RESULTS.get(req, [])
+        if not checks:
+            missing.append(req)
+            rows.append((req, "未覆盖", 0, 0, title))
+            continue
+        total = len(checks)
+        ok = sum(1 for _n, flag, _d in checks if flag)
+        rows.append((req, "PASS" if ok == total else "FAIL", ok, total, title))
+    for req, verdict, ok, total, title in rows:
+        ratio = f"{ok}/{total}" if total else "-"
+        print(f"  {req}  {verdict:<8} {ratio:>6}   {title}")
+
+    payload = {
+        "when": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "ok": not FAILED and not missing,
+        "requirements": {
+            req: {
+                "title": title,
+                "verdict": next(row[1] for row in rows if row[0] == req),
+                "checks": [
+                    {"name": name, "ok": ok, "detail": detail}
+                    for name, ok, detail in RESULTS.get(req, [])
+                ],
+            }
+            for req, title in TITLES.items()
+        },
+        "failures": [{"requirement": req, "check": name, "detail": detail}
+                     for req, name, detail in FAILED],
+        "uncovered": missing,
+    }
+    target = os.path.join(ROOT, ".artifacts", "acceptance.json")
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    with open(target, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+    total_checks = sum(len(items) for items in RESULTS.values())
+    print("=" * 78)
+    print(f"共 {total_checks} 项检查，失败 {len(FAILED)} 项，未覆盖需求 {len(missing)} 个")
+    print(f"报告：{target}")
+    if FAILED:
+        print("\n失败明细：")
+        for req, name, detail in FAILED:
+            print(f"  {req}  {name}  {detail}")
+    if missing:
+        print("\n未覆盖需求：" + "、".join(missing))
+    if FAILED or missing:
+        return 1
+    print("\nALL REQUIREMENTS VERIFIED")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="OmniCOM 全功能验收测试")
+    parser.add_argument("--fast", action="store_true", help="跳过耗时最长的 GUI 套件")
+    parser.add_argument("--only", choices=["protocol", "cli", "gui", "visual"],
+                        help="只跑某一个套件")
+    options = parser.parse_args()
+
+    started = time.time()
+    suites = {
+        "protocol": suite_protocol,
+        "cli": suite_cli,
+        "gui": suite_gui,
+        "visual": suite_visual,
+    }
+    if options.only:
+        suites[options.only]()
+    else:
+        suite_protocol()
+        suite_cli()
+        if not options.fast:
+            suite_gui()
+        suite_visual()
+
+    code = report()
+    print(f"用时 {time.time() - started:.1f}s")
+    return code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

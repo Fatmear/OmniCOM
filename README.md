@@ -38,10 +38,24 @@ python -m pip install -r requirements.txt
 ## 自测
 
 ```bat
-python tools/protocol_selftest.py   :: X/Y/ZMODEM 环回（23 项）
-python tools/ui_selftest.py         :: GUI 验收（31 项，DEMO 端口）
-python tools/ui_snapshot.py         :: 渲染 .artifacts/ui.png 供目视检查
+python tools/acceptance_test.py      :: 全功能验收：20 条需求 / 79 项检查
+python tools/protocol_selftest.py    :: X/Y/ZMODEM 环回（23 项）
+python tools/ui_selftest.py          :: GUI 验收（34 项，DEMO 端口）
+python tools/ui_snapshot.py          :: 渲染 .artifacts/ui.png 供目视检查
 ```
+
+## CLI（给脚本 / AI 用）
+
+```bat
+python -m omnicom.cli info
+python -m omnicom.cli ports
+python -m omnicom.cli send --port COM3 --data AT --expect OK --wait 2
+python -m omnicom.cli session --port COM3 --script steps.json
+python -m omnicom.cli selftest            :: 无硬件自检（28 项）
+```
+
+stdout 只有一个 JSON 文档（`ok` / `error`），人类信息走 stderr，退出码 0/1/2。
+完整说明见 **[docs/CLI.md](docs/CLI.md)**；没有硬件时用 `--port DEMO` 联调。
 
 ## 目录
 
@@ -49,11 +63,15 @@ python tools/ui_snapshot.py         :: 渲染 .artifacts/ui.png 供目视检查
 omnicom/
   serial_port.py    串口所有权：打开/关闭、读取线程、自动重连、演示设备、记录器
   commands.py       扩展命令模型与持久化、HEX/转义解析
+  transfer.py       X/Y/ZMODEM 传输入口（GUI 与 CLI 共用，无 Qt 依赖）
+  selftest.py       协议环回自检（CLI / GUI / tools 共用）
+  cli.py            面向 AI 的 CLI（stdout 只输出 JSON）
   proto/            XMODEM / YMODEM / ZMODEM 引擎（与传输无关，可环回自测）
   ui/               Qt 界面：窗口、日志视图、发送区、命令栏、搜索栏、传输页
-tools/              自测与图标生成脚本
+tools/              验收 / 自测 / 截图 / 图标脚本
+docs/CLI.md         CLI 使用说明（面向 AI）
 project-context/    需求 / 台账 / 决策 / 交接（先读这个再改代码）
 ```
 
 > 公司策略禁止运行自编译 exe（见 `project-context/REQUIREMENTS.md` R-019），
-> 因此 `build.py` 默认拒绝执行，仅作记录。
+> 因此 `build.py` 默认拒绝执行，仅作记录.

@@ -194,6 +194,45 @@ class Badge(QLabel):
         self.show()
 
 
+class StatusPill(QFrame):
+    """Connection state: coloured dot + short text, one consistent shape."""
+
+    KINDS = {
+        "idle": ("#6D7997", "rgba(255, 255, 255, 16)", "rgba(255, 255, 255, 30)"),
+        "ok": ("#5EEAD4", "rgba(94, 234, 212, 32)", "rgba(94, 234, 212, 120)"),
+        "retry": ("#FBBF24", "rgba(251, 191, 36, 30)", "rgba(251, 191, 36, 110)"),
+        "error": ("#F87171", "rgba(248, 113, 113, 30)", "rgba(248, 113, 113, 110)"),
+    }
+
+    def __init__(self, parent=None, text: str = "未连接") -> None:
+        super().__init__(parent)
+        self.setObjectName("StatusPill")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 0, 13, 0)
+        layout.setSpacing(7)
+        self.dot = QLabel("●")
+        self.dot.setFixedWidth(9)
+        self.label = QLabel(text)
+        self.label.setStyleSheet("border: 0; background: transparent; font-size: 12px;")
+        layout.addWidget(self.dot)
+        layout.addWidget(self.label)
+        self.setFixedHeight(30)
+        self.set_state("idle", text)
+
+    def set_state(self, kind: str, text: str) -> None:
+        dot_color, fill, border = self.KINDS.get(kind, self.KINDS["idle"])
+        text_color = "#D8FFF6" if kind == "ok" else "#FFE9C2" if kind == "retry" else \
+            "#FFD9D9" if kind == "error" else theme.INK2
+        self.dot.setStyleSheet(
+            f"color: {dot_color}; border: 0; background: transparent; font-size: 10px;")
+        self.label.setText(text)
+        self.label.setStyleSheet(
+            f"color: {text_color}; border: 0; background: transparent; font-size: 12px;")
+        self.setStyleSheet(
+            f"QFrame#StatusPill {{ background: {fill}; border: 1px solid {border};"
+            f" border-radius: 15px; }}")
+
+
 class Divider(QFrame):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)

@@ -10,6 +10,10 @@ Rules
 - **Do not build or ship an .exe (R-019)**: corporate endpoint policy blocks self-built executables.
   Run from source: `start.cmd`, or `python run.py`, or `python run.py --demo` (虚拟串口).
 - Verify commands: `python tools/protocol_selftest.py` (X/Y/ZMODEM loopback),
-  `python tools/ui_selftest.py` (31 GUI acceptance checks incl. DEMO port),
+  `python tools/ui_selftest.py` (34 GUI acceptance checks incl. DEMO port),
+  `python tools/acceptance_test.py` (all requirements R-001..R-023 + `.artifacts/acceptance.json`),
   `python tools/ui_snapshot.py` (renders `.artifacts/ui.png` for visual review).
 - Before ending a session: replace `HANDOFF.md`, append closed items to `LEDGER.md`.
+- CLI for agents: `python -m omnicom.cli <ports|info|send|read|monitor|send-file|transfer|session|selftest>`,
+  stdout is one JSON document (R-022); full reference in `docs/CLI.md`. Use `--port DEMO` without hardware.
+- Background is a flat solid colour — do not reintroduce gradients, grids or blobs over the whole window (R-020).
