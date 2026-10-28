@@ -7,8 +7,9 @@ bindings and `OmniCOM.pyz`, so it starts on a machine that has nothing installed
 Feature set of 1.1.x is complete: 100 MB log budget, glass panes, text-only caption
 row, own rounded glass tooltip, no-exe packaging, preferences (folder / accent /
 wallpaper / buffer), live search, launcher two areas, keep-awake, RX+TX capture.
-Version **1.1.2**; tagged and released.
-**84 requirements / 335 checks** pass automated verification.
+Version **1.1.2**; tagged and released as a GitHub release with the portable zip attached:
+https://github.com/Fatmear/OmniCOM/releases/tag/v1.1.2
+**86 requirements / 346 checks** pass automated verification.
 Real hardware remains untested - never infer driver timings from DEMO runs.
 
 Source run: `start.cmd`, `python run.py`, `python run.py --demo` (虚拟串口).
@@ -28,9 +29,8 @@ package), R-084 (own rounded glass tooltip), R-085 (animated minimize/restore), 
 (shipped CLI docs + MIT licence). Full list: `REQUIREMENTS.md`.
 
 Verified in repository (2026-10-28):
-- `python tools/acceptance_test.py` → **335 checks, 0 failures, 0 uncovered,
-  84 requirements, ALL REQUIREMENTS VERIFIED** (`.artifacts/acceptance.json`, 2026-10-28 14:54:01),
-  reproduced 3× in a row after the harness isolation fix (L-116).
+- `python tools/acceptance_test.py` → **346 checks, 0 failures, 0 uncovered,
+  86 requirements, ALL REQUIREMENTS VERIFIED** (`.artifacts/acceptance.json`, 2026-10-28 15:13:41).
 - GUI suite: **286/286**, including the buffer budget, the text-only strip and the tooltip card.
 - `python -m ruff check .` → All checks passed; `tools/protocol_selftest.py` → 23/23;
   `tools/contrast_audit.py` → 15/15 ≥ 4.5:1; READMEs regenerated from `docs.py`.
