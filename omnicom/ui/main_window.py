@@ -12,9 +12,11 @@ import time
 from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSettings, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QIcon, QIntValidator, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QFileDialog,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -26,7 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .. import __version__, paths
+from .. import __version__, paths, power
 from ..commands import CommandStore
 from ..i18n import language, set_language, tr
 from ..plugins import PluginHost
@@ -37,9 +39,11 @@ from .log_view import LogView
 from .search_panel import SearchPanel
 from .send_panel import SendPanel
 from .terminal import TerminalPage
+from .tooltips import install as install_tooltips
 from .transfer_panel import TransferPanel
 from .widgets import (
     Badge,
+    CaptionStrip,
     Combo,
     GlassFrame,
     GlyphButton,
@@ -72,9 +76,6 @@ BAUD_RATES = ["9600", "19200", "38400", "57600", "115200", "230400", "460800",
 PARITIES = [("N", "None"), ("E", "Even"), ("O", "Odd"), ("M", "Mark"), ("S", "Space")]
 FLOW_KEYS = [("none", "flow.none"), ("rtscts", "flow.rtscts"), ("xonxoff", "flow.xonxoff")]
 
-VIEW_LINES = 20000
-
-
 def bytes_per_ms(baud: int) -> float:
     return max(0.5, baud / 10.0 / 1000.0)
 
@@ -103,17 +104,32 @@ def human_size(value: float) -> str:
 
 
 class Aurora(QWidget):
-    """Solid backdrop - flat colour only, no grid, no blobs (R-020).
+    """Page backdrop: flat colour by default, optional user wallpaper (R-020).
 
     Square edges on purpose: a rounded backdrop left the window with a square
-    title bar and a rounded bottom, which looked unfinished (R-044).
+    title bar and a rounded bottom, which looked unfinished (R-044).  When the
+    user picks a wallpaper it is scaled to cover and then veiled, so captions
+    that sit straight on the page stay readable (R-070).
     """
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(QColor(theme.BG)))
-        painter.drawRect(self.rect())
+        target = self.rect()
+        painter.fillRect(target, QColor(theme.BG))
+        pixmap = theme.wallpaper_pixmap()
+        if pixmap is None or pixmap.isNull():
+            return
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        # Same cover-crop the panes sample from, so the glass content lines up
+        # with the photo painted here (R-077).
+        cover = theme.cover_pixmap(pixmap, target.width(), target.height())
+        if cover is not None:
+            painter.drawPixmap(target.topLeft(), cover)
+        # A white veil keeps the photo muted enough for the panes to read as
+        # frosted glass on top of it; the text that sits straight on the page
+        # (the status strip) additionally gets its own plate (R-077).
+        painter.fillRect(target, QColor(255, 255, 255, theme.PAGE_VEIL))
 
 
 class BrandMark(QWidget):
@@ -384,6 +400,13 @@ class OmniWindow(QMainWindow):
 
         self.settings = ui_settings()
         set_language(str(self.settings.value("ui/language", "zh")))
+        # Theme choices must be in place before any widget is constructed:
+        # several widgets read theme tokens while they build their own QSS.
+        theme.set_accent(str(self.settings.value("ui/accent", theme.DEFAULT_ACCENT)))
+        theme.set_wallpaper(str(self.settings.value("ui/wallpaper", "")) or None)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(theme.app_stylesheet())
         self.bridge = SerialBridge(demo=demo)
         self.command_store = CommandStore(command_path)
         self.demo = demo
@@ -407,6 +430,10 @@ class OmniWindow(QMainWindow):
         self._rx_timer.setSingleShot(True)
         self._rx_timer.setInterval(28)          # ~36 fps, cheaper than per-chunk
         self._rx_timer.timeout.connect(self._flush_rx)
+
+        # One app-wide tooltip watcher: 1 s of steady hover, never restarted by
+        # a mouse move (R-080).
+        self.tooltips = install_tooltips()
 
         self.plugins = PluginHost(notify=self.notify, log_line=self._plugin_log,
                                   parent=self)
@@ -444,6 +471,11 @@ class OmniWindow(QMainWindow):
         self.body_split.addWidget(self.rail)
 
         self.stack = QStackedWidget()
+        # QStackedWidget.minimumSizeHint() is the widest *page* hint (1243 px
+        # here), and a QSplitter treats that as a hard floor - which forced both
+        # side columns down to their minimums and made a symmetric default
+        # impossible. An explicit minimum overrides the hint.
+        self.stack.setMinimumWidth(400)
         self.stack.addWidget(self._build_terminal_page())
         self.console = TerminalPage()
         self.console.keyBytes.connect(self._on_terminal_keys)
@@ -578,8 +610,9 @@ class OmniWindow(QMainWindow):
         self.row_ctrl = SwitchRow(tr("rail.ctrl"), False, tooltip=tr("rail.ctrl.tip"))
         self.row_echo = SwitchRow(tr("rail.echo"), True)
         self.row_scroll = SwitchRow(tr("rail.scroll"), True, tooltip=tr("rail.scroll.tip"))
+        self.row_awake = SwitchRow(tr("rail.awake"), False, tooltip=tr("rail.awake.tip"))
         for row_widget in (self.row_hex, self.row_ts, self.row_ctrl,
-                           self.row_echo, self.row_scroll):
+                           self.row_echo, self.row_scroll, self.row_awake):
             layout.addWidget(row_widget)
         layout.addWidget(self._divider())
 
@@ -601,37 +634,22 @@ class OmniWindow(QMainWindow):
         self.btn_open_dir.setObjectName("Ghost")
         self.btn_open_dir.setCursor(Qt.PointingHandCursor)
         row2.addWidget(self.btn_open_dir, 1)
+        self.btn_clear_capture = QPushButton(tr("rail.record.clear"))
+        self.btn_clear_capture.setObjectName("Ghost")
+        self.btn_clear_capture.setCursor(Qt.PointingHandCursor)
+        self.btn_clear_capture.setToolTip(tr("rail.record.clear.tip"))
+        self.btn_clear_capture.setEnabled(False)
+        row2.addWidget(self.btn_clear_capture, 1)
         # "Save view" lives in the log toolbar; repeating it here was one of the
         # duplicated controls the user asked to remove (R-044).
         layout.addLayout(row2)
-        layout.addWidget(self._divider())
 
-        # ---- meta
-        self.meta_port = self._meta_row(layout, "rail.meta.port")
-        self.meta_flow = self._meta_row(layout, "rail.meta.flow")
-        self.meta_version = self._meta_row(layout, "rail.meta.version")
-        self.meta_version.setText(__version__)
-
+        # The port / flow / version rows that used to sit here duplicated the
+        # status bar, the combo and the About dialog, so they were removed.
         layout.addStretch(1)
         scroll.setWidget(content)
         self.rail_box.addWidget(scroll)
         return rail
-
-    def _meta_row(self, layout: QVBoxLayout, key: str) -> QLabel:
-        row = QHBoxLayout()
-        label = QLabel(tr(key))
-        label.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
-        value = QLabel("—")
-        value.setStyleSheet(f"color: {theme.INK2}; font-size: 11px;")
-        value.setAlignment(Qt.AlignRight)
-        row.addWidget(label)
-        row.addStretch(1)
-        row.addWidget(value)
-        layout.addLayout(row)
-        # Kept so retranslate() can refresh the caption after a language switch.
-        self._meta_labels = getattr(self, "_meta_labels", [])
-        self._meta_labels.append((label, key))
-        return value
 
     @staticmethod
     def _dim(text: str) -> QLabel:
@@ -718,7 +736,10 @@ class OmniWindow(QMainWindow):
     # --------------------------------------------------------------- sidebar
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
-        sidebar.setMinimumWidth(260)
+        # Same minimum as the rail: when the window is too narrow for the
+        # preferred widths, Qt squeezes each pane down to its minimum, and
+        # unequal minimums were what broke the left/right symmetry (R-068).
+        sidebar.setMinimumWidth(280)
         sidebar.setMaximumWidth(680)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -776,22 +797,49 @@ class OmniWindow(QMainWindow):
 
     # ---------------------------------------------------------- status strip
     def _build_status_strip(self) -> QWidget:
-        strip = QWidget()
+        """Caption row: **text only** - no plate, no border, no fill (R-082).
+
+        The captions therefore sit straight on the page or the wallpaper.  Two
+        things keep them readable there: the primary ink rather than the grey hint
+        colour (5.85:1 even on the darkest possible page) and a soft white halo,
+        which belongs to the glyphs instead of to a box behind them.
+        """
+        strip = CaptionStrip()
         strip.setFixedHeight(26)
         layout = QHBoxLayout(strip)
         layout.setContentsMargins(14, 0, 14, 0)
         layout.setSpacing(14)
         self.status_line = QLabel(tr("status.ready"))
-        self.status_line.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
         layout.addWidget(self.status_line)
         layout.addStretch(1)
         self.status_trim = QLabel("")
-        self.status_trim.setStyleSheet(f"color: {theme.AMBER}; font-size: 11px;")
         layout.addWidget(self.status_trim)
-        self.status_dir = QLabel(tr("status.datadir", path=paths.data_dir()))
-        self.status_dir.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
+        # The records folder, not the install folder: this is what changes in
+        # Preferences, so it is what the user expects to see (R-078).
+        self.status_dir = QLabel(tr("status.datadir", path=paths.logs_dir()))
         layout.addWidget(self.status_dir)
+        self._style_captions()
+        self.status_strip_frame = strip
         return strip
+
+    def _style_captions(self) -> None:
+        """Ink + white halo for the three captions (see _build_status_strip).
+
+        All three use ``INK`` on purpose: with no plate behind them they can sit
+        on the darkest possible page (a black photo under the 59 % veil), where
+        ``INK`` still measures 5.88:1 while the grey hint colour drops to 2.49:1
+        and amber to 1.70:1.  The amber warning cue still exists where it belongs
+        - the trim badge in the log toolbar (L-107).
+        """
+        for label in (self.status_line, self.status_trim, self.status_dir):
+            label.setStyleSheet(f"color: {theme.INK}; font-size: 11px;"
+                                " background: transparent;")
+            if label.graphicsEffect() is None:
+                halo = QGraphicsDropShadowEffect(label)
+                halo.setBlurRadius(6)
+                halo.setOffset(0, 0)
+                halo.setColor(QColor(255, 255, 255, 235))
+                label.setGraphicsEffect(halo)
 
     # --------------------------------------------------------------- tabs
     def _rebuild_tabs(self) -> None:
@@ -862,7 +910,7 @@ class OmniWindow(QMainWindow):
         self._open_path(target)
 
     def _plugin_log(self, text: str) -> None:
-        self.log.append_line(time.time() * 1000, "··", text, "sys")
+        self._log_line(time.time() * 1000, "··", text, "sys")
 
     # --------------------------------------------------------------- wiring
     def _wire(self) -> None:
@@ -908,12 +956,16 @@ class OmniWindow(QMainWindow):
         self.row_ctrl.toggled.connect(self._on_ctrl_mode)
         self.row_echo.toggled.connect(self._save_settings)
         self.row_scroll.toggled.connect(self._on_autoscroll)
+        self.row_awake.toggled.connect(self._on_keep_awake)
 
         self.btn_record.clicked.connect(self.toggle_record)
+        self.btn_clear_capture.clicked.connect(self.clear_capture)
         self.btn_open_dir.clicked.connect(self.open_data_dir)
 
         self.send_panel.sendRequested.connect(self.send_payload)
-        self.send_panel.fileSelected.connect(self.send_file)
+        self.bridge.txPrinted.connect(self._on_tx_print)
+        self.send_panel.fileChosen.connect(self.remember_file)
+        self.send_panel.fileSendRequested.connect(self.send_file)
         self.send_panel.abortRequested.connect(self.abort_file)
 
         self.commands_panel.sendRequested.connect(self.send_payload)
@@ -923,6 +975,26 @@ class OmniWindow(QMainWindow):
         self.stats_timer = QTimer(self)
         self.stats_timer.timeout.connect(self._refresh_stats)
         self.stats_timer.start(500)
+
+        # The capture size has to be readable while recording, so it is polled
+        # rather than only updated on start/stop events.
+        self.record_timer = QTimer(self)
+        self.record_timer.setInterval(500)
+        self.record_timer.timeout.connect(self._refresh_record_size)
+
+    # --------------------------------------------------------- screen awake
+    def _apply_keep_awake(self, enabled: bool) -> bool:
+        """Send the keep-awake request and remember whether the OS accepted it."""
+        accepted = power.set_keep_awake(bool(enabled))
+        self._awake_accepted = accepted
+        return accepted
+
+    def _on_keep_awake(self, enabled: bool) -> None:
+        accepted = self._apply_keep_awake(enabled)
+        self._save_settings()
+        if enabled and not accepted:
+            # Never pretend it worked: a silent no-op would look like a bug.
+            self.notify(tr("rail.awake.failed"), "warn")
 
     # ------------------------------------------------------------- settings
     def _restore_settings(self) -> None:
@@ -940,6 +1012,18 @@ class OmniWindow(QMainWindow):
             with contextlib.suppress(TypeError, ValueError):
                 self.body_split.setSizes([int(value) for value in sizes])
                 self._saved_split = True
+        try:
+            paths.set_logs_dir(str(s.value("paths/log_dir", "")))
+        except OSError:
+            paths.set_logs_dir(None)
+        self.bridge.set_capture_dir(paths.logs_dir())
+        # Log budget (R-081): MB, clamped by the view itself.
+        from .log_view import DEFAULT_BUFFER_MB
+
+        with contextlib.suppress(TypeError, ValueError):
+            self.log.set_buffer_mb(int(s.value("display/buffer_mb",
+                                                DEFAULT_BUFFER_MB) or DEFAULT_BUFFER_MB))
+        self._refresh_status_dir()
         self.baud.setCurrentText(str(s.value("serial/baud", "115200")))
         self._committed_baud = self.baud.currentText()
         index = self.bytesize.findText(str(s.value("serial/bytesize", "8")))
@@ -956,10 +1040,10 @@ class OmniWindow(QMainWindow):
         self.row_ctrl.setChecked(s.value("display/ctrl", "0") == "1")
         self.row_echo.setChecked(s.value("display/echo", "1") == "1")
         self.row_scroll.setChecked(s.value("display/scroll", "1") == "1")
+        self.row_awake.setChecked(s.value("display/awake", "0") == "1")
         self.log.show_ts = self.row_ts.isChecked()
         self.log.autoscroll = self.row_scroll.isChecked()
-        self.meta_flow.setText(self.flow.currentText())
-        self.relayout_sidebar()
+        self._apply_keep_awake(self.row_awake.isChecked())
         self._on_ports(self.bridge.manager.ports())
 
     def _save_settings(self) -> None:
@@ -977,7 +1061,11 @@ class OmniWindow(QMainWindow):
         s.setValue("display/ctrl", "1" if self.row_ctrl.isChecked() else "0")
         s.setValue("display/echo", "1" if self.row_echo.isChecked() else "0")
         s.setValue("display/scroll", "1" if self.row_scroll.isChecked() else "0")
+        s.setValue("display/awake", "1" if self.row_awake.isChecked() else "0")
+        s.setValue("display/buffer_mb", self.log.buffer_mb())
         s.setValue("ui/language", language())
+        s.setValue("ui/accent", theme.accent())
+        s.setValue("ui/wallpaper", theme.wallpaper() or "")
 
     def _serial_opts(self) -> dict:
         try:
@@ -1010,7 +1098,6 @@ class OmniWindow(QMainWindow):
         self._push_opts()
 
     def _push_opts(self) -> None:
-        self.meta_flow.setText(self.flow.currentText())
         if self._status.get("connected"):
             self.bridge.update_opts(self._serial_opts())
 
@@ -1073,7 +1160,6 @@ class OmniWindow(QMainWindow):
             chip.set_state("ok", tr("status.chip.ok", port=status.get("port")))
             self.btn_connect.setText(tr("rail.close"))
             self.btn_connect.setObjectName("Primary")
-            self.meta_port.setText(status.get("port") or "—")
             self.status_line.setText(tr("status.connected", port=status.get("port"),
                                         baud=self.baud.currentText()))
             # An auto-reconnect can land on a different device than the one the
@@ -1097,7 +1183,6 @@ class OmniWindow(QMainWindow):
                 self.status_line.setText(tr("status.ready"))
             self.btn_connect.setText(tr("rail.open"))
             self.btn_connect.setObjectName("Ghost")
-            self.meta_port.setText("—")
         self.btn_connect.style().unpolish(self.btn_connect)
         self.btn_connect.style().polish(self.btn_connect)
 
@@ -1200,13 +1285,26 @@ class OmniWindow(QMainWindow):
             return escape_control(raw + ("" if pending else "\n"))
         return raw.rstrip("\r")
 
+    def _log_line(self, ts: float, direction: str, text: str, kind: str = "rx",
+                  keywords=None) -> int:
+        """Append a rendered line **and** keep the live search results in step.
+
+        Every path that writes to the log goes through here.  The TX path used
+        to append on its own and never told the search panel, so results stopped
+        growing while sending - that was the reported bug (L-089).
+        """
+        words = self.search_panel.keywords if keywords is None else keywords
+        composed = self.log.compose_line(ts, direction, text)
+        block = self.log.append_line(ts, direction, text, kind, keywords=words)
+        self._appended += 1
+        if self.search_panel.match(composed):
+            self.search_panel.add_hit(ts, composed, block)
+        return block
+
     def _print_line(self, ts: float, raw: str, direction: str, keywords) -> None:
         text = self._clean(raw)
         self.log.clear_pending()
-        self.log.append_line(ts, direction, text, "rx", keywords=keywords)
-        self._appended += 1
-        if self.search_panel.match(raw):
-            self.search_panel.add_hit(ts, self._clean(raw).strip())
+        self._log_line(ts, direction, text, "rx", keywords)
 
     def _feed_hex(self, ts: float, data: bytes) -> None:
         merged = self._hex_partial + data
@@ -1216,10 +1314,7 @@ class OmniWindow(QMainWindow):
             row = merged[index:index + 16]
             text = self._hex_row(self._hex_offset, row)
             self.log.clear_pending()
-            self.log.append_line(ts, "RX", text, "rx", keywords=keywords)
-            self._appended += 1
-            if self.search_panel.match(text):
-                self.search_panel.add_hit(ts, text.strip())
+            self._log_line(ts, "RX", text, "rx", keywords)
             self._hex_offset += 16
             index += 16
         self._hex_partial = merged[index:]
@@ -1236,10 +1331,15 @@ class OmniWindow(QMainWindow):
         return f"{offset:08x}  {hex_part}  |{ascii_part}|"
 
     def _check_trim(self) -> None:
-        if self._appended > VIEW_LINES:
-            hidden = self._appended - VIEW_LINES
-            self.trim_badge.show_text(tr("log.trim", n=hidden), "Badge")
-            self.status_trim.setText(tr("log.trim.status", n=hidden))
+        # The log owns the count: it is the only thing that knows how many lines
+        # the size budget actually dropped (R-081).
+        dropped = self.log.trimmed
+        if dropped > 0:
+            self.trim_badge.show_text(tr("log.trim", n=dropped), "Badge")
+            self.status_trim.setText(tr("log.trim.status", n=dropped))
+        else:
+            self.trim_badge.hide()
+            self.status_trim.setText("")
 
     # -------------------------------------------------------------- following
     def _on_autoscroll(self, value: bool) -> None:
@@ -1368,10 +1468,22 @@ class OmniWindow(QMainWindow):
         self._apply_default_split()
 
     def _apply_default_split(self) -> None:
-        total = max(600, self.body_split.width())
-        rail = max(266, min(340, int(total * 0.20)))
-        side = max(300, min(410, int(total * 0.26)))
-        self.body_split.setSizes([rail, max(360, total - rail - side), side])
+        # showEvent runs before the splitter has a real width; using the 0 it
+        # reports then scaled every column down proportionally, which is why the
+        # defaults used to land on arbitrary values. Estimate from the window.
+        total = self.body_split.width()
+        if total < 400:
+            total = self.width() - 24
+        total = max(600, total)
+        # Both columns share one width rule, so the default layout reads as a
+        # symmetric frame instead of a narrow rail beside a wide sidebar. The
+        # three sizes must add up to the real width: when they do not, Qt shrinks
+        # them proportionally and each column hits a *different* minimum, which
+        # is what previously left 280 / 408 / 260 instead of an equal pair.
+        rail = max(300, min(410, int(total * 0.26)))
+        if total - 2 * rail < 360:
+            rail = max(280, (total - 360) // 2)
+        self.body_split.setSizes([rail, max(360, total - 2 * rail), rail])
 
     def _split_looks_degenerate(self) -> bool:
         """True when the persisted sizes do not fit the window any more."""
@@ -1416,7 +1528,14 @@ class OmniWindow(QMainWindow):
     # ------------------------------------------------------------------- log
     def clear_log(self) -> None:
         self.log.clear_all()
+        # "Clear" means the counts displayed in the title bar describe *this*
+        # log; leaving old totals behind made the numbers look wrong (R-073).
+        self.bridge.manager.reset_stats()
+        self.titlebar.set_counters(0, 0)
         self._appended = 0
+        # Loss accounting also starts over: the badge reports lines this log
+        # dropped, not the previous session's (R-081).
+        self.log.trimmed = 0
         self._pending_text = ""
         self._hex_partial = b""
         self._hex_offset = 0
@@ -1431,8 +1550,8 @@ class OmniWindow(QMainWindow):
         self._clear_decoder()
         if self._appended > 0:
             self.clear_log()
-            self.log.append_line(time.time() * 1000, "··",
-                                 tr("log.clear"), "sys")
+            self._log_line(time.time() * 1000, "··",
+                          tr("log.clear"), "sys")
         self.status_line.setText(tr("rail.hex") + (" ✓" if enabled else " ✗"))
 
     def _on_ctrl_mode(self, enabled: bool) -> None:
@@ -1469,14 +1588,44 @@ class OmniWindow(QMainWindow):
                     text = escape_control(payload.decode("utf-8", "replace"))
                 else:
                     text = (description or payload.decode("utf-8", "replace")).rstrip("\r\n")
-            self.log.append_line(time.time() * 1000, "TX", text, "tx",
-                                 keywords=self.search_panel.keywords)
-            self._appended += 1
+            self._log_line(time.time() * 1000, "TX", text, "tx")
             self._check_trim()
 
+    def _on_tx_print(self, data: bytes) -> None:
+        """Print file bytes exactly like a normal send would print them."""
+        if not data or not self.row_echo.isChecked():
+            return
+        if self.row_hex.isChecked():
+            self._log_line(time.time() * 1000, "TX",
+                           "[HEX] " + " ".join(f"{byte:02x}" for byte in data), "tx")
+            return
+        from .log_view import escape_control
+
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = data.decode("utf-8", "replace")
+        if self.row_ctrl.isChecked():
+            text = escape_control(text)
+        for line in text.splitlines() or [""]:
+            if line:
+                self._log_line(time.time() * 1000, "TX", line, "tx")
+        self._check_trim()
+
+    def remember_file(self, path: str) -> None:
+        """「打开文件」only remembers the choice; nothing is sent yet (R-074)."""
+        self._chosen_file = path
+
     def send_file(self, path: str) -> None:
+        """「发送文件」transmits the remembered file and prints it as normal TX."""
+        path = path or getattr(self, "_chosen_file", "")
+        if not path:
+            self.notify(tr("send.nofile"), "warn")
+            return
         if not self._status.get("connected"):
             self.notify(tr("misc.needport"), "warn")
+            return
+        if getattr(self, "_raw_worker", None) is not None and self._raw_worker.isRunning():
             return
         try:
             with open(path, "rb") as handle:
@@ -1486,18 +1635,26 @@ class OmniWindow(QMainWindow):
             return
         name = os.path.basename(path)
         self.send_panel.set_file_busy(True, f"{name} …")
-        self.notify(tr("misc.sentfile", name=name, size=human_bytes(len(data))), "info")
+        self.send_panel.set_file_progress(0, len(data), name)
 
         from .workers import RawFileWorker
 
         self._raw_worker = RawFileWorker(self.bridge.manager, data, name)
-        self._raw_worker.finished_ok.connect(lambda: self._raw_done(True, f"{name} ✓"))
+        self._raw_worker.finished_ok.connect(lambda: self._raw_done(True, name))
         self._raw_worker.failed.connect(lambda msg: self._raw_done(False, msg))
         self._raw_worker.start()
 
     def _raw_done(self, ok: bool, message: str) -> None:
-        self.send_panel.set_file_busy(False, message)
-        self.notify(message, "ok" if ok else "error")
+        if ok:
+            path = getattr(self, "_chosen_file", "") or message
+            size = os.path.getsize(path) if os.path.isfile(path) else 0
+            text = tr("send.filedone", name=os.path.basename(message),
+                      size=human_bytes(size))
+            self.send_panel.set_file_progress(size, max(1, size), message)
+        else:
+            text = message
+        self.send_panel.set_file_busy(False, text)
+        self.notify(text, "ok" if ok else "error")
 
     def abort_file(self) -> None:
         worker = getattr(self, "_raw_worker", None)
@@ -1525,8 +1682,8 @@ class OmniWindow(QMainWindow):
         self.transfer.set_state(f"{protocol.upper()}MODEM")
         self.transfer.progress.setValue(0)
         self.transfer.log(f"=== {protocol.upper()}MODEM {direction} · {name} ===")
-        self.log.append_line(time.time() * 1000, "··",
-                             f"{protocol.upper()}MODEM {direction} · {name}", "evt")
+        self._log_line(time.time() * 1000, "··",
+                       f"{protocol.upper()}MODEM {direction} · {name}", "evt")
         self._transfer = TransferWorker(self.bridge.manager, protocol, direction, name,
                                         data, self)
         self._transfer.log.connect(self.transfer.log)
@@ -1570,6 +1727,17 @@ class OmniWindow(QMainWindow):
             self.notify(tr("misc.recording",
                            name=os.path.basename(str(state.get("path") or ""))), "ok")
 
+    def clear_capture(self) -> None:
+        """Empty the capture file; an active capture keeps writing into it."""
+        recorder = self.bridge.recorder
+        if not recorder.state().get("path"):
+            self.notify(tr("rail.record.none"), "warn")
+            return
+        state = recorder.clear()
+        self._on_record(state)
+        self.notify(tr("rail.record.cleared",
+                       name=os.path.basename(str(state.get("path") or ""))), "ok")
+
     def _on_record(self, state: dict) -> None:
         active = bool(state.get("active"))
         self.btn_record.setText(tr("rail.record.stop") if active
@@ -1577,11 +1745,32 @@ class OmniWindow(QMainWindow):
         self.btn_record.setObjectName("Danger" if active else "Ghost")
         self.btn_record.style().unpolish(self.btn_record)
         self.btn_record.style().polish(self.btn_record)
+        # Clearing must stay available while recording, so it follows the file,
+        # not the open/closed state of the capture.
+        self.btn_clear_capture.setEnabled(bool(state.get("path")))
         if active:
-            self.record_hint.setText(
-                f"{state.get('path')}\n{human_bytes(state.get('bytes', 0))}")
+            self._show_capture_size(state)
+            if not self.record_timer.isActive():
+                self.record_timer.start()
         else:
+            self.record_timer.stop()
             self.record_hint.setText(tr("rail.record.hint"))
+
+    def _show_capture_size(self, state: dict) -> None:
+        """Print the captured file size - the only progress figure shown."""
+        self.record_hint.setText(tr(
+            "rail.record.size",
+            path=state.get("path") or "",
+            size=human_bytes(state.get("bytes", 0))))
+
+    def _refresh_record_size(self) -> None:
+        recorder = self.bridge.recorder
+        if not recorder.active:
+            self.record_timer.stop()
+            return
+        state = recorder.state()
+        self._show_capture_size(state)
+        self.btn_clear_capture.setEnabled(bool(state.get("path")))
 
     def _on_upload(self, event: dict) -> None:
         # Progress of a raw file send. Completion is reported by RawFileWorker's
@@ -1593,9 +1782,18 @@ class OmniWindow(QMainWindow):
                                               event.get("name", ""))
 
     def open_data_dir(self) -> None:
-        path = self.bridge.recorder.state().get("path") or paths.logs_dir()
-        target = os.path.dirname(path) if os.path.isfile(path) else paths.data_dir()
-        self._open_path(target)
+        """Open the folder captures go to.
+
+        While a capture is running its file lives where it was started, so that
+        folder is opened; otherwise the *configured* folder is opened, which is
+        what the user just picked in Preferences (R-078).
+        """
+        state = self.bridge.recorder.state()
+        path = str(state.get("path") or "")
+        if state.get("active") and path and os.path.isfile(path):
+            self._open_path(os.path.dirname(path))
+            return
+        self._open_path(paths.logs_dir())
 
     def _open_path(self, target: str) -> None:
         try:
@@ -1633,7 +1831,7 @@ class OmniWindow(QMainWindow):
         if not text:
             return
         if level in ("warn", "error"):
-            self.log.append_line(time.time() * 1000, "!!", text, "evt")
+            self._log_line(time.time() * 1000, "!!", text, "evt")
         toast = Toast(self, text, level, timeout)
         # A dismissed toast has already been deleteLater()'d, so touching it
         # raises RuntimeError("Internal C++ object already deleted").
@@ -1655,9 +1853,72 @@ class OmniWindow(QMainWindow):
 
     # -------------------------------------------------------------- dialogs
     def open_preferences(self) -> None:
-        dialog = PreferencesDialog(self, language())
+        dialog = PreferencesDialog(
+            self, language(),
+            log_dir=str(self.settings.value("paths/log_dir", "")) or paths.logs_dir(),
+            accent=theme.accent(),
+            wallpaper=theme.wallpaper() or "",
+            buffer_mb=self.log.buffer_mb())
         dialog.languageChanged.connect(self.change_language)
+        dialog.logDirChanged.connect(self.apply_log_dir)
+        dialog.accentChanged.connect(self.apply_accent)
+        dialog.wallpaperChanged.connect(self.apply_wallpaper)
+        dialog.bufferChanged.connect(self.apply_log_buffer)
         dialog.exec()
+
+    # ------------------------------------------------------- theme + folders
+    def apply_log_dir(self, path: str) -> bool:
+        """Point captures at ``path``; keep the old folder when it is unusable."""
+        previous = str(self.settings.value("paths/log_dir", ""))
+        try:
+            resolved = paths.set_logs_dir(path)
+        except OSError as exc:
+            paths.set_logs_dir(previous)
+            self.notify(tr("pref.logdir.bad", err=exc), "warn")
+            return False
+        self.bridge.set_capture_dir(resolved)
+        self.settings.setValue("paths/log_dir", path)
+        self._refresh_status_dir()
+        if self.bridge.recorder.active:
+            # A capture already running keeps its file; say so instead of
+            # letting the user wonder why the old folder still grows (R-078).
+            self.notify(tr("misc.logdir.next", path=resolved), "warn")
+        else:
+            self.notify(tr("misc.logdir", path=resolved), "ok")
+        return True
+
+    def _refresh_status_dir(self) -> None:
+        """Show the folder captures actually land in."""
+        path = paths.logs_dir()
+        self.status_dir.setText(tr("status.datadir", path=path))
+        self.status_dir.setToolTip(path)
+
+    def apply_log_buffer(self, megabytes: int) -> int:
+        """Change how much log text is kept; persists and reports the size."""
+        used = self.log.set_buffer_mb(megabytes)
+        self.settings.setValue("display/buffer_mb", used)
+        self.notify(tr("misc.buffer", mb=used), "ok")
+        return used
+
+    def apply_accent(self, name: str) -> None:
+        key = theme.set_accent(name)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(theme.app_stylesheet())
+        self.settings.setValue("ui/accent", key)
+        # Painted widgets read the tokens on repaint, so one sweep is enough.
+        for widget in [self, *self.findChildren(QWidget)]:
+            widget.update()
+        label = theme.ACCENTS[key][0 if language() == "zh" else 1]
+        self.notify(tr("misc.accent", name=label), "ok")
+
+    def apply_wallpaper(self, path: str) -> None:
+        resolved = theme.set_wallpaper(path or None)
+        self.settings.setValue("ui/wallpaper", resolved or "")
+        central = self.centralWidget()
+        if central is not None:
+            central.update()
+        self.notify(tr("misc.wallpaper" if resolved else "misc.wallpaper.cleared"), "ok")
 
     def change_language(self, lang: str) -> None:
         if lang == language():
@@ -1694,27 +1955,25 @@ class OmniWindow(QMainWindow):
         self.baud.setToolTip(tr("rail.baud.tip"))
         for index, (_key, label_key) in enumerate(FLOW_KEYS):
             self.flow.setItemText(index, tr(label_key))
-        # The "flow" meta row mirrors the combo, so it must be refreshed too -
-        # otherwise it kept the previous language's text.
-        self.meta_flow.setText(self.flow.currentText())
         self.sec_display.setText(tr("rail.display"))
         for row, key in ((self.row_hex, "rail.hex"), (self.row_ts, "rail.ts"),
                          (self.row_ctrl, "rail.ctrl"), (self.row_echo, "rail.echo"),
-                         (self.row_scroll, "rail.scroll")):
+                         (self.row_scroll, "rail.scroll"), (self.row_awake, "rail.awake")):
             row.label.setText(tr(key))
         self.row_ctrl.setToolTip(tr("rail.ctrl.tip"))
         self.row_scroll.setToolTip(tr("rail.scroll.tip"))
+        self.row_awake.setToolTip(tr("rail.awake.tip"))
         self.sec_record.setText(tr("rail.record"))
         self.btn_record.setText(tr("rail.record.stop") if self.bridge.recorder.active
                                 else tr("rail.record.start"))
         self.btn_open_dir.setText(tr("rail.opendir"))
+        self.btn_clear_capture.setText(tr("rail.record.clear"))
+        self.btn_clear_capture.setToolTip(tr("rail.record.clear.tip"))
         self.record_hint.setText(tr("rail.record.hint"))
-        for label, key in getattr(self, "_meta_labels", []):
-            label.setText(tr(key))
         self.btn_clear.setText(tr("log.clear"))
         self.btn_save_log.setText(tr("log.save"))
         self.log_hint.setText(tr("log.hint"))
-        self.status_dir.setText(tr("status.datadir", path=paths.data_dir()))
+        self._refresh_status_dir()
         self.commands_panel.retranslate()
         self.search_panel.retranslate()
         self.console.retranslate()
@@ -1748,4 +2007,7 @@ class OmniWindow(QMainWindow):
             self._transfer.cancel()
             self._transfer.wait(2000)
         self.bridge.shutdown()
+        # A keep-awake request belongs to this thread; release it explicitly so
+        # the machine can sleep again the moment OmniCOM is gone.
+        power.release()
         super().closeEvent(event)

@@ -6,7 +6,16 @@ import os
 import time
 from collections.abc import Callable
 
-from PySide6.QtCore import Property, QEasingCurve, QPropertyAnimation, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    Property,
+    QEasingCurve,
+    QPoint,
+    QPropertyAnimation,
+    QRectF,
+    Qt,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -138,6 +147,10 @@ class CommandRow(QWidget):
             note_row.setContentsMargins(10 + theme.CHECK_SIZE + 6, 0, 5, 4)
             note_row.addWidget(self.note_label)
             outer.addLayout(note_row)
+            # The guess above is only a placeholder: the checkbox width is a
+            # style hint, so the real x is measured once the row is laid out.
+            self.note_row = note_row
+            self._note_aligned = False
 
         for glyph, tip, slot in (
                 (GlyphButton.SEND, tr("cmd.send"), lambda: self.send.emit(item)),
@@ -147,6 +160,29 @@ class CommandRow(QWidget):
             button.setToolTip(tip)
             button.clicked.connect(slot)
             top.addWidget(button)
+
+    def _align_note(self) -> None:
+        """Start the note exactly under the command text (R-079).
+
+        Runs once per row: the offset only depends on the checkbox width, and
+        re-margining on every resize made a 200-command group four times slower
+        to lay out (R-054).
+        """
+        row = getattr(self, "note_row", None)
+        if row is None or getattr(self, "_note_aligned", True):
+            return
+        left = self.label.mapTo(self, QPoint(0, 0)).x()
+        if left < 0:
+            return
+        margins = row.contentsMargins()
+        if margins.left() != left:
+            row.setContentsMargins(left, margins.top(), margins.right(),
+                                   margins.bottom())
+        self._note_aligned = True
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._align_note()
 
     def _get_selection(self) -> float:
         return self._selection

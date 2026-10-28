@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
+    QProgressBar,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -37,7 +38,8 @@ class SendInput(QPlainTextEdit):
 
 class SendPanel(GlassFrame):
     sendRequested = Signal(bytes, str)   # payload, echo description
-    fileSelected = Signal(str)
+    fileChosen = Signal(str)             # "Open file": remember the path only
+    fileSendRequested = Signal(str)      # "Send file": transmit the stored path
     abortRequested = Signal()
 
     def __init__(self, parent=None) -> None:
@@ -46,6 +48,7 @@ class SendPanel(GlassFrame):
         self._timed = QTimer(self)
         self._timed.timeout.connect(self.emit_current)
         self._sending_file = False
+        self._file_path = ""
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 11, 12, 11)
@@ -132,10 +135,18 @@ class SendPanel(GlassFrame):
 
         foot.addStretch(1)
 
+        # Two separate actions: one only picks the file, the other transmits it
+        # (R-074).  Merging them meant "send" also re-ran the file dialog.
+        self.btn_open_file = QPushButton(tr("send.openfile"))
+        self.btn_open_file.setObjectName("Ghost")
+        self.btn_open_file.setCursor(Qt.PointingHandCursor)
+        self.btn_open_file.clicked.connect(self.pick_file)
+        foot.addWidget(self.btn_open_file)
+
         self.btn_file = QPushButton(tr("send.file"))
         self.btn_file.setObjectName("Ghost")
         self.btn_file.setCursor(Qt.PointingHandCursor)
-        self.btn_file.clicked.connect(self.pick_file)
+        self.btn_file.clicked.connect(self.send_chosen_file)
         foot.addWidget(self.btn_file)
 
         self.btn_abort = QPushButton(tr("send.stop"))
@@ -147,9 +158,20 @@ class SendPanel(GlassFrame):
 
         self.file_hint = QLabel("")
         self.file_hint.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
-        foot.addWidget(self.file_hint)
+        foot.addWidget(self.file_hint, 1)
 
         root.addLayout(foot)
+
+        # A real progress bar, so a 10 MB transfer is visibly progressing
+        # instead of just printing numbers in a label (R-074).
+        self.file_progress = QProgressBar()
+        self.file_progress.setObjectName("FileProgress")
+        self.file_progress.setRange(0, 100)
+        self.file_progress.setValue(0)
+        self.file_progress.setTextVisible(False)
+        self.file_progress.setFixedHeight(6)
+        self.file_progress.hide()
+        root.addWidget(self.file_progress)
 
         shortcut = QShortcut(QKeySequence("Ctrl+Return"), self.input)
         shortcut.activated.connect(self.emit_current)
@@ -209,20 +231,50 @@ class SendPanel(GlassFrame):
         self.timed_label.setText(tr("send.timed"))
         self.btn_timed.setText(tr("send.stop") if self._timed.isActive()
                                 else tr("send.start"))
+        self.btn_open_file.setText(tr("send.openfile"))
         self.btn_file.setText(tr("send.file"))
         self.btn_abort.setText(tr("send.stop"))
+        # Re-render the file row so its hint/prompt follows the new language.
+        if self._file_path and not self._sending_file:
+            self.file_hint.setText(f"{os.path.basename(self._file_path)}  "
+                                   f"({os.path.getsize(self._file_path)} B)")
+        elif not self._sending_file:
+            self.file_hint.setText("")
 
     # ------------------------------------------------------------------ file
     def pick_file(self) -> None:
+        """Choose the file to send; nothing is transmitted here."""
         path, _ = QFileDialog.getOpenFileName(self, tr("send.pickfile"))
-        if path:
-            self.fileSelected.emit(path)
+        if not path:
+            return
+        self._file_path = path
+        self.file_hint.setText(f"{os.path.basename(path)}  "
+                               f"({os.path.getsize(path)} B)")
+        self.fileChosen.emit(path)
+
+    def chosen_file(self) -> str:
+        return self._file_path
+
+    def send_chosen_file(self) -> None:
+        """Transmit whatever ``pick_file`` selected."""
+        if not self._file_path:
+            self.file_hint.setText(tr("send.nofile"))
+            return
+        self.fileSendRequested.emit(self._file_path)
 
     def set_file_busy(self, busy: bool, text: str = "") -> None:
+        self._sending_file = busy
         self.btn_abort.setVisible(busy)
         self.btn_file.setEnabled(not busy)
+        self.btn_open_file.setEnabled(not busy)
+        self.file_progress.setVisible(busy)
+        if not busy:
+            self.file_progress.setValue(0)
         self.file_hint.setText(text)
 
     def set_file_progress(self, sent: int, total: int, name: str) -> None:
-        percent = (sent / total * 100) if total else 0
-        self.file_hint.setText(f"{os.path.basename(name)} {percent:.0f}%  ({sent}/{total})")
+        percent = int(sent / total * 100) if total else 0
+        self.file_progress.setVisible(True)
+        self.file_progress.setValue(max(0, min(100, percent)))
+        self.file_hint.setText(tr("send.progress", name=os.path.basename(name),
+                                  percent=percent, sent=sent, total=total))

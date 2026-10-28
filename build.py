@@ -1,15 +1,38 @@
 """Build OmniCOM.exe with PyInstaller (native Qt app, no browser).
 
     ############################################################
-    #  2026-10-27: THIS IS DISABLED BY POLICY (see R-019).      #
+    #  2026-10-27: DISABLED BY POLICY (see R-019).              #
     #  The produced exe is blocked by corporate endpoint         #
     #  security ("拒绝访问") and will not run. Kept only as      #
     #  documentation of how a build would look; it requires an   #
     #  explicit acknowledgement flag before it will do anything. #
     ############################################################
 
+Why the exe is blocked while the Store Python is not (R-083):
+
+* PyInstaller wraps the app in its own **bootloader** - an unsigned PE that
+  unpacks itself into %TEMP% and runs from there.  Packer/self-extracting
+  heuristics flag exactly that shape, and the "onefile" variant is the worst
+  offender because the whole payload sits in one blob.
+* The Microsoft Store ``python.exe`` / ``pythonw.exe`` is Authenticode-signed by
+  Microsoft and on the endpoint's trusted-publisher list, so it runs untouched.
+  Nothing we add to an unsigned binary changes that - only a signature would.
+
+Therefore: **do not ship an exe**.  Use ``tools/make_pyz.py``, which produces
+``dist/OmniCOM/`` with ``OmniCOM.pyz`` + ``OmniCOM.cmd``; it runs on the signed
+interpreter, is one file for the user, and nothing self-extracts (R-019/R-083).
+
+If an exe is genuinely required, the only reliable options are, in order:
+
+1. Ask IT to allowlist this build (by hash, or by the folder it runs from).
+2. Sign the exe with a corporate code-signing certificate after building
+   (``signtool sign /fd sha256 /tr … /td sha256 OmniCOM.exe``), then allowlist.
+3. Build ``--onedir`` (not ``--onefile``) so no self-extraction happens; it is
+   *less* likely to be quarantined but still unsigned, so still a gamble.
+
     python build.py --i-understand-policy   # actually build (only where allowed)
     python build.py --help                  # see all options
+    python tools/make_pyz.py --check        # the supported way to distribute
 """
 
 from __future__ import annotations

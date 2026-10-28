@@ -45,6 +45,57 @@ from PySide6.QtWidgets import (
 from . import theme
 
 
+def paint_glass(widget: QWidget, painter: QPainter, rect: QRectF,
+                path: QPainterPath, strong: bool = False,
+                alpha: int | None = None) -> bool:
+    """Paint the frosted slice of wallpaper that sits under ``widget``.
+
+    Returns False when there is no wallpaper (the caller then paints its own
+    flat surface).  Shared by the panes and the status strip so the two can
+    never drift apart (R-077 / R-082).
+    """
+    window = widget.window()
+    if not theme.wallpaper() or window is None:
+        return False
+    layer = theme.glass_layer(window.width(), window.height())
+    if layer is None:
+        return False
+    origin = widget.mapTo(window, QPoint(0, 0))
+    painter.save()
+    painter.setClipPath(path)
+    painter.drawPixmap(rect, layer,
+                       QRectF(origin.x(), origin.y(), widget.width(), widget.height()))
+    painter.restore()
+    if alpha is None:
+        alpha = theme.GLASS_STRONG_ALPHA if strong else theme.GLASS_ALPHA
+    painter.setPen(Qt.NoPen)
+    painter.fillPath(path, QBrush(QColor(255, 255, 255, alpha)))
+    return True
+
+
+class CaptionStrip(QWidget):
+    """The bottom caption row: text only - no plate, no border, no fill.
+
+    The history here is instructive, because each stage was a user report:
+
+    1. plain ``QFrame`` with an opaque white plate  -> "不透明，没有液态玻璃" (L-107)
+    2. frosted glass like the panes                 -> "直接不要框和颜色了，只显示文字"
+    3. this: nothing is painted at all
+
+    A widget that does not override ``paintEvent`` and does not fill its
+    background draws exactly nothing, so the captions sit straight on the page
+    (or on the wallpaper).  Readability is handled by the text colour and the
+    white halo set in ``OmniWindow._build_status_strip`` - that is a property of
+    the glyphs, not a box behind them.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("StatusStrip")
+        self.setAttribute(Qt.WA_StyledBackground, False)
+        self.setAutoFillBackground(False)
+
+
 class GlassFrame(QFrame):
     """Rounded white card with a hairline border and a soft shadow."""
 
@@ -68,11 +119,16 @@ class GlassFrame(QFrame):
         path = QPainterPath()
         path.addRoundedRect(rect, self.radius, self.radius)
 
-        # Flat white surface; the "strong" variant (title bar) is a touch
-        # cooler so it separates from the cards below it.
-        fill = QColor(theme.CARD) if self.strong else QColor(255, 255, 255, 244)
-        painter.setPen(Qt.NoPen)
-        painter.fillPath(path, QBrush(fill))
+        # Liquid glass (R-077): with a wallpaper behind the window the pane first
+        # paints the *blurred* slice of that photo which sits exactly underneath
+        # it, then a translucent white wash.  Without a wallpaper it stays the
+        # plain flat card of R-020.  Same painter as the status strip (R-082).
+        if not paint_glass(self, painter, rect, path, strong=self.strong):
+            # Flat white surface; the "strong" variant (title bar) is a touch
+            # cooler so it separates from the cards below it.
+            fill = QColor(theme.CARD) if self.strong else QColor(255, 255, 255, 244)
+            painter.setPen(Qt.NoPen)
+            painter.fillPath(path, QBrush(fill))
 
         # A barely-there top sheen keeps the card from looking dead flat.
         sheen = QLinearGradient(rect.topLeft(), rect.bottomLeft())

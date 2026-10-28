@@ -97,7 +97,30 @@ TITLES = {
     "R-058": "统一按钮悬停渐变、按压回弹与即时点击",
     "R-059": "快捷启动右键删除与配置持久化",
     "R-060": "多窗口独立图标、精确绑定与切换",
-    "R-061": "真实键盘自定义波特率与单次提交",
+    "R-061": "波特率可自定义（真实键盘输入）",
+    "R-062": "屏幕常亮开关（可持久化、关闭时释放）",
+    "R-063": "快捷启动上下两区 + 窗口实例重命名 + 长名称完整显示",
+    "R-064": "快捷启动上下两区支持拖拽排序并持久化",
+    "R-065": "上排删除只删快捷方式、下排删除只结束该窗口",
+    "R-066": "收发双向记录到文件 + 随时清空并继续记录",
+    "R-067": "左栏底部不再重复串口/流控/版本信息",
+    "R-068": "左栏默认宽度与右侧栏一致",
+    "R-069": "版本号为 1.1.2",
+    "R-070": "首选项可设置日志默认保存目录",
+    "R-071": "首选项可换主题色 / 设置壁纸",
+    "R-072": "日志更新时搜索结果持续追加",
+    "R-073": "清空日志同步清空 RX/TX 计量",
+    "R-074": "打开/发送文件分离 + 日志打印 + 进度条",
+    "R-075": "统一图标来源（logo.png 生成全部图标）",
+    "R-076": "启动 GUI 不自带命令行窗口",
+    "R-077": "面板为液态玻璃（模糊壁纸 + 半透明白）",
+    "R-078": "记录目录跟随首选项（状态栏 + 打开目录）",
+    "R-079": "命令注释与命令文字左对齐",
+    "R-080": "图标提示 1 秒后出现",
+    "R-081": "日志按大小缓冲（默认 100MB / 上限 500MB，弃旧留新）",
+    "R-082": "底部状态栏也是液态玻璃",
+    "R-083": "免 exe 分发（pyz + cmd）",
+    "R-084": "自绘圆角提示框（无白块 + 液态玻璃）",
 }
 
 
@@ -343,8 +366,21 @@ def suite_visual() -> None:
     add("R-018", "源码启动入口存在（run.py + start.cmd）",
         os.path.isfile(os.path.join(ROOT, "run.py"))
         and os.path.isfile(os.path.join(ROOT, "start.cmd")))
-    add("R-019", "仓库内无打包产物（dist/ 不存在）",
-        not os.path.exists(os.path.join(ROOT, "dist")))
+    def stray_exe() -> list[str]:
+        """No self-built executable anywhere (R-019 / R-083)."""
+        found = []
+        # ``dist/`` is generated (and git-ignored); it contains the runtime we
+        # ship, which is the official CPython build - not a self-built exe.
+        for base, folders, files in os.walk(ROOT):
+            folders[:] = [item for item in folders
+                          if item not in (".git", ".artifacts", "__pycache__", "dist")]
+            for name in files:
+                if name.lower().endswith(".exe"):
+                    found.append(os.path.join(base, name))
+        return found
+
+    add("R-019", "仓库内没有自编译的 exe", not stray_exe(),
+        ", ".join(stray_exe()[:3]))
     proc = run(["build.py"])
     add("R-019", "打包脚本默认拒绝执行（政策闸门 exit=3）", proc.returncode == 3,
         f"exit={proc.returncode}")

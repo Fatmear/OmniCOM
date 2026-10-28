@@ -16,7 +16,25 @@ from PySide6.QtWidgets import QApplication, QMenu, QPlainTextEdit, QWidget
 
 from . import theme
 
-MAX_BLOCKS = 20000
+# ---------------------------------------------------------------- buffering
+# The log is capped by *size*, not by a line count: 100 MB by default, chosen by
+# the user in Preferences, never more than 500 MB (R-081).
+#
+# QPlainTextEdit only knows a block (line) limit, so the byte budget is converted
+# with the measured average line cost: ``chars / blocks + LINE_OVERHEAD``.  A
+# document block carries more than its characters, hence the overhead term.
+DEFAULT_BUFFER_MB = 100
+MIN_BUFFER_MB = 4
+MAX_BUFFER_MB = 500
+#: Guard for logs made of *very* short lines: 400 k blocks appended in ~5 ms, so
+#: 1 M is ~2.5x that and still responsive.  It is enforced by our own trimmer.
+MAX_BLOCKS = 1_000_000
+#: Qt's own block limit is only a safety net.  Its shrink path costs ~2 s for a
+#: large document (measured), so it must never be the thing that trims (L-104).
+QT_BLOCK_CEILING = 2 * MAX_BLOCKS
+#: Trim down to this share of the budget, so trimming is rare instead of every
+#: append.  85 % of 100 MB is 15 MB of headroom.
+TRIM_TO = 0.85
 
 # "收←" / "发→" read faster than RX/TX in a long log, and the direction column
 # keeps a fixed width so the payload starts at the same x on every line.  The
@@ -84,7 +102,6 @@ class LogView(QPlainTextEdit):
         self.show_dir = show_dir
         self.setReadOnly(True)
         self.setUndoRedoEnabled(False)
-        self.setMaximumBlockCount(MAX_BLOCKS)
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.setFrameShape(QPlainTextEdit.NoFrame)
         self.setWordWrapMode(self.wordWrapMode())
@@ -100,6 +117,9 @@ class LogView(QPlainTextEdit):
         self.show_ts = True
         self.show_ctrl = False
         self.autoscroll = True
+        self._buffer_bytes = DEFAULT_BUFFER_MB * 1024 * 1024
+        self._trim_pending = False
+        self.setMaximumBlockCount(QT_BLOCK_CEILING)
         self._batching = 0
         self._batch_cursor: QTextCursor | None = None
         self._dirty = False
@@ -128,6 +148,70 @@ class LogView(QPlainTextEdit):
         fmt.setFontItalic(italic)
         return fmt
 
+    # ---------------------------------------------------------------- buffer
+    def buffer_mb(self) -> int:
+        return round(self._buffer_bytes / 1048576)
+
+    def set_buffer_mb(self, megabytes: int) -> int:
+        """Set the log budget in MB; returns the value actually used."""
+        value = max(MIN_BUFFER_MB, min(MAX_BUFFER_MB, int(megabytes)))
+        self._buffer_bytes = value * 1024 * 1024
+        self._apply_buffer_limit(force=True)
+        return value
+
+    def buffer_chars(self) -> int:
+        """Approximate characters held now (1 char ~ 1 byte of ASCII text)."""
+        return max(0, self.document().characterCount() - 1)
+
+    def overflow(self) -> bool:
+        """True when the document holds more than the configured budget."""
+        return (self.buffer_chars() > self._buffer_bytes
+                or self.document().blockCount() > MAX_BLOCKS)
+
+    def trim_oldest(self) -> int:
+        """Drop leading text until the document fits the budget again.
+
+        One cursor removal for the whole range: measured 49-123 ms for 2-7 Mchars,
+        whereas letting ``setMaximumBlockCount()`` do the same took 2-6 s and froze
+        the window (L-104).  Returns the number of lines dropped.
+        """
+        document = self.document()
+        if document.blockCount() <= 1:
+            return 0
+        chars = self.buffer_chars()
+        keep = int(self._buffer_bytes * TRIM_TO)
+        surplus = chars - keep
+        # A document made of very short lines can hit the block guard instead.
+        if document.blockCount() > MAX_BLOCKS:
+            surplus = max(surplus, chars - int(chars * TRIM_TO))
+        if surplus <= 0:
+            return 0
+        target = document.findBlock(max(1, min(surplus, chars - 1)))
+        if target.position() <= 0:
+            return 0
+        cursor = QTextCursor(document)
+        cursor.setPosition(0)
+        cursor.setPosition(target.position(), QTextCursor.KeepAnchor)
+        dropped = target.blockNumber()
+        cursor.removeSelectedText()
+        self.trimmed += dropped
+        self._pending = False
+        return dropped
+
+    def _apply_buffer_limit(self, force: bool = False) -> None:
+        """Trim when the budget is exceeded; batching defers it to end_batch.
+
+        ``force`` trims even while a batch is open (the user just shrank the
+        budget and wants to see the effect immediately).
+        """
+        if not self.overflow():
+            return
+        if self._batching and not force:
+            self._trim_pending = True
+            return
+        self.trim_oldest()
+        self._trim_pending = False
+
     def set_pixel_size(self, size: int) -> None:
         self.setFont(theme.mono_font(size))
         self.setStyleSheet(
@@ -155,6 +239,8 @@ class LogView(QPlainTextEdit):
         if self._batching == 0:
             self._batch_cursor.endEditBlock()
             self._batch_cursor = None
+            if self._trim_pending:
+                self._apply_buffer_limit(force=True)
             if self._dirty:
                 self._dirty = False
                 self._follow()
@@ -176,8 +262,26 @@ class LogView(QPlainTextEdit):
         bar.setValue(bar.maximum())
 
     # ------------------------------------------------------------------ lines
+    def compose_line(self, ts: float, direction: str, text: str) -> str:
+        """Exactly the characters :meth:`append_line` would insert.
+
+        The search panel compares against this, so a live hit and a hit found in
+        the history are the same string - previously live rows showed the bare
+        payload while history rows showed the full line (L-089).
+        """
+        parts: list[str] = []
+        if self.show_ts:
+            parts.append(f"[{stamp(ts)}]")
+        if self.show_dir:
+            parts.append(dir_label(direction))
+            if direction in ("RX", "TX"):
+                parts.append("◇")
+        parts.append(text)
+        return "".join(parts)
+
     def append_line(self, ts: float, direction: str, text: str, kind: str = "rx",
-                    keywords: Iterable[str] = (), lite: bool = False) -> None:
+                    keywords: Iterable[str] = (), lite: bool = False) -> int:
+        """Append one line and return the document block it now occupies."""
         self._clear_pending_internal()
 
         cursor = QTextCursor(self.document())
@@ -202,6 +306,8 @@ class LogView(QPlainTextEdit):
             cursor.insertText(text, body_format)
 
         self._follow()
+        self._apply_buffer_limit()
+        return self.document().blockCount() - 1
 
     def _insert_marked(self, cursor: QTextCursor, text: str, words: list[str],
                        base: QTextCharFormat) -> None:

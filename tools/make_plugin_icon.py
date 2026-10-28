@@ -1,28 +1,22 @@
-"""Draw the launcher plugin's tab icon (a 3x3 app grid)."""
+"""Launcher tab icon, derived from the app logo (one source of truth).
+
+Previously this was a hand-drawn 3x3 grid with hard-coded teal/blue/violet
+tints, so it stopped matching the app icon and the accent themes (R-075).
+"""
+from __future__ import annotations
 
 import os
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SOURCE = os.path.join(ROOT, "logo.png")
 TARGET = os.path.join(ROOT, "plugins", "launcher", "icon.png")
 SIZE = 64
 
-image = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-draw = ImageDraw.Draw(image)
-
-tile, gap, radius = 14, 6, 4
-start = (SIZE - (tile * 3 + gap * 2)) // 2
-tints = [(11, 122, 110), (72, 132, 240), (116, 85, 245)]
-index = 0
-for row in range(3):
-    for column in range(3):
-        x = start + column * (tile + gap)
-        y = start + row * (tile + gap)
-        color = tints[index % len(tints)]
-        draw.rounded_rectangle((x, y, x + tile, y + tile), radius=radius,
-                               fill=(*color, 255 if index != 4 else 120))
-        index += 1
-
-image.save(TARGET)
-print("wrote", TARGET, image.size)
+image = Image.open(SOURCE).convert("RGBA")
+image.thumbnail((SIZE, SIZE), Image.LANCZOS)
+canvas = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
+canvas.paste(image, ((SIZE - image.width) // 2, (SIZE - image.height) // 2), image)
+canvas.save(TARGET)
+print("wrote", TARGET, canvas.size)

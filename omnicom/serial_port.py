@@ -233,6 +233,15 @@ class PortManager:
                 "exclusive": self._exclusive,
             }
 
+    def reset_stats(self) -> dict:
+        """Zero the byte counters (the user cleared the log, not the wire)."""
+        with self._lock:
+            self.rx_bytes = 0
+            self.rx_chunks = 0
+            self.tx_bytes = 0
+            self.tx_ops = 0
+        return self.stats()
+
     def stats(self) -> dict:
         return {
             "rx": self.rx_bytes,
@@ -497,7 +506,7 @@ class PortManager:
             raise PortNotOpen(str(exc)) from exc
         self.tx_bytes += len(data)
         self.tx_ops += 1
-        self._emit({"t": "tx", "n": len(data)})
+        self._emit({"t": "tx", "n": len(data), "d": data})
         return written
 
     def send_file(self, data: bytes, name: str = "file", cancel=None) -> dict:
@@ -510,6 +519,9 @@ class PortManager:
                 raise PortNotOpen("已取消")
             piece = data[sent:sent + chunk]
             self.write(piece)
+            # A separate event (not "tx") so the GUI can print the payload
+            # without double-printing ordinary sends (R-074).
+            self._emit({"t": "txprint", "d": piece})
             sent += len(piece)
             elapsed = max(time.monotonic() - started, 1e-6)
             self._emit({"t": "xf", "proto": "raw", "dir": "send", "state": "running",
@@ -627,7 +639,12 @@ def _friendly_error(exc: Exception, port: str, present: bool | None = None) -> s
 
 
 class Recorder:
-    """Streams every received byte to disk, independent of any UI pause state."""
+    """Streams every transferred byte to disk, independent of any UI pause state.
+
+    Both directions are captured, in the order the bytes were observed, as one
+    byte-exact stream - a raw file cannot label its own bytes, so per-direction
+    counters are reported through :meth:`state` instead.
+    """
 
     def __init__(self, directory: str, emit: Callable[[dict], None]) -> None:
         self.directory = directory
@@ -635,14 +652,21 @@ class Recorder:
         self._lock = threading.Lock()
         self._handle = None
         self._path: str | None = None
-        self._bytes = 0
+        self._rx = 0
+        self._tx = 0
 
     @property
     def active(self) -> bool:
         return self._handle is not None
 
+    def set_directory(self, directory: str) -> None:
+        """Point the *next* capture at another folder (an open file keeps writing)."""
+        with self._lock:
+            self.directory = directory
+
     def state(self) -> dict:
-        return {"active": self.active, "path": self._path, "bytes": self._bytes}
+        return {"active": self.active, "path": self._path,
+                "bytes": self._rx + self._tx, "rx": self._rx, "tx": self._tx}
 
     def start(self) -> dict:
         with self._lock:
@@ -650,23 +674,55 @@ class Recorder:
                 return self.state()
             os.makedirs(self.directory, exist_ok=True)
             stamp = time.strftime("%Y%m%d-%H%M%S")
-            self._path = os.path.join(self.directory, f"rx-{stamp}.log")
+            self._path = os.path.join(self.directory, f"traffic-{stamp}.log")
             # Long-lived streaming handle by design (closed in stop()), so it
             # cannot use a context manager.  SIM115 is about leaks; this is not one.
             self._handle = open(self._path, "ab", buffering=0)  # noqa: SIM115
-            self._bytes = 0
+            self._rx = 0
+            self._tx = 0
         self._emit({"t": "record", **self.state()})
         return self.state()
 
-    def write(self, data: bytes) -> None:
+    def write(self, data: bytes, direction: str = "rx") -> None:
         with self._lock:
             if self._handle is None:
                 return
             try:
                 self._handle.write(data)
-                self._bytes += len(data)
+                if direction == "tx":
+                    self._tx += len(data)
+                else:
+                    self._rx += len(data)
             except Exception:
                 self.stop(silent=True)
+
+    def clear(self) -> dict:
+        """Empty the capture file and keep recording into the same file.
+
+        O_APPEND writes always land at the end, so truncating to zero is enough:
+        the next byte arrives at offset 0 and the session continues unbroken.
+        """
+        with self._lock:
+            if self._handle is not None:
+                try:
+                    self._handle.flush()
+                    self._handle.truncate(0)
+                    self._handle.seek(0)
+                except Exception:
+                    self.stop(silent=True)
+                    return self.state()
+                self._rx = 0
+                self._tx = 0
+            elif self._path:
+                try:
+                    with open(self._path, "wb"):
+                        pass
+                except OSError:
+                    pass
+                self._rx = 0
+                self._tx = 0
+        self._emit({"t": "record", **self.state(), "cleared": True})
+        return self.state()
 
     def flush(self) -> None:
         with self._lock:

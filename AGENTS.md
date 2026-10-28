@@ -7,11 +7,13 @@ Rules
 - Before diagnosing or changing code, search `project-context/LEDGER.md` for the symptom keywords.
 - Requirements live only in `project-context/REQUIREMENTS.md`; update the file in the same turn a requirement changes.
 - Received serial bytes must never be silently dropped (R-017). Count and surface any loss in the UI.
-- **Do not build or ship an .exe (R-019)**: corporate endpoint policy blocks self-built executables.
+- **Do not build or ship a self-built .exe (R-019)**; ship the portable folder instead (R-083).
   Run from source: `start.cmd`, or `python run.py`, or `python run.py --demo` (虚拟串口).
+  Package: `python tools/make_dist.py --check --zip` → `dist/OmniCOM/` + `dist/OmniCOM-<ver>-win64.zip`
+  (bundled CPython runtime + trimmed Qt bindings, so the user installs nothing).
 - Verify commands: `python tools/protocol_selftest.py` (X/Y/ZMODEM loopback, 23 checks),
-  `python tools/ui_selftest.py` (GUI acceptance checks incl. DEMO port),
-  `python tools/acceptance_test.py` (229 checks covering R-001..R-061 + `.artifacts/acceptance.json`),
+  `python tools/ui_selftest.py` (286 GUI acceptance checks incl. DEMO port),
+  `python tools/acceptance_test.py` (335 checks covering R-001..R-084 + `.artifacts/acceptance.json`),
   `python tools/ui_snapshot.py` (renders `.artifacts/ui.png` for visual review),
   `python tools/contrast_audit.py` (light-theme text contrast must stay >= 4.5:1).
   GUI checks must start with their `R-0xx` id — an un-mapped check fails the run.

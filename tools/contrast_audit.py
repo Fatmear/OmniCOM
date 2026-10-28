@@ -50,6 +50,13 @@ def pairs() -> list[tuple[str, str, str]]:
         ("状态：错误 / 底色", theme.DANGER, theme.DANGER_SOFT),
         ("日志 TX 颜色 / 卡片", "#3A2F86", card),
         ("搜索高亮 / 高亮底", "#0A3F3A", "#BFF0E6"),
+        # R-077: worst case of a frosted pane / status plate over a black photo
+        ("提示文字 DIM / 玻璃面板最暗", theme.DIM, theme.glass_floor()),
+        ("次级文字 INK2 / 玻璃面板最暗", theme.INK2, theme.glass_floor()),
+        # R-082: the caption row paints nothing, so it sits on the page itself -
+        # the darkest possible page is the veil over a black photo.  That is why
+        # the captions use INK and not the grey hint colour (which fails here).
+        ("正文 INK / 页面最暗", theme.INK, theme.page_floor()),
     ]
 
 

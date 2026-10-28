@@ -96,8 +96,11 @@ class PortSession:
         if kind == "rx":
             data = event["d"]
             if self.recorder.active:
-                self.recorder.write(data)
+                self.recorder.write(data, "rx")
             self.buffer += data
+        elif kind == "tx":
+            if self.recorder.active:
+                self.recorder.write(event.get("d") or b"", "tx")
         elif kind == "notice":
             text = event.get("text", "")
             self.notices.append(text)

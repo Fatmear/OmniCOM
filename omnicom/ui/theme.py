@@ -12,14 +12,18 @@ clip their own labels.
 
 from __future__ import annotations
 
+import os
 import sys
+from typing import Any
+
+from PySide6.QtGui import QPixmap
 
 # ------------------------------------------------------------------ palette
 BG = "#EDF1F7"          # flat page backdrop (also the window's dominant colour)
 CARD = "#FFFFFF"        # card / bar surface
 INK = "#121A2B"         # primary text
 INK2 = "#46536B"        # secondary text
-DIM = "#5F6A7E"         # hints, captions, gutters (>= 4.8:1 on BG)
+DIM = "#4A5670"         # hints, captions, gutters (>= 5.4:1 on the glass floor)
 
 TEAL = "#0B7A6E"
 TEAL_SOFT = "#DFF7F3"
@@ -81,6 +85,209 @@ MONO_STACK = (
 MONO_FONT = '"Cascadia Code", "Cascadia Mono", "JetBrains Mono", Consolas, monospace'
 
 
+# ------------------------------------------------------------ accent themes
+# Each entry: key -> (中文, English, ink colour, soft tint).  Every ink colour
+# was measured against CARD and against its own soft tint and stays >= 4.5:1,
+# which is what keeps `tools/contrast_audit.py` meaningful after a switch.
+ACCENTS: dict[str, tuple[str, str, str, str]] = {
+    "teal": ("青绿", "Teal", "#0B7A6E", "#DFF7F3"),
+    "blue": ("靛蓝", "Indigo", "#1D4ED8", "#E3ECFE"),
+    "violet": ("紫罗兰", "Violet", "#6D4AE0", "#EEE9FE"),
+    "green": ("松绿", "Green", "#0A7A54", "#E4F6EE"),
+    "amber": ("琥珀", "Amber", "#B45309", "#FFF4E2"),
+    "rose": ("玫红", "Rose", "#BE1E4E", "#FDECF2"),
+    "slate": ("石墨", "Slate", "#334155", "#E8EDF5"),
+}
+DEFAULT_ACCENT = "teal"
+_accent = DEFAULT_ACCENT
+
+#: Wallpaper path chosen by the user ("" / None = flat colour, see R-020).
+_wallpaper: str | None = None
+_wallpaper_cache: tuple[tuple[str, float], Any] | None = None
+
+# --------------------------------------------------------- frosted glass (R-077)
+#: White veil over the page photo.  Lower = the picture reads stronger; the
+#: panes deliberately stay lighter and softer than this, which is what makes
+#: them look like glass instead of paint.
+PAGE_VEIL = 150
+#: White baked into the blurred layer the panes sample (0 = the photo as-is).
+GLASS_VEIL = 88
+#: White wash painted on top of that sample; the pair decides how "milky" a
+#: pane looks.  ``glass_floor()`` derives the worst-case colour from these two
+#: numbers so ``tools/contrast_audit.py`` keeps proving the captions are legible.
+GLASS_ALPHA = 180
+GLASS_STRONG_ALPHA = 205
+#: Downscale factor used to fake a heavy backdrop blur (cheap: two smooth scales).
+GLASS_BLUR_DIV = 16
+
+_glass_cache: tuple[tuple[str, float, int, int], Any] | None = None
+
+
+def accent() -> str:
+    return _accent
+
+
+def accent_choices() -> list[tuple[str, str, str]]:
+    """``[(key, chinese, english)]`` in menu order."""
+    return [(key, zh, en) for key, (zh, en, _ink, _soft) in ACCENTS.items()]
+
+
+def set_accent(name: str) -> str:
+    """Retint the accent family in place; unknown names fall back to the default."""
+    global _accent, TEAL, TEAL_SOFT, TEAL_RGB, PRIMARY_A, PRIMARY_B
+    key = name if name in ACCENTS else DEFAULT_ACCENT
+    _accent = key
+    _zh, _en, ink, soft = ACCENTS[key]
+    TEAL, TEAL_SOFT = ink, soft
+    TEAL_RGB = _rgb_triplet(ink)
+    PRIMARY_A, PRIMARY_B = _lighten(ink, 0.18), _darken(ink, 0.12)
+    return key
+
+
+def _rgb_triplet(color: str) -> str:
+    value = color.lstrip("#")
+    return ", ".join(str(int(value[index:index + 2], 16)) for index in (0, 2, 4))
+
+
+def _mix(color: str, target: int, weight: float) -> str:
+    value = color.lstrip("#")
+    out = []
+    for index in (0, 2, 4):
+        channel = int(value[index:index + 2], 16)
+        out.append(round(channel + (target - channel) * weight))
+    return "#{:02X}{:02X}{:02X}".format(*out)
+
+
+def _lighten(color: str, weight: float) -> str:
+    return _mix(color, 255, weight)
+
+
+def _darken(color: str, weight: float) -> str:
+    return _mix(color, 0, weight)
+
+
+def wallpaper() -> str | None:
+    return _wallpaper
+
+
+def set_wallpaper(path: str | None) -> str | None:
+    """Use ``path`` as the page backdrop; an empty value restores the flat fill."""
+    global _wallpaper, _wallpaper_cache
+    global _glass_cache
+    cleaned = (path or "").strip()
+    if not cleaned:
+        _wallpaper = None
+        _wallpaper_cache = None
+        _glass_cache = None
+        return None
+    absolute = os.path.abspath(os.path.expanduser(cleaned))
+    if not os.path.isfile(absolute):
+        _wallpaper = None
+        _wallpaper_cache = None
+        _glass_cache = None
+        return None
+    _wallpaper = absolute
+    _wallpaper_cache = None
+    _glass_cache = None
+    return absolute
+
+
+def wallpaper_pixmap():
+    """Decoded wallpaper (cached by path + mtime); ``None`` when unset/broken."""
+    global _wallpaper_cache
+    if not _wallpaper:
+        return None
+    try:
+        stamp = os.path.getmtime(_wallpaper)
+    except OSError:
+        return None
+    key = (_wallpaper, stamp)
+    if _wallpaper_cache is None or _wallpaper_cache[0] != key:
+        pixmap = QPixmap(_wallpaper)
+        _wallpaper_cache = (key, None) if pixmap.isNull() else (key, pixmap)
+    return _wallpaper_cache[1]
+
+
+def cover_pixmap(pixmap, width: int, height: int):
+    """Scale ``pixmap`` to cover ``width`` x ``height`` and centre-crop it.
+
+    One helper for both the page backdrop and the panes, so the frosted sample
+    lines up with the photo painted behind it instead of drifting.
+    """
+    from PySide6.QtCore import Qt
+
+    if pixmap is None or pixmap.isNull() or width <= 0 or height <= 0:
+        return None
+    scaled = pixmap.scaled(width, height, Qt.KeepAspectRatioByExpanding,
+                           Qt.SmoothTransformation)
+    return scaled.copy(max(0, (scaled.width() - width) // 2),
+                       max(0, (scaled.height() - height) // 2), width, height)
+
+
+def glass_layer(width: int, height: int):
+    """Blurred + veiled wallpaper that the panes sample for their glass (R-077).
+
+    Two smooth scales (down to 1/16, back up) stand in for a real gaussian blur:
+    it costs a couple of milliseconds, is cached per size, and at this veil the
+    difference from a true blur is invisible.
+    """
+    global _glass_cache
+    pixmap = wallpaper_pixmap()
+    if pixmap is None or width <= 0 or height <= 0:
+        return None
+    try:
+        stamp = os.path.getmtime(str(_wallpaper))
+    except (OSError, TypeError):
+        return None
+    key = (str(_wallpaper), stamp, width, height)
+    if _glass_cache is not None and _glass_cache[0] == key:
+        return _glass_cache[1]
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QPainter
+
+    cover = cover_pixmap(pixmap, width, height)
+    if cover is None:
+        return None
+    tiny = cover.scaled(max(1, width // GLASS_BLUR_DIV), max(1, height // GLASS_BLUR_DIV),
+                        Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    blurred = tiny.scaled(width, height, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    painter = QPainter(blurred)
+    painter.fillRect(blurred.rect(), QColor(255, 255, 255, GLASS_VEIL))
+    painter.end()
+    _glass_cache = (key, blurred)
+    return blurred
+
+
+def _composite(alpha: int, base: int) -> str:
+    wash = alpha / 255.0
+    value = round(255.0 * wash + base * (1.0 - wash))
+    return f"#{value:02X}{value:02X}{value:02X}"
+
+
+def glass_floor() -> str:
+    """Darkest colour a pane can take (over a black photo) - worst case for text."""
+    return _composite(GLASS_ALPHA, round(255.0 * (GLASS_VEIL / 255.0)))
+
+
+def page_floor() -> str:
+    """Darkest the page itself can get: the veil over a black photo.
+
+    The bottom captions sit straight on the page now (no plate, R-082), so this
+    is the background they have to stay readable against.
+    """
+    return f"#{PAGE_VEIL:02X}{PAGE_VEIL:02X}{PAGE_VEIL:02X}"
+
+
+#: Read by the stylesheet so selection tints and primary buttons follow the
+#: chosen accent instead of a literal colour.
+TEAL = ACCENTS[DEFAULT_ACCENT][2]
+TEAL_SOFT = ACCENTS[DEFAULT_ACCENT][3]
+TEAL_RGB = _rgb_triplet(TEAL)
+PRIMARY_A = _lighten(TEAL, 0.18)
+PRIMARY_B = _darken(TEAL, 0.12)
+
+
 def app_stylesheet() -> str:
     return f"""
 * {{
@@ -90,6 +297,8 @@ def app_stylesheet() -> str:
   outline: none;
 }}
 QWidget#Root {{ background: transparent; }}
+/* the caption row paints nothing at all - text straight on the page (R-082) */
+QWidget#StatusStrip {{ background: transparent; border: 0; }}
 QToolTip {{
   background: {CARD};
   color: {INK};
@@ -105,7 +314,7 @@ QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
   border-radius: {RADIUS_CTRL}px;
   padding: 0 10px;
   min-height: {CTRL_H - 2}px;
-  selection-background-color: rgba(11, 122, 110, 60);
+  selection-background-color: rgba({TEAL_RGB}, 60);
   selection-color: {INK};
 }}
 QPlainTextEdit, QTextEdit {{ padding: 6px 10px; }}
@@ -170,13 +379,13 @@ QPushButton:disabled {{ color: {TEXT_DISABLED}; background: {WASH}; }}
 QPushButton#Primary {{
   color: #FFFFFF;
   font-weight: 650;
-  border: 1px solid rgba(11, 122, 110, 170);
+  border: 1px solid rgba({TEAL_RGB}, 170);
   background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-      stop:0 #10A794, stop:0.55 #4884F0, stop:1 #7455F5);
+      stop:0 {PRIMARY_A}, stop:0.55 {TEAL}, stop:1 {PRIMARY_B});
 }}
 QPushButton#Primary:hover {{
   background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-      stop:0 #12BB9F, stop:0.55 #5A94F8, stop:1 #8A6CFF);
+      stop:0 {PRIMARY_A}, stop:0.55 {TEAL}, stop:1 {PRIMARY_B});
 }}
 QPushButton#Primary:disabled {{ color: rgba(255, 255, 255, 180); border-color: {LINE}; }}
 QPushButton#Danger {{
@@ -228,7 +437,7 @@ QPushButton#Proto:hover {{ background: #F6F9FD; }}
 QPushButton#Proto:checked {{
   color: {INK};
   background: {TEAL_SOFT};
-  border: 1px solid rgba(11, 122, 110, 130);
+  border: 1px solid rgba({TEAL_RGB}, 130);
 }}
 
 /* ---------------------------------------------------------------- scrolling */
@@ -284,8 +493,9 @@ QCheckBox::indicator {{
 }}
 QCheckBox::indicator:hover {{ border-color: {TEAL}; }}
 QCheckBox::indicator:checked {{
-  background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #10A794, stop:1 #7455F5);
-  border-color: rgba(11, 122, 110, 160);
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+      stop:0 {PRIMARY_A}, stop:1 {PRIMARY_B});
+  border-color: rgba({TEAL_RGB}, 160);
 }}
 QProgressBar {{
   background: {WASH_HOVER}; border: 0; border-radius: 5px; height: 9px;
@@ -293,7 +503,8 @@ QProgressBar {{
 }}
 QProgressBar::chunk {{
   border-radius: 5px;
-  background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10A794, stop:1 #7455F5);
+  background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+      stop:0 {PRIMARY_A}, stop:1 {PRIMARY_B});
 }}
 QMenu {{
   background: {CARD}; border: 1px solid {LINE};

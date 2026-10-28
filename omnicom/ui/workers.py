@@ -35,6 +35,7 @@ class SerialBridge(QObject):
     stats = Signal(dict)
     record = Signal(dict)
     upload = Signal(dict)
+    txPrinted = Signal(bytes)
 
     def __init__(self, demo: bool = False) -> None:
         super().__init__()
@@ -54,6 +55,10 @@ class SerialBridge(QObject):
 
     def update_opts(self, opts: dict) -> None:
         self._submit(self.manager.update_opts, dict(opts))
+
+    def set_capture_dir(self, directory: str) -> None:
+        """Follow the folder chosen in Preferences (R-070)."""
+        self.recorder.set_directory(directory)
 
     def _submit(self, operation, *args) -> None:
         with self._operation_lock:
@@ -79,8 +84,11 @@ class SerialBridge(QObject):
         if kind == "rx":
             data = event["d"]
             if self.recorder.active:
-                self.recorder.write(data)
+                self.recorder.write(data, "rx")
             self.rx.emit(time.time() * 1000.0, data)
+        elif kind == "tx":
+            if self.recorder.active:
+                self.recorder.write(event.get("d") or b"", "tx")
         elif kind == "status":
             with self._operation_lock:
                 busy = self._pending > 0
@@ -93,6 +101,8 @@ class SerialBridge(QObject):
             self.record.emit(event)
         elif kind == "xf":
             self.upload.emit(event)
+        elif kind == "txprint":
+            self.txPrinted.emit(event.get("d") or b"")
 
     def state(self) -> dict:
         return self.manager.status()
