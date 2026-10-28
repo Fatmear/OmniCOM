@@ -131,7 +131,20 @@ TITLES = {
     "R-082": "底部说明行纯文字（无框 / 无底色）",
     "R-083": "免安装便携包（自带运行时，无需装依赖）",
     "R-084": "自绘圆角提示框（无白块 + 液态玻璃）",
+    "R-085": "任务栏最小化/恢复有收放动画（不是瞬间切换）",
+    "R-086": "便携包内含面向 AI 的 CLI 说明（MIT 许可）",
 }
+
+
+def readme_text() -> str:
+    """Both READMEs joined, so a licence/footer check covers either language."""
+    parts = []
+    for name in ("README.md", "README.en.md"):
+        path = os.path.join(ROOT, name)
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as handle:
+                parts.append(handle.read())
+    return "\n".join(parts)
 
 
 def add(req: str, name: str, ok: bool, detail: object = "") -> None:
@@ -391,6 +404,31 @@ def suite_visual() -> None:
 
     add("R-019", "仓库内没有自编译的 exe", not stray_exe(),
         ", ".join(stray_exe()[:3]))
+
+    # -- R-086: an agent that only has the unzipped folder must be able to learn
+    #    the whole interface.  The docs must exist, and the packaging scripts must
+    #    actually copy them (source-existence alone would not prove delivery).
+    docs_ok = []
+    for doc in ("CLI.md", "AI-GUIDE.md"):
+        path = os.path.join(ROOT, "docs", doc)
+        docs_ok.append(os.path.isfile(path) and os.path.getsize(path) > 800)
+    add("R-086", "仓库带 CLI.md 与 AI-GUIDE.md（给 AI 的接口说明）", all(docs_ok),
+        str(docs_ok))
+    packaging = ""
+    for name in ("make_pyz.py", "make_dist.py"):
+        with open(os.path.join(ROOT, "tools", name), encoding="utf-8") as handle:
+            packaging += handle.read()
+    add("R-086", "打包脚本会把 CLI.md / AI-GUIDE.md / LICENSE 一起复制",
+        "AI-GUIDE.md" in packaging and "CLI.md" in packaging
+        and "LICENSE" in packaging)
+    license_path = os.path.join(ROOT, "LICENSE")
+    licence_text = ""
+    if os.path.isfile(license_path):
+        with open(license_path, encoding="utf-8") as handle:
+            licence_text = handle.read()
+    add("R-086", "开源许可为 MIT（LICENSE + README 页脚）",
+        "MIT License" in licence_text and "WITHOUT WARRANTY OF ANY KIND" in licence_text
+        and "MIT" in readme_text(), "LICENSE")
     proc = run(["build.py"])
     add("R-019", "打包脚本默认拒绝执行（政策闸门 exit=3）", proc.returncode == 3,
         f"exit={proc.returncode}")

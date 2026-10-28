@@ -37,6 +37,11 @@ Rules
   `tr()`. Chinese mode must show **only** Chinese and English mode **only** English, context menus
   included (R-033). Never translate user data (command / group names). After touching copy, re-run
   `python tools/ui_selftest.py` (R-033 fails on any CJK left in the English UI).
+- The distribution documents itself (R-086): `omnicom.ui.main` forwards `argv[0] == "cli"` to
+  `omnicom.cli.main`, and `make_pyz`/`make_dist` copy `docs/CLI.md`, `docs/AI-GUIDE.md` and
+  `LICENSE` into the bundle. Never let the two CLI surfaces drift.
+- Window show/hide must go through `minimize_with_motion()` / `animate_show()`; the motion changes
+  the real geometry, so it has to restore `_motion_target` or the window shrinks each cycle (L-117).
 - The user manual lives in `omnicom/docs.py` and is the single source for both the Help dialog and
   `README.md` / `README.en.md` — regenerate with `python tools/make_readme.py` (R-034).
 - Plugins are self-contained folders (`plugin.json` + entry module) under `plugins/` or

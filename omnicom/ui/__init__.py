@@ -78,6 +78,14 @@ def run(argv: list[str] | None = None, demo: bool = False) -> int:
 def main(argv: list[str] | None = None) -> int:
     from .. import __version__
 
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Agents get the JSON CLI through the very same entry point: the shipped
+    # archive needs no second program to be explained to them (R-021/R-086).
+    if argv and argv[0] == "cli":
+        from ..cli import main as cli_main
+
+        return cli_main(argv[1:])
+
     parser = argparse.ArgumentParser(prog="omnicom",
                                      description="OmniCOM — All-in-One Embedded Serial Debugger")
     parser.add_argument("--demo", action="store_true",

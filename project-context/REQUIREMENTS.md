@@ -1,5 +1,5 @@
 # Current requirements
-Updated: 2026-10-27
+Updated: 2026-10-28
 
 Source of R-001..R-017: user request on 2026-10-27 (project kickoff). Do not weaken a MUST.
 
@@ -91,6 +91,8 @@ Source of R-001..R-017: user request on 2026-10-27 (project kickoff). Do not wea
 | R-082 | MUST | UI | The bottom caption row is **text only**: no frame, no fill, no plate - over a wallpaper or on the flat theme it paints nothing at all and the captions sit straight on the page (user, 2026-10-28) | GUI: the strip is a `CaptionStrip` that draws zero pixels (alpha 0 with and without a wallpaper), the captions use the primary ink (>= 4.5:1 on the darkest page) plus a white halo | active |
 | R-083 | MUST | Delivery | The shipped package is self-contained: it runs with **no extra installation** - no Python, no PySide6, no pip. `dist/OmniCOM/` carries the official CPython embeddable runtime, the trimmed Qt bindings and `OmniCOM.pyz`, so the same folder works on a machine that never had any of it, and it stays relocatable (user, 2026-10-28) | PACKAGE: `tools/make_dist.py --check` builds the folder and runs the packaged `--selftest` with the bundled runtime only (`-E -s`, so external site-packages cannot be reached); launchers call `runtime\pythonw.exe`; `paths.archive_dir/app_dir` keep assets, plugins and data beside the archive | active |
 | R-084 | MUST | UI | The hover tooltip is our own rounded card, not the platform `QToolTip`: nothing is drawn outside its rounded edge (no white block behind the corners), and over a wallpaper the card is liquid glass like the panes (user, 2026-10-28) | GUI: the popup's corner pixel is fully transparent while its body is opaque; with a wallpaper the card carries a glass slice the size of the card | active |
+| R-085 | MUST | UI | Minimising and restoring from the **taskbar icon** moves the window in and out with a short animation (fade + slight shrink, 150-180 ms) instead of snapping, matching how native Windows apps behave; the title-bar minimise button and Win+Down take the same path, and a restore must land back on the exact pre-minimise geometry (user, 2026-10-28) | GUI: `WM_SYSCOMMAND`/`SC_MINIMIZE` is intercepted (`nativeEvent` returns handled), opacity drops below 1 while the window is still visible and shrinks, then the window really minimises with opacity 1 and the original rect; restoring starts below 0.9 opacity and ends at the same rect | active |
+| R-086 | MUST | Delivery | The portable package **documents the CLI for agents**: `OmniCOM.cmd cli …` reaches the JSON interface from the same entry point, and the folder ships `CLI.md` + `AI-GUIDE.md` so an AI that only has the unzipped bundle can learn the whole contract. The project is released under the **MIT** licence (user, 2026-10-28) | GUI/CLI: `omnicom.ui.main` dispatches the `cli` subcommand and `cli info` returns one JSON document; `make_pyz`/`make_dist` copy `docs/CLI.md` and `docs/AI-GUIDE.md` (plus `LICENSE`) into the bundle; `LICENSE` contains the MIT text | active |
 
 Superseded:
 - R-049 tooltip-only notes → visible small text below the command; primary actions remain aligned on one line (user, 2026-10-27).

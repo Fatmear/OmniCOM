@@ -24,7 +24,8 @@ R-068 (equal side columns), R-069 (version 1.1.2), R-070 (capture folder),
 R-071 (accent + wallpaper), R-072 (live search append), R-076 (no extra console),
 R-077 (glass panes), R-078 (records folder), R-079 (note alignment), R-080 (1 s tooltip),
 R-081 (size budget + loss count), R-082 (text-only caption row), R-083 (self-contained
-package), R-084 (own rounded glass tooltip). Full list: `REQUIREMENTS.md`.
+package), R-084 (own rounded glass tooltip), R-085 (animated minimize/restore), R-086
+(shipped CLI docs + MIT licence). Full list: `REQUIREMENTS.md`.
 
 Verified in repository (2026-10-28):
 - `python tools/acceptance_test.py` → **335 checks, 0 failures, 0 uncovered,
@@ -88,5 +89,9 @@ Before: `.artifacts/ui-perf-before.json`; final: `.artifacts/ui-perf.json`.
 - 强调色只能用 `theme.set_accent()` 改令牌，不要在 QSS 里重新写死颜色（L-091）。
 - 面板玻璃只能走 `widgets.paint_glass()`，不要在 QSS 里写死白底（L-098/L-107）。
 - 三栏默认宽度必须等宽（L-086）。
+- 窗口显示/隐藏只能走 `minimize_with_motion()` / `animate_show()`：动画改的是真实几何，
+  结束后必须用 `_motion_target` 还原，否则每来一次窗口小一圈（L-117）。
+- 发行包必须自带 `CLI.md` / `AI-GUIDE.md` / `LICENSE`；`OmniCOM.cmd cli …` 与
+  `python -m omnicom.cli` 必须是同一个契约（R-086）。
 - 测试套件必须用自己的数据目录（`OMNICOM_DATA_DIR` → `.artifacts/test-data/…`），
   绝不允许写进仓库的 `omnicom-data/`；否则真实命令库会被污染、套件也不再可重复（L-116）。

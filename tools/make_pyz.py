@@ -100,9 +100,15 @@ def build(target: Path, *, stubs_only: bool = False) -> Path:
         shutil.copytree(ROOT / folder, destination,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     # The logo has to sit beside the archive: "About" and the window icon read it.
-    for asset in ("logo.png", "README.md", "README.en.md"):
+    for asset in ("logo.png", "README.md", "README.en.md", "LICENSE"):
         if (ROOT / asset).is_file():
             shutil.copy2(ROOT / asset, target / asset)
+    # The CLI contract has to travel with the program: an agent that only has the
+    # unzipped folder must be able to learn the whole interface from it (R-086).
+    for doc in ("CLI.md", "AI-GUIDE.md"):
+        source = ROOT / "docs" / doc
+        if source.is_file():
+            shutil.copy2(source, target / doc)
 
     (target / f"{NAME}.cmd").write_text(LAUNCHER, encoding="utf-8", newline="\r\n")
     (target / "console.cmd").write_text(CONSOLE_LAUNCHER, encoding="utf-8",

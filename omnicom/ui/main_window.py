@@ -4,12 +4,26 @@ from __future__ import annotations
 
 import codecs
 import contextlib
+import ctypes
+import ctypes.wintypes
 import os
 import subprocess
 import sys
 import time
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSettings, Qt, QTimer
+from PySide6.QtCore import (
+    QEasingCurve,
+    QEvent,
+    QParallelAnimationGroup,
+    QPoint,
+    QPointF,
+    QPropertyAnimation,
+    QRect,
+    QRectF,
+    QSettings,
+    Qt,
+    QTimer,
+)
 from PySide6.QtGui import QBrush, QColor, QIcon, QIntValidator, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -250,7 +264,7 @@ class TitleBar(GlassFrame):
 
         self.btn_min = GlyphButton(GlyphButton.MINIMIZE, self)
         self.btn_min.setToolTip(tr("win.minimize"))
-        self.btn_min.clicked.connect(window.showMinimized)
+        self.btn_min.clicked.connect(window.minimize_with_motion)
         layout.addWidget(self.btn_min)
 
         self.btn_max = GlyphButton(GlyphButton.MAXIMIZE, self)
@@ -426,6 +440,12 @@ class OmniWindow(QMainWindow):
         self._plugin_pages: dict[str, QWidget] = {}
         self._saved_split = False
         self._rx_queue: list[tuple[float, bytes]] = []
+        # Window show/hide motion (R-085): None = idle, otherwise the running
+        # QParallelAnimationGroup, plus the flag that says "we are on our way
+        # out", so a second click cannot start a second fade.
+        self._motion: QParallelAnimationGroup | None = None
+        self._minimizing = False
+        self._was_minimized = False
         self._rx_timer = QTimer(self)
         self._rx_timer.setSingleShot(True)
         self._rx_timer.setInterval(28)          # ~36 fps, cheaper than per-chunk
@@ -1990,10 +2010,163 @@ class OmniWindow(QMainWindow):
             self.showMaximized()
         self.titlebar.sync_max_button()
 
+    # ------------------------------------------------------- window motion
+    #: A translucent frameless window gets no DWM minimize animation, so the
+    #: taskbar icon used to snap the window in and out of existence.  We do the
+    #: motion ourselves: fade the layer alpha and shrink toward the bottom edge
+    #: (where the taskbar is), like a normal Windows app.  Durations match the
+    #: button motion in ``widgets.py`` (150-190 ms).
+    RESTORE_MS = 180
+    MINIMIZE_MS = 150
+    MOTION_SCALE = 0.955
+
+    @staticmethod
+    def _motion_rect(rect: QRect, factor: float) -> QRect:
+        """``rect`` scaled about its bottom-centre edge."""
+        width = max(320, int(rect.width() * factor))
+        height = max(240, int(rect.height() * factor))
+        return QRect(rect.x() + (rect.width() - width) // 2,
+                     rect.bottom() - height + 1, width, height)
+
+    def _stop_motion(self) -> None:
+        group, self._motion = getattr(self, "_motion", None), None
+        if group is not None:
+            group.stop()
+            group.deleteLater()
+
+    def _motion_group(self, start: QRect, end: QRect, fade_from: float,
+                      fade_to: float, duration: int) -> QParallelAnimationGroup:
+        group = QParallelAnimationGroup(self)
+        fade = QPropertyAnimation(self, b"windowOpacity", group)
+        fade.setDuration(duration)
+        fade.setEasingCurve(QEasingCurve.OutCubic)
+        fade.setStartValue(fade_from)
+        fade.setEndValue(fade_to)
+        group.addAnimation(fade)
+        # A maximized window must not be resized by an animation: Qt would drop
+        # the maximized state.  Fall back to a pure fade there.
+        if start != end:
+            move = QPropertyAnimation(self, b"geometry", group)
+            move.setDuration(duration)
+            move.setEasingCurve(QEasingCurve.OutCubic)
+            move.setStartValue(start)
+            move.setEndValue(end)
+            group.addAnimation(move)
+        return group
+
+    def _animatable(self) -> bool:
+        return not (self.isMaximized() or self.isFullScreen())
+
+    def minimize_with_motion(self) -> None:
+        """Fade out, then really minimize.
+
+        Reached from the title-bar button, the taskbar icon, Alt+Space and
+        Win+Down (both go through ``nativeEvent`` -> WM_SYSCOMMAND).
+        """
+        if getattr(self, "_minimizing", False) or not self.isVisible():
+            return
+        self._minimizing = True
+        self._stop_motion()
+        target = self.geometry()
+        # The shrink is a real resize, so the window has to be put back to
+        # this rect once it is hidden - otherwise every minimize/restore
+        # cycle would leave it one step smaller.
+        self._motion_target = target
+        start = target
+        end = self._motion_rect(target, self.MOTION_SCALE) \
+            if self._animatable() else target
+        group = self._motion_group(start, end, 1.0, 0.0, self.MINIMIZE_MS)
+        group.finished.connect(self._finish_minimize)
+        self._motion = group
+        group.start()
+
+    def _finish_minimize(self) -> None:
+        self._motion = None
+        if not self._minimizing:
+            self._restore_geometry()
+            self.setWindowOpacity(1.0)
+            return
+        self._minimizing = False
+        self._restore_geometry()
+        self.showMinimized()
+        # Never stay translucent while hidden: a restore that does not come
+        # through :meth:`animate_show` would otherwise show nothing at all.
+        self.setWindowOpacity(1.0)
+
+    def _restore_geometry(self) -> None:
+        target = getattr(self, "_motion_target", None)
+        self._motion_target = None
+        if target is not None and self.geometry() != target:
+            self.setGeometry(target)
+
+    def _cancel_minimize(self) -> None:
+        self._minimizing = False
+        self._stop_motion()
+        self._restore_geometry()
+        self.setWindowOpacity(1.0)
+
+    def animate_show(self) -> None:
+        """Fade and grow the window back in after a minimize."""
+        self._stop_motion()
+        if not self.isVisible():
+            self.setWindowOpacity(1.0)
+            return
+        target = self.geometry()
+        start = self._motion_rect(target, self.MOTION_SCALE) \
+            if self._animatable() else target
+        self.setWindowOpacity(0.0)
+        group = self._motion_group(start, target, 0.0, 1.0, self.RESTORE_MS)
+        group.finished.connect(self._finish_show)
+        self._motion = group
+        group.start()
+
+    def _finish_show(self) -> None:
+        self._motion = None
+        self.setWindowOpacity(1.0)
+
+    def event(self, event) -> bool:
+        # Touching the window while it fades out means "stay here": drop the
+        # pending minimize instead of continuing to disappear under the mouse.
+        # getattr: Qt delivers events while __init__ is still running.
+        if getattr(self, "_minimizing", False) \
+                and event.type() == QEvent.WindowActivate:
+            self._cancel_minimize()
+        return super().event(event)
+
+    def nativeEvent(self, event_type, message):
+        """Catch the Windows minimize request so it can animate out.
+
+        Qt hides the window the moment SC_MINIMIZE arrives, and a layered
+        (translucent) window gets no DWM animation, so the fade has to happen
+        *before* Qt acts - which means intercepting the message and minimizing
+        ourselves once the animation finished.  Any surprise in the native
+        struct falls through to Qt: a broken animation is acceptable, a broken
+        window is not.
+        """
+        try:
+            if bytes(event_type) != b"windows_generic_MSG":
+                return super().nativeEvent(event_type, message)
+            native = ctypes.wintypes.MSG.from_address(int(message))
+        except Exception:
+            return super().nativeEvent(event_type, message)
+        if native.message == 0x0112 and (int(native.wParam) & 0xFFF0) == 0xF020:
+            self.minimize_with_motion()
+            return True, 0
+        return super().nativeEvent(event_type, message)
+
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
-        if event.type() == QEvent.WindowStateChange and hasattr(self, "titlebar"):
+        if event.type() != QEvent.WindowStateChange:
+            return
+        if hasattr(self, "titlebar"):
             self.titlebar.sync_max_button()
+        if self.windowState() & Qt.WindowMinimized:
+            self._was_minimized = True
+            return
+        # Coming back from the taskbar: grow in instead of appearing at once.
+        if getattr(self, "_was_minimized", False):
+            self._was_minimized = False
+            self.animate_show()
 
     def closeEvent(self, event) -> None:
         self.command_store.flush()

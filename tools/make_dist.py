@@ -111,6 +111,7 @@ README = """OmniCOM {version} - 免安装版 / portable build
 3. 需要看报错时用 console.cmd（会保留命令行窗口）。
 4. 首次运行会在本目录生成 omnicom-data\\（收发记录、命令库、插件）。
 5. 整个文件夹可以随意拷贝到别的电脑或 U 盘，路径无关。
+6. 命令行接口：OmniCOM.cmd cli info（详细说明见 CLI.md 与 AI-GUIDE.md）。
 
 1. Double-click OmniCOM.cmd. No Python, PySide6 or other dependency is needed.
 2. Desktop icon: right-click OmniCOM.cmd -> Send to -> Desktop (create shortcut),
@@ -118,6 +119,7 @@ README = """OmniCOM {version} - 免安装版 / portable build
 3. Use console.cmd when you need to read a traceback.
 4. omnicom-data\\ (captures, commands, plugins) is created on the first run.
 5. The folder is relocatable - copy it anywhere, including a USB stick.
+6. Command line: OmniCOM.cmd cli info (see CLI.md and AI-GUIDE.md).
 """
 
 
@@ -251,8 +253,11 @@ def build(target: Path, version: str) -> Path:
 def verify(target: Path) -> int:
     """Run the packaged selftest with the bundled runtime only."""
     python = target / "runtime" / "python.exe"
+    # Inherited test variables would make the packaged selftest write its
+    # report into the bundle (or into the repo), so they are dropped here.
     env = {key: value for key, value in os.environ.items()
-           if key not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP")}
+           if key not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+                          "OMNICOM_DATA_DIR", "OMNICOM_SETTINGS_SUFFIX")}
     env["PYTHONIOENCODING"] = "utf-8"
     result = subprocess.run(
         [str(python), "-E", "-s", str(target / f"{NAME}.pyz"), "--selftest"],
@@ -270,10 +275,12 @@ def verify(target: Path) -> int:
 def archive(target: Path, version: str) -> Path:
     # 运行期数据（omnicom-data）是首次启动才生成的，打包前必须清掉，
     # 否则会把验证过程中产生的 selftest.json、日志与插件数据一并发出去。
-    runtime_data = target / "omnicom-data"
-    if runtime_data.exists():
-        shutil.rmtree(runtime_data)
-        print(f"== drop {runtime_data.relative_to(target.parent)} (created on first run)")
+    for stale in ("omnicom-data", ".artifacts"):
+        leftover = target / stale
+        if leftover.exists():
+            shutil.rmtree(leftover)
+            print(f"== drop {leftover.relative_to(target.parent)} "
+                  f"(created while verifying, not shipped)")
     zip_path = target.parent / f"{NAME}-{version}-win64"
     produced = shutil.make_archive(str(zip_path), "zip", target.parent, target.name)
     output = Path(produced)

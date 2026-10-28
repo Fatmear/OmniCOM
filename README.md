@@ -1,32 +1,175 @@
-# OmniCOM 1.1.2
+<div align="center">
 
-OmniCOM 是一个原生 Python 串口工作台：不打包 exe、不起本地服务、不依赖浏览器，
-双击 `start.cmd` 就能用。
+<img src="assets/logo-64.png" width="96" alt="OmniCOM">
 
-![logo](assets/logo-64.png)
+# OmniCOM
 
-* 白色主题、自绘窗口按钮、可折叠左右两栏
-* 串口日志 / 终端 / 文件传输（XMODEM / YMODEM / ZMODEM）三个内置页面
-* 扩展命令可分组、可备注、可单条或整组导出给别人导入
-* 关键字搜索支持普通、模糊、整词、正则四种匹配，并可切换是否区分大小写
-* 插件系统：一个插件一个目录，复制到另一台电脑的 `plugins/` 再刷新即可
-* 中英文两种界面语言，中文环境只显示中文，英文环境只显示英文
+**嵌入式串口调试工作台：一个窗口替代串口助手、终端、传输工具与脚本接口。**
 
-## 运行
+![version](https://img.shields.io/badge/version-1.1.2-2f6fed)![license](https://img.shields.io/badge/license-MIT-2ea44f)![python](https://img.shields.io/badge/python-3.13-3776ab)![ui](https://img.shields.io/badge/ui-Qt%20%2F%20PySide6-41cd52)![platform](https://img.shields.io/badge/platform-Windows-0078d4)
+
+[快速开始](#快速开始) · [功能](#功能) · [便携包](#免安装便携包) · [命令行接口](#命令行接口) · [使用说明](#使用说明) · [验证](#验证)
+
+</div>
+
+---
+
+## 为什么用它
+
+嵌入式调试通常是四五个工具来回切换：一个看串口、一个发命令、一个传固件，
+再开一个脚本记日志。OmniCOM 把这些收进一个原生窗口里，并且**不引入任何运行时负担**——
+没有本地 web 服务、没有浏览器、没有随包分发的自编译可执行文件。
+
+| | 常见做法 | OmniCOM |
+| --- | --- | --- |
+| 界面 | 网页套壳 / 单个文本框 | 原生 Qt 窗口，白色主题，液态玻璃面板 |
+| 命令管理 | 手写脚本或记事本 | 可分组、可备注、可导入导出的命令库 |
+| 传输 | 另开协议工具 | 内置 XMODEM / YMODEM / ZMODEM |
+| 自动化 | 只能手点 | 单 JSON 输出的 CLI，供 AI 与脚本直接调用 |
+| 分发 | 装 Python、装依赖 | 免安装便携包，解压即用 |
+
+## 功能
+
+<table>
+<tr><td width="50%" valign="top">
+
+**收发自检**
+
+- 毫秒时间戳、方向标记、不可见字符可视化
+- HEX 收发、定时发送、命令延时
+- 按**字节预算**缓冲日志（默认 100 MB）
+- 超限时弃旧留新，丢弃行数在界面可见
+- 绝不静默丢字节，任何丢失都会计数上报
+
+**命令库**
+
+- 分组折叠即点即应，不写盘、不重建
+- 每条命令可备注，注释与命令左对齐
+- 单条 / 整组导出导入，同名分组自动合并
+- 粘贴多行文本自动拆分入列
+
+</td><td width="50%" valign="top">
+
+**传输与终端**
+
+- XMODEM / YMODEM / ZMODEM 收发
+- 发送文件按普通发送写入日志并显示进度
+- 终端页支持常见 ANSI 光标与颜色指令
+- 收发双向同时记录到同一个文件
+
+**工程化**
+
+- 中英文界面严格隔离，无混排
+- 插件系统：一个目录一个插件，复制即可用
+- 关键字搜索支持普通 / 模糊 / 整词 / 正则
+- 快捷启动上下两区，多窗口独立绑定
+
+</td></tr>
+</table>
+
+## 快速开始
+
+```bash
+git clone https://github.com/Fatmear/OmniCOM.git
+cd OmniCOM
+start.cmd                  # 或 python run.py
+```
+
+需要 Python 3.13 与 PySide6：
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+没有硬件也能完整试用：
+
+```bash
+python run.py --demo       # 内置虚拟串口 DEMO：回 AT 指令并周期性输出遥测
+```
+
+## 免安装便携包
+
+```bash
+python tools/make_dist.py --check --zip
+```
+
+产物：
 
 ```
-start.cmd                       # 或 python run.py
-python run.py --demo            # 没有硬件时使用虚拟串口 DEMO
+dist/OmniCOM/                 # 98 MB，自带运行时
+├── OmniCOM.cmd              # 双击启动（无控制台窗口）
+├── console.cmd              # 同上，保留控制台以便看报错
+├── OmniCOM.pyz              # 程序本体（同时是一份可读的源码归档）
+├── CLI.md / AI-GUIDE.md     # 给 AI 与脚本用的命令行接口说明
+├── runtime/                 # 官方 CPython embeddable + 裁剪后的 Qt 绑定
+├── assets/  plugins/  logo.png
+└── README.md / README.en.md
+
+dist/OmniCOM-1.1.2-win64.zip
 ```
+
+解压后直接双击 `OmniCOM.cmd`，目标机**不需要安装 Python、PySide6 或任何依赖**，
+整个目录可以拷到 U 盘或另一台电脑。首次运行会在旁边生成 `omnicom-data/`。
+
+## 命令行接口
+
+同一个入口也是机器接口——`stdout` 只有一个 JSON 文档，可直接 `json.loads` 或 `| jq`：
+
+```bash
+OmniCOM.cmd cli info                      # 环境自检
+OmniCOM.cmd cli ports                     # 列出串口
+OmniCOM.cmd cli send --port COM3 --data "AT" --expect OK --wait 2
+OmniCOM.cmd cli monitor --port COM3 --duration 5 --grep ERROR
+OmniCOM.cmd cli transfer --port COM3 --proto y --dir send --file app.bin
+OmniCOM.cmd cli session --port COM3 --script steps.json   # AI 主入口
+OmniCOM.cmd cli selftest                  # 无硬件端到端自检
+```
+
+从源码运行等价于 `python -m omnicom.cli`。完整参考见 [`docs/CLI.md`](docs/CLI.md)。
+
+## 架构
+
+```mermaid
+flowchart LR
+    subgraph Core["串口核心（无界面依赖）"]
+        PM[PortManager<br/>读线程 · 重连 · 统计]
+        REC[Recorder<br/>裸字节流落盘]
+        XF[X/Y/ZMODEM]
+    end
+    PM -->|Qt 信号| BR[SerialBridge]
+    BR --> UI[OmniWindow<br/>日志 · 终端 · 传输 · 命令库]
+    PM --> REC
+    PM --> XF
+    CLI[omnicom.cli<br/>单 JSON 输出] --> PM
+    AI([AI / 脚本]) --> CLI
+```
+
+界面只通过 `SerialBridge` 的信号与串口交互，驱动的打开、关闭与线程回收都发生在
+界面线程之外——窗口卡住不会连带丢失接收数据。
 
 ## 验证
 
+```bash
+python tools/acceptance_test.py     # 需求对账：每条需求都有可执行证据
+python tools/ui_selftest.py         # GUI 端到端（离屏，无需硬件）
+python tools/protocol_selftest.py   # X / Y / ZMODEM 内存环回
+python -m ruff check .              # 代码风格
 ```
-python tools/protocol_selftest.py     # X/Y/ZMODEM 回环
-python tools/ui_selftest.py           # GUI 验收
-python tools/acceptance_test.py       # 全需求验收
-python -m ruff check .
-```
+
+需求条目在 `project-context/REQUIREMENTS.md`，历史缺陷与结论在
+`project-context/LEDGER.md`。
+
+## 数据位置
+
+| 路径 | 内容 |
+| --- | --- |
+| `omnicom-data/logs/` | 接收记录（原始字节） |
+| `omnicom-data/received/` | 协议接收到的文件 |
+| `omnicom-data/commands.json` | 扩展命令与分组 |
+| `omnicom-data/plugins/` | 后加进来的插件 |
+| `omnicom-data/plugin-data/<id>/` | 每个插件自己的数据 |
+
+可用环境变量 `OMNICOM_DATA_DIR` 把整份数据放到别处。
 
 ## 使用说明
 
@@ -111,16 +254,13 @@ python -m ruff check .
 * 右下角「记录目录」显示的就是当前实际保存收发记录的位置，点「打开目录」会直接打开它。
 * `omnicom-data/commands.json` 扩展命令；`omnicom-data/plugins/` 后加的插件。
 
-## 数据位置
-
-| 路径 | 内容 |
-| --- | --- |
-| `omnicom-data/logs/` | 接收记录（原始字节） |
-| `omnicom-data/received/` | 协议接收到的文件 |
-| `omnicom-data/commands.json` | 扩展命令与分组 |
-| `omnicom-data/plugins/` | 后加进来的插件 |
-| `omnicom-data/plugin-data/<id>/` | 每个插件自己的数据 |
+---
 
 ## 许可
 
-内部工具，未开源。
+MIT License —— 见 [`LICENSE`](LICENSE)。可自由用于商业项目、修改与再分发，
+请保留版权与许可声明。
+
+<div align="center">
+<sub>用 Qt / PySide6 构建 · 为嵌入式调试而生</sub>
+</div>

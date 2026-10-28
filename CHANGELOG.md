@@ -7,6 +7,12 @@
 
 ### 新增
 
+- **任务栏收放动画**：最小化与恢复不再瞬间切换。窗口淡出并轻微向任务栏方向收拢
+  （150 ms），动画结束后才真正最小化；从任务栏恢复时淡入放大（180 ms）。任务栏图标、
+  标题栏按钮与 Win+Down 走同一条路径，恢复后几何回到最小化前的原位。
+- **面向 AI 的命令行说明随包分发**：`OmniCOM.cmd cli …` 从同一个入口进入 JSON 接口，
+  便携包内附 `CLI.md` 与 `AI-GUIDE.md`（契约、子命令、错误处理、无硬件自检），
+  只拿到解压目录的智能体也能完整使用。
 - **免安装便携包**：`python tools/make_dist.py --check --zip` 产出自带 CPython
   运行时与全部依赖的 `dist/OmniCOM/`（98 MB，zip 40 MB）。目标机不需要安装
   Python、PySide6 或任何包，双击 `OmniCOM.cmd` 即可运行，整个目录可任意拷贝。
@@ -28,6 +34,10 @@
   插件页图标全部由它生成。
 - 裁剪掉未使用的 Qt 模块（Quick / QML / Designer / 3D / WebEngine / Multimedia /
   Charts 等），PySide6 体积由 171.5 MB 降到 77 MB。
+
+### 许可
+
+MIT License，见 `LICENSE`。可自由用于商业项目、修改与再分发，保留版权与许可声明即可。
 
 ### 验证
 

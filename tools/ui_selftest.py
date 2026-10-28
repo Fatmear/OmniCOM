@@ -610,6 +610,102 @@ def main() -> int:
         next_()
 
 
+    def step_window_motion(next_):
+        """R-085: minimize/restore animates (fade + shrink) instead of snapping."""
+        import ctypes
+        import ctypes.wintypes
+
+        window.showNormal()
+        window.resize(1200, 800)
+        app.processEvents()
+        QTest.qWait(80)
+        resting = window.geometry()
+
+        # A bare emit would prove nothing: Qt swallows signals nobody listens to.
+        try:
+            window.titlebar.btn_min.clicked.disconnect(window.minimize_with_motion)
+            wired = True
+        except (RuntimeError, TypeError):
+            wired = False
+        check("R-085 标题栏最小化按钮接的是动画入口（不是 showMinimized）", wired)
+        check("R-085 收起/展开时长在 100~300ms（有收放感又不拖沓）",
+              100 <= window.MINIMIZE_MS <= 300 and 100 <= window.RESTORE_MS <= 300,
+              f"{window.MINIMIZE_MS}/{window.RESTORE_MS} ms")
+
+        # The real taskbar path: WM_SYSCOMMAND / SC_MINIMIZE.  Feeding the
+        # message struct straight into nativeEvent tests the interception
+        # without needing a visible desktop window.
+        message = ctypes.wintypes.MSG()
+        message.message = 0x0112
+        message.wParam = 0xF020
+        handled, _result = window.nativeEvent(b"windows_generic_MSG",
+                                              ctypes.addressof(message))
+        check("R-085 任务栏最小化被拦截并改为播放动画", bool(handled),
+              f"handled={handled} minimizing={getattr(window, '_minimizing', None)}")
+
+        QTest.qWait(50)
+        mid_opacity = window.windowOpacity()
+        mid = window.geometry()
+        check("R-085 收起过程中窗口仍在、正在变淡变小",
+              not window.isMinimized() and mid_opacity < 1.0
+              and mid.height() < resting.height() and mid.width() < resting.width(),
+              f"opacity={mid_opacity:.2f} {mid.width()}x{mid.height()} "
+              f"(resting {resting.width()}x{resting.height()})")
+
+        for _tick in range(25):
+            if window.isMinimized():
+                break
+            QTest.qWait(20)
+        check("R-085 动画结束后真的最小化，且不透明、几何回到原位",
+              window.isMinimized() and window.windowOpacity() >= 0.99
+              and window.geometry() == resting,
+              f"min={window.isMinimized()} opacity={window.windowOpacity():.2f} "
+              f"{window.geometry()} vs {resting}")
+
+        window.showNormal()
+        app.processEvents()
+        first = window.windowOpacity()
+        # Opacity reaches 1.0 one frame before the geometry does, so wait for
+        # the whole group instead of comparing mid-flight.
+        for _tick in range(25):
+            if getattr(window, "_motion", None) is None and window.windowOpacity() >= 0.99:
+                break
+            QTest.qWait(20)
+        check("R-085 从任务栏恢复是淡入放大（不是瞬间出现）",
+              first < 0.9 and window.windowOpacity() >= 0.99
+              and not window.isMinimized() and window.geometry() == resting,
+              f"first={first:.2f} final={window.windowOpacity():.2f} "
+              f"{window.geometry()} vs {resting}")
+        next_()
+
+    def step_cli_bridge(next_):
+        """R-086: ``OmniCOM.cmd cli …`` and ``python -m omnicom.cli`` agree."""
+        import contextlib
+        import io
+        import json
+
+        from omnicom import cli as cli_module
+        from omnicom.ui import main as ui_main
+
+        # The dispatch is what the shipped AI guide tells an agent to use, so the
+        # proof is a real call - not the presence of a string in the source.
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = ui_main(["cli", "info"])
+        payload = {}
+        with contextlib.suppress(json.JSONDecodeError):
+            payload = json.loads(buffer.getvalue().strip().splitlines()[-1] or "{}")
+        check("R-086 同一个入口支持 cli 子命令（单 JSON 输出）",
+              code == 0 and payload.get("ok") is True
+              and payload.get("demo_port") == "DEMO",
+              buffer.getvalue().strip()[:110])
+        check("R-086 打包后会带上 AI 用的 CLI 说明",
+              all(os.path.isfile(os.path.join(ROOT, "docs", name))
+                  for name in ("CLI.md", "AI-GUIDE.md"))
+              and hasattr(cli_module, "main"),
+              "docs/CLI.md + docs/AI-GUIDE.md")
+        next_()
+
     runner.add("ports", step_ports)
     runner.add("connected", step_connected)
     runner.add("rx", step_rx)
@@ -2823,6 +2919,8 @@ def main() -> int:
     runner.add("R-056 group_unique", step_group_unique)
     runner.add("R-057 connection_colours", step_connection_colours)
     runner.add("R-058 motion_buttons", step_motion_buttons)
+    runner.add("R-085 window_motion", step_window_motion)
+    runner.add("R-086 cli_bridge", step_cli_bridge)
 
     if "--only" in sys.argv:
         target = sys.argv[sys.argv.index("--only") + 1]
