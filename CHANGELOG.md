@@ -36,12 +36,14 @@
 - `python -m ruff check .` 干净；协议自检 23/23；对比度审计 15/15 ≥ 4.5:1。
 - 打包自检：`python tools/make_dist.py --check --zip` 使用包内运行时（外部
   site-packages 被 `-E -s` 隔离）跑通 `--selftest`，并验证真实窗口可启动。
+- 发布包不含运行期数据：打包脚本在压缩前会删除验证过程产生的 `omnicom-data\`，
+  用户首次启动时才生成。
 
 ### 发布物
 
 | 文件 | 说明 |
 | --- | --- |
-| `OmniCOM-1.1.2-win64.zip` | 解压后双击 `dist/OmniCOM/OmniCOM.cmd`，无需安装任何依赖 |
+| `OmniCOM-1.1.2-win64.zip` | 解压后双击 `OmniCOM/OmniCOM.cmd`，无需安装任何依赖 |
 
 ## v1.1.0 — 2026-10-27
 

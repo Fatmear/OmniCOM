@@ -18,6 +18,8 @@ Rules
   `python tools/contrast_audit.py` (light-theme text contrast must stay >= 4.5:1).
   GUI checks must start with their `R-0xx` id — an un-mapped check fails the run.
 - Lint: `python -m ruff check .` must be clean (config in `pyproject.toml`).
+  Both harnesses set `OMNICOM_DATA_DIR` to a wiped `.artifacts/test-data/<suite>` folder, so a run
+  never touches the repo `omnicom-data/` (command library, captures) and stays repeatable (L-116).
   Test harnesses use `OMNICOM_SETTINGS_SUFFIX` so they never touch the real UI settings.
 - Before ending a session: replace `HANDOFF.md`, append closed items to `LEDGER.md`.
 - CLI for agents: `python -m omnicom.cli <ports|info|send|read|monitor|send-file|transfer|session|selftest>`,

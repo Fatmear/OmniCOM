@@ -50,8 +50,16 @@ def web_dir() -> str:
 
 
 def data_dir() -> str:
-    """Writable directory for logs and received files."""
-    path = os.path.join(app_dir(), "omnicom-data")
+    """Writable directory for logs, captures, plugins and settings data.
+
+    ``OMNICOM_DATA_DIR`` relocates it.  The test harnesses rely on that:
+    a suite run must never touch the user's real command library or
+    capture folder, and it has to start from a clean folder every time
+    (L-116).
+    """
+    override = (os.environ.get("OMNICOM_DATA_DIR") or "").strip()
+    path = (os.path.abspath(override) if override
+            else os.path.join(app_dir(), "omnicom-data"))
     os.makedirs(path, exist_ok=True)
     return path
 

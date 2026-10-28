@@ -22,6 +22,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -29,6 +30,15 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
+
+# Isolated, freshly wiped runtime data for the whole run: the suite writes
+# captures and commands, so sharing the user's folder both polluted real
+# data and made repeated runs fail (L-116).  Children inherit this value and
+# replace it with their own scratch folder.
+_DATA_DIR = os.path.join(ROOT, ".artifacts", "test-data", "acceptance")
+shutil.rmtree(_DATA_DIR, ignore_errors=True)
+os.environ["OMNICOM_DATA_DIR"] = _DATA_DIR
+os.makedirs(_DATA_DIR, exist_ok=True)
 
 from omnicom import __version__  # noqa: E402
 from omnicom.ui.main_window import OmniWindow, TitleBar  # noqa: E402
@@ -118,8 +128,8 @@ TITLES = {
     "R-079": "命令注释与命令文字左对齐",
     "R-080": "图标提示 1 秒后出现",
     "R-081": "日志按大小缓冲（默认 100MB / 上限 500MB，弃旧留新）",
-    "R-082": "底部状态栏也是液态玻璃",
-    "R-083": "免 exe 分发（pyz + cmd）",
+    "R-082": "底部说明行纯文字（无框 / 无底色）",
+    "R-083": "免安装便携包（自带运行时，无需装依赖）",
     "R-084": "自绘圆角提示框（无白块 + 液态玻璃）",
 }
 

@@ -268,6 +268,12 @@ def verify(target: Path) -> int:
 
 
 def archive(target: Path, version: str) -> Path:
+    # 运行期数据（omnicom-data）是首次启动才生成的，打包前必须清掉，
+    # 否则会把验证过程中产生的 selftest.json、日志与插件数据一并发出去。
+    runtime_data = target / "omnicom-data"
+    if runtime_data.exists():
+        shutil.rmtree(runtime_data)
+        print(f"== drop {runtime_data.relative_to(target.parent)} (created on first run)")
     zip_path = target.parent / f"{NAME}-{version}-win64"
     produced = shutil.make_archive(str(zip_path), "zip", target.parent, target.name)
     output = Path(produced)

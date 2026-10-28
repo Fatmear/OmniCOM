@@ -28,7 +28,8 @@ package), R-084 (own rounded glass tooltip). Full list: `REQUIREMENTS.md`.
 
 Verified in repository (2026-10-28):
 - `python tools/acceptance_test.py` → **335 checks, 0 failures, 0 uncovered,
-  84 requirements, ALL REQUIREMENTS VERIFIED** (`.artifacts/acceptance.json`, 2026-10-28 14:23:19).
+  84 requirements, ALL REQUIREMENTS VERIFIED** (`.artifacts/acceptance.json`, 2026-10-28 14:54:01),
+  reproduced 3× in a row after the harness isolation fix (L-116).
 - GUI suite: **286/286**, including the buffer budget, the text-only strip and the tooltip card.
 - `python -m ruff check .` → All checks passed; `tools/protocol_selftest.py` → 23/23;
   `tools/contrast_audit.py` → 15/15 ≥ 4.5:1; READMEs regenerated from `docs.py`.
@@ -87,3 +88,5 @@ Before: `.artifacts/ui-perf-before.json`; final: `.artifacts/ui-perf.json`.
 - 强调色只能用 `theme.set_accent()` 改令牌，不要在 QSS 里重新写死颜色（L-091）。
 - 面板玻璃只能走 `widgets.paint_glass()`，不要在 QSS 里写死白底（L-098/L-107）。
 - 三栏默认宽度必须等宽（L-086）。
+- 测试套件必须用自己的数据目录（`OMNICOM_DATA_DIR` → `.artifacts/test-data/…`），
+  绝不允许写进仓库的 `omnicom-data/`；否则真实命令库会被污染、套件也不再可重复（L-116）。
