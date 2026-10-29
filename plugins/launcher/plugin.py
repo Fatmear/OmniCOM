@@ -495,7 +495,12 @@ class LauncherPage(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh_running)
-        self._timer.start(4000)
+        self._timer.setInterval(4000)
+        # The scan walks every window and process through ctypes, which holds
+        # the interpreter lock for long stretches (L-130).  It therefore only
+        # runs while this page is on screen; ``showEvent`` starts it again.
+        if self.isVisible():
+            self._timer.start()
 
         api.on_language(self._retranslate)
         self._rebuild()
@@ -617,6 +622,17 @@ class LauncherPage(QWidget):
             self._shown = True
             self._columns = None
             self._rebuild()
+        # The process scan is expensive and holds the interpreter lock (L-130),
+        # so it only runs while this page is on screen.
+        if hasattr(self, "_timer") and not self._timer.isActive():
+            self._timer.start()
+            self.refresh_running()
+
+    # -- page visibility ---------------------------------------------------
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        if hasattr(self, "_timer"):
+            self._timer.stop()
 
     def _update_count(self) -> None:
         running = sum(self._running_of(app) for app in self.apps)

@@ -84,7 +84,78 @@ cd /d "%~dp0"
 set PYTHONIOENCODING=utf-8
 set PYTHONHOME=
 set PYTHONPATH=
+rem Agents call `OmniCOM.cmd cli ...` and expect the JSON on stdout.  `start`
+rem detaches the process, so pythonw.exe had nowhere to print and the command
+rem looked like it silently did nothing (L-146): the cli sub-command runs
+rem python.exe in the foreground instead and passes the exit code through.
+if /i "%~1"=="cli" goto cli
 start "" "runtime\\pythonw.exe" "OmniCOM.pyz" %*
+goto :eof
+:cli
+"runtime\\python.exe" "OmniCOM.pyz" %*
+exit /b %ERRORLEVEL%
+"""
+
+CONSOLE = """@echo off
+rem Same as OmniCOM.cmd but keeps a console, so errors stay visible.
+setlocal
+cd /d "%~dp0"
+set PYTHONIOENCODING=utf-8
+set PYTHONHOME=
+set PYTHONPATH=
+"runtime\\python.exe" "OmniCOM.pyz" %*
+echo.
+echo [OmniCOM] exited with code %ERRORLEVEL%
+pause
+endlocal
+"""
+
+SHORTCUT = """@echo off
+rem Create a desktop shortcut named OmniCOM that uses the app icon (R-097).
+rem The shortcut points at runtime\\pythonw.exe, so no console window appears.
+setlocal
+cd /d "%~dp0"
+set PYTHONIOENCODING=utf-8
+set PYTHONHOME=
+set PYTHONPATH=
+"runtime\\python.exe" "OmniCOM.pyz" shortcut %*
+echo.
+pause
+endlocal
+"""
+
+README = """OmniCOM {version} - 免安装版 / portable build
+============================================
+
+1. 双击 OmniCOM.cmd 启动，不需要安装 Python、PySide6 或任何依赖。
+2. 想放桌面：双击「桌面快捷方式.cmd」一步搞定（名字就是 OmniCOM，图标就是软件图标）；
+   OmniCOM.cmd 放在哪里都行，快捷方式会跟着走，路径换了重新双击一次即可。
+3. 需要看报错时用 console.cmd（会保留命令行窗口）。
+4. 首次运行会在本目录生成 omnicom-data\\（收发记录、命令库、插件）。
+5. 整个文件夹可以随意拷贝到别的电脑或 U 盘，路径无关。
+6. 命令行接口：OmniCOM.cmd cli info（详细说明见 CLI.md 与 AI-GUIDE.md）。
+
+1. Double-click OmniCOM.cmd. No Python, PySide6 or other dependency is needed.
+2. Desktop icon: double-click "Create desktop shortcut.cmd" - the shortcut is
+   named OmniCOM and uses the application icon; it follows this folder, so just
+   double-click it again after moving the folder.
+3. Use console.cmd when you need to read a traceback.
+4. omnicom-data\\ (captures, commands, plugins) is created on the first run.
+5. The folder is relocatable - copy it anywhere, including a USB stick.
+6. Command line: OmniCOM.cmd cli info (see CLI.md and AI-GUIDE.md).
+"""
+
+SHORTCUT = """@echo off
+rem Create a desktop shortcut named OmniCOM that uses the app icon (R-097).
+rem The shortcut points at runtime\\pythonw.exe, so no console window appears.
+setlocal
+cd /d "%~dp0"
+set PYTHONIOENCODING=utf-8
+set PYTHONHOME=
+set PYTHONPATH=
+"runtime\\python.exe" "OmniCOM.pyz" shortcut %*
+echo.
+pause
 endlocal
 """
 
@@ -106,16 +177,17 @@ README = """OmniCOM {version} - 免安装版 / portable build
 ============================================
 
 1. 双击 OmniCOM.cmd 启动，不需要安装 Python、PySide6 或任何依赖。
-2. 想放桌面：右键 OmniCOM.cmd -> 发送到 -> 桌面快捷方式，
-   再到快捷方式属性里把「运行方式」设为「最小化」，图标可自行更换。
+2. 想放桌面：双击「桌面快捷方式.cmd」一步搞定（名字就是 OmniCOM，图标就是软件图标）；
+   OmniCOM.cmd 放在哪里都行，快捷方式会跟着走，路径换了重新双击一次即可。
 3. 需要看报错时用 console.cmd（会保留命令行窗口）。
 4. 首次运行会在本目录生成 omnicom-data\\（收发记录、命令库、插件）。
 5. 整个文件夹可以随意拷贝到别的电脑或 U 盘，路径无关。
 6. 命令行接口：OmniCOM.cmd cli info（详细说明见 CLI.md 与 AI-GUIDE.md）。
 
 1. Double-click OmniCOM.cmd. No Python, PySide6 or other dependency is needed.
-2. Desktop icon: right-click OmniCOM.cmd -> Send to -> Desktop (create shortcut),
-   then set the shortcut's Run option to Minimized.
+2. Desktop icon: double-click "Create desktop shortcut.cmd" - the shortcut is
+   named OmniCOM and uses the application icon; it follows this folder, so just
+   double-click it again after moving the folder.
 3. Use console.cmd when you need to read a traceback.
 4. omnicom-data\\ (captures, commands, plugins) is created on the first run.
 5. The folder is relocatable - copy it anywhere, including a USB stick.
@@ -239,6 +311,11 @@ def build(target: Path, version: str) -> Path:
 
     (target / f"{NAME}.cmd").write_text(LAUNCHER, encoding="utf-8", newline="\r\n")
     (target / "console.cmd").write_text(CONSOLE, encoding="utf-8", newline="\r\n")
+    # One-click desktop shortcut, with the app name and the app icon (R-097).
+    (target / "桌面快捷方式.cmd").write_text(SHORTCUT, encoding="utf-8",
+                                             newline="\r\n")
+    (target / "Create desktop shortcut.cmd").write_text(SHORTCUT, encoding="utf-8",
+                                                        newline="\r\n")
     (target / "README.txt").write_text(README.format(version=version),
                                        encoding="utf-8", newline="\r\n")
     for stale in ("HOW-TO-RUN.txt", "start-console.cmd"):

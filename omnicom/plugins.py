@@ -90,9 +90,12 @@ class PluginApi(QObject):
         self.info = info
         self._notify = notify
         self._log_line = log_line
-        self.settings = QSettings(f"OmniCOM/plugins/{info.id}", "OmniCOM")
         self._dir = os.path.join(paths.data_dir(), "plugin-data", info.id)
         os.makedirs(self._dir, exist_ok=True)
+        # A plugin's state lives next to its own data, not in the registry, so the
+        # whole portable folder stays self-contained (R-088).
+        self.settings = QSettings(os.path.join(self._dir, "settings.ini"),
+                                  QSettings.IniFormat)
 
     # ------------------------------------------------------------------ data
     @property

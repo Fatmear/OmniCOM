@@ -11,7 +11,14 @@ from collections.abc import Iterable
 from datetime import datetime
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QKeySequence,
+    QTextCharFormat,
+    QTextCursor,
+    QTextOption,
+)
 from PySide6.QtWidgets import QApplication, QMenu, QPlainTextEdit, QWidget
 
 from . import theme
@@ -94,6 +101,9 @@ class LogView(QPlainTextEdit):
     findRequested = Signal(str)
     clearRequested = Signal()
     latestRequested = Signal()
+    #: Emitted with the new pixel size after a Ctrl+wheel zoom, so the window can
+    #: persist it (R-096).
+    fontZoomed = Signal(int)
 
     def __init__(self, parent: QWidget | None = None, show_dir: bool = True,
                  pixel_size: int = 13) -> None:
@@ -102,18 +112,21 @@ class LogView(QPlainTextEdit):
         self.show_dir = show_dir
         self.setReadOnly(True)
         self.setUndoRedoEnabled(False)
-        self.setLineWrapMode(QPlainTextEdit.NoWrap)
+        # A line wider than the view wraps instead of scrolling sideways
+        # (R-087): a serial payload has no meaningful "column 200", so a
+        # horizontal scrollbar only hides the data.
+        #
+        # ``WrapAnywhere``, not ``WrapAtWordBoundaryOrAnywhere``: the latter moves
+        # a whole word to the next line when it does not fit the remainder of the
+        # current one.  A serial payload is one enormous "word", so the timestamp
+        # and the direction marker stayed alone on the first line and the data
+        # started on the second - the user's "发和后面的内容不在一行" (L-138).
+        self.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.setWordWrapMode(QTextOption.WrapAnywhere)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setFrameShape(QPlainTextEdit.NoFrame)
-        self.setWordWrapMode(self.wordWrapMode())
-        self.setFont(theme.mono_font(pixel_size))
-        # The font *must* also be declared in the widget stylesheet: the global
-        # ``*`` selector in app_stylesheet() wins over setFont(), which left the
-        # log rendering in the proportional UI face.
-        self.setStyleSheet(
-            f"QPlainTextEdit#Log {{ background: transparent; border: 0;"
-            f' font-family: "{theme.resolve_mono()}"; font-size: {pixel_size}px;'
-            " padding: 2px 10px 8px 12px;"
-            " selection-background-color: rgba(11, 122, 110, 60); }")
+        self._font_px = int(pixel_size)
+        self._apply_font()
         self.show_ts = True
         self.show_ctrl = False
         self.autoscroll = True
@@ -147,6 +160,63 @@ class LogView(QPlainTextEdit):
             fmt.setFontWeight(QFont.DemiBold)
         fmt.setFontItalic(italic)
         return fmt
+
+    # ------------------------------------------------------------------ font
+    def _apply_font(self) -> None:
+        """Push the current family/size into both the QFont and the stylesheet.
+
+        The font *must* also be declared in the widget stylesheet: the global
+        ``*`` selector in app_stylesheet() wins over setFont(), which left the log
+        rendering in the proportional UI face (L-032).  That is also why zooming
+        has to rewrite the stylesheet, not just setFont().
+        """
+        family = theme.resolve_mono()
+        self.setFont(theme.mono_font(self._font_px))
+        self.setStyleSheet(
+            f"QPlainTextEdit#Log {{ background: transparent; border: 0;"
+            f' font-family: "{family}"; font-size: {self._font_px}px;'
+            " padding: 2px 10px 8px 12px;"
+            " selection-background-color: rgba(11, 122, 110, 60); }")
+        # The document keeps its own default font; without this a line already in
+        # the buffer would keep the old size until it scrolled out.
+        document = self.document()
+        document.setDefaultFont(self.font())
+
+    def font_px(self) -> int:
+        return self._font_px
+
+    def apply_font(self, pixel_size: int | None = None, family: str | None = None) -> int:
+        """Set the log size and/or family; returns the size actually used."""
+        if family is not None:
+            theme.set_log_family(family)
+        if pixel_size is not None:
+            self._font_px = max(theme.LOG_FONT_MIN,
+                                min(theme.LOG_FONT_MAX, int(pixel_size)))
+        else:
+            self._font_px = max(theme.LOG_FONT_MIN,
+                                min(theme.LOG_FONT_MAX, self._font_px))
+        self._apply_font()
+        return self._font_px
+
+    def zoom_font(self, steps: int) -> int:
+        """One Ctrl+wheel notch: change the size, keep the content and scroll."""
+        used = self.apply_font(self._font_px + int(steps))
+        self.fontZoomed.emit(used)
+        return used
+
+    def wheelEvent(self, event) -> None:
+        """Ctrl+wheel zooms the log only; a plain wheel still scrolls (R-096).
+
+        Zooming just the log matters on a 4K panel: the interface can stay
+        comfortable while the payload gets louder, or the opposite.
+        """
+        if event.modifiers() & Qt.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta:
+                self.zoom_font(1 if delta > 0 else -1)
+                event.accept()
+                return
+        super().wheelEvent(event)
 
     # ---------------------------------------------------------------- buffer
     def buffer_mb(self) -> int:
@@ -213,12 +283,8 @@ class LogView(QPlainTextEdit):
         self._trim_pending = False
 
     def set_pixel_size(self, size: int) -> None:
-        self.setFont(theme.mono_font(size))
-        self.setStyleSheet(
-            f"QPlainTextEdit#Log {{ background: transparent; border: 0;"
-            f' font-family: "{theme.resolve_mono()}"; font-size: {size}px;'
-            " padding: 2px 10px 8px 12px;"
-            " selection-background-color: rgba(11, 122, 110, 60); }")
+        """Kept for callers that only know about a size; one path with apply_font()."""
+        self.apply_font(size)
 
     def _at_bottom(self) -> bool:
         bar = self.verticalScrollBar()
@@ -416,17 +482,38 @@ class LogView(QPlainTextEdit):
         self.trimmed = count
 
     def keyPressEvent(self, event) -> None:
-        # Ctrl+C already copies; block edits so the log stays a faithful view.
-        if event.matches(event.StandardKey.Copy):
-            super().keyPressEvent(event)
+        """Read-only log that still answers the clipboard shortcuts.
+
+        ``StandardKey`` lives on ``QKeySequence``; ``QKeyEvent`` has no such
+        attribute.  Asking the event for it raised ``AttributeError`` inside this
+        override for *every* key press, which PySide reports to stderr and then
+        swallows - the visible symptom was "Ctrl+C does nothing, the context menu
+        still copies" (L-122).
+        """
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self.copy_selection()
             return
-        if event.matches(event.StandardKey.SelectAll):
-            super().keyPressEvent(event)
+        if event.matches(QKeySequence.StandardKey.SelectAll):
+            self.selectAll()
             return
         if event.key() in (Qt.Key_Backspace, Qt.Key_Delete) or event.text().isprintable():
             event.ignore()
             return
         super().keyPressEvent(event)
+
+    def copy_selection(self) -> bool:
+        """Copy the selected text; False when nothing is selected.
+
+        QPlainTextEdit separates visual lines with U+2029, so a multi-line
+        selection pasted into Notepad would turn into one line of odd glyphs;
+        it is normalised to real newlines here (the context menu does the same).
+        """
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return False
+        QApplication.clipboard().setText(
+            cursor.selectedText().replace("\u2029", "\n"))
+        return True
 
     # --------------------------------------------------------------- menu
     def contextMenuEvent(self, event) -> None:
@@ -451,7 +538,7 @@ class LogView(QPlainTextEdit):
 
         picked = menu.exec(event.globalPos())
         if picked is copy:
-            super().copy()
+            self.copy_selection()
         elif picked is copy_all:
             QApplication.clipboard().setText(self.plain_text())
         elif picked is select_all:

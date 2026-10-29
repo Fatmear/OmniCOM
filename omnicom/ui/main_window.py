@@ -6,7 +6,9 @@ import codecs
 import contextlib
 import ctypes
 import ctypes.wintypes
+import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -20,7 +22,6 @@ from PySide6.QtCore import (
     QPropertyAnimation,
     QRect,
     QRectF,
-    QSettings,
     Qt,
     QTimer,
 )
@@ -36,13 +37,14 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from .. import __version__, paths, power
+from .. import __version__, control, paths, power
 from ..commands import CommandStore
 from ..i18n import language, set_language, tr
 from ..plugins import PluginHost
@@ -52,9 +54,11 @@ from .dialogs import AboutDialog, DocsDialog, PreferencesDialog
 from .log_view import LogView
 from .search_panel import SearchPanel
 from .send_panel import SendPanel
+from .settings_store import UiSettings, open_settings
 from .terminal import TerminalPage
 from .tooltips import install as install_tooltips
 from .transfer_panel import TransferPanel
+from .update_dialog import UpdateDialog, UpdateWatcher
 from .widgets import (
     Badge,
     CaptionStrip,
@@ -70,19 +74,17 @@ from .widgets import (
 from .widgets import Button as QPushButton
 from .workers import SerialBridge, TransferWorker
 
-SETTINGS_ORG = "OmniCOM"
-SETTINGS_APP = "OmniCOM"
 
+def ui_settings() -> UiSettings:
+    """Persisted UI state: INI files beside the data folder (R-088).
 
-def ui_settings() -> QSettings:
-    """QSettings holding persisted UI state.
-
-    ``OMNICOM_SETTINGS_SUFFIX`` gives test runs their own store, so a harness
-    that hides the sidebar or resizes the window cannot leak that state into the
-    next harness - or into the user's real session.
+    Never the registry.  ``HKCU\\Software\\OmniCOM`` is machine-wide, so a freshly
+    unzipped portable copy inherited the accent and wallpaper of whatever ran
+    before it - exactly what a portable build must not do (L-121).  Preferences
+    go to ``settings.ini`` (shared by all windows), per-window state to
+    ``window-<n>.ini``, so several windows run independently.
     """
-    suffix = os.environ.get("OMNICOM_SETTINGS_SUFFIX", "")
-    return QSettings(SETTINGS_ORG, f"{SETTINGS_APP}{suffix}")
+    return open_settings()
 
 
 BAUD_RATES = ["9600", "19200", "38400", "57600", "115200", "230400", "460800",
@@ -92,6 +94,47 @@ FLOW_KEYS = [("none", "flow.none"), ("rtscts", "flow.rtscts"), ("xonxoff", "flow
 
 def bytes_per_ms(baud: int) -> float:
     return max(0.5, baud / 10.0 / 1000.0)
+
+
+def _history_from(raw) -> list[str]:
+    """Decode the persisted send history; a broken value must not crash startup."""
+    text = str(raw or "")
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(entry) for entry in data]
+
+
+#: "USB-SERIAL CH340 (COM139)" / "n/a" / "" -> "USB-SERIAL CH340".  The port
+#: name is added back by the caller, so the parenthesis is pure repetition.
+_PORT_DETAIL_RE = re.compile(r"\s*\((?:COM|com)\d+\)\s*$")
+#: "CH340 - COM139" -> "CH340".
+_PORT_NAME_TAIL_RE = re.compile(r"\s*[-–]\s*(?:COM|com)\d+\s*$")
+
+
+def _port_detail(description) -> str:
+    """A description with the port name removed and the noise stripped."""
+    text = str(description or "").strip()
+    if not text or text.lower() in ("n/a", "na", "none", "unknown"):
+        return ""
+    text = _PORT_DETAIL_RE.sub("", text).strip()
+    # Some drivers put the name after a dash instead: "CH340 - COM139".
+    text = _PORT_NAME_TAIL_RE.sub("", text).strip()
+    return text
+
+
+def _bounded(raw, low: int, high: int, default: int) -> int:
+    """Read an int setting, clamped; a missing/broken value falls back (R-116)."""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return int(default)
+    return max(int(low), min(int(high), value))
 
 
 def human_bytes(value: float) -> str:
@@ -209,14 +252,30 @@ class TitleBar(GlassFrame):
         brand.addWidget(self.logo)
 
         names = QVBoxLayout()
-        names.setSpacing(1)
+        # The two lines must read as one block, vertically centred on the logo
+        # (R-100).  A QLabel box is as tall as ascent + descent, so an
+        # all-caps line keeps 4-6 px of empty space under its glyphs: the pair
+        # looked ~20 px apart and sat ~2 px high.  Pinning each box to the
+        # glyph height makes "spacing" the real gap; the two stretches centre
+        # the block in the 62 px bar.
+        names.setSpacing(2)
+        # Glyph ink sits ~1 px below the centre of a Qt line box, so the
+        # block would look 1 px low; this margin cancels exactly that.
+        names.setContentsMargins(0, 0, 0, 2)
+        names.addStretch(1)
         self.title = QLabel(tr("app.name"))
         self.title.setStyleSheet("font-size: 15px; font-weight: 650; letter-spacing: .5px;")
+        self.title.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         names.addWidget(self.title)
         self.subtitle = QLabel(tr("app.tagline").upper())
         self.subtitle.setStyleSheet(
             f"color: {theme.DIM}; font-size: 8.5px; letter-spacing: 1.2px;")
+        self.subtitle.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.subtitle.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         names.addWidget(self.subtitle)
+        names.addStretch(1)
+        self._fit_brand_lines()
         brand.addLayout(names)
         layout.addLayout(brand)
 
@@ -341,6 +400,17 @@ class TitleBar(GlassFrame):
         help_menu.addAction(tr("menu.about"), window.open_about)
 
         menu.addSeparator()
+        # Opening the menu is the natural moment to ask: if the first background
+        # check failed (offline at launch), this retries without the user having
+        # to wait for a timer (R-107).
+        if window.update_watcher.last is None and not window.update_watcher.busy:
+            window.update_watcher.start()
+        label = tr("menu.update.new") if window.update_available() else tr("menu.update")
+        update_action = menu.addAction(label, window.open_update)
+        if window.update_available():
+            update_action.setToolTip(tr("menu.update.tip"))
+
+        menu.addSeparator()
         menu.addAction(tr("menu.exit"), window.close)
 
         point = self.btn_menu.mapToGlobal(QPoint(0, self.btn_menu.height() + 6))
@@ -368,9 +438,27 @@ class TitleBar(GlassFrame):
             GlyphButton.RESTORE if maximised else GlyphButton.MAXIMIZE)
         self.btn_max.setToolTip(tr("win.restore") if maximised else tr("win.maximize"))
 
+    def _fit_brand_lines(self) -> None:
+        """Pin each brand line to its glyph height so the pair is truly centred.
+
+        ``QLabel`` reserves ascent + descent, but "OMNICOM" and an upper-case
+        tagline have no descender: the spare rows under each line both pushed
+        the block visually high and made the two lines look far apart (R-100).
+        """
+        for label in (self.title, self.subtitle):
+            label.ensurePolished()
+            metrics = label.fontMetrics()
+            # ``capHeight`` is right for "OmniCOM"; the Chinese tagline fills
+            # more of the em box, so the glyph outline wins when it is taller.
+            ink = metrics.tightBoundingRect(label.text())
+            height = max(metrics.capHeight(), ink.height())
+            # +1 keeps the antialiased bottom row from being clipped.
+            label.setFixedHeight(max(1, height) + 1)
+
     def retranslate(self) -> None:
         self.title.setText(tr("app.name"))
         self.subtitle.setText(tr("app.tagline").upper())
+        self._fit_brand_lines()
         self.btn_menu.setToolTip(tr("menu.title"))
         self.btn_sidebar.setToolTip(tr("win.sidebar"))
         self.btn_min.setToolTip(tr("win.minimize"))
@@ -418,6 +506,14 @@ class OmniWindow(QMainWindow):
         # several widgets read theme tokens while they build their own QSS.
         theme.set_accent(str(self.settings.value("ui/accent", theme.DEFAULT_ACCENT)))
         theme.set_wallpaper(str(self.settings.value("ui/wallpaper", "")) or None)
+        # Fonts must be in place *before* the stylesheet is built below, and
+        # before the log widget exists (it reads theme.log_px()).
+        theme.set_ui_family(str(self.settings.value("ui/font_family", "") or ""))
+        theme.set_ui_font_px(int(self.settings.value("ui/font_px", theme.FONT_PX) or 0)
+                             or theme.FONT_PX)
+        theme.set_log_family(str(self.settings.value("display/log_family", "") or ""))
+        theme.set_log_px(int(self.settings.value("display/log_px", theme.FONT_PX) or 0)
+                         or theme.FONT_PX)
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(theme.app_stylesheet())
@@ -444,12 +540,36 @@ class OmniWindow(QMainWindow):
         # QParallelAnimationGroup, plus the flag that says "we are on our way
         # out", so a second click cannot start a second fade.
         self._motion: QParallelAnimationGroup | None = None
+        #: Software-update state.  The check is deliberately late and cheap: it
+        #: must never compete with opening a port (R-109).
+        self.update_watcher = UpdateWatcher(self)
+        self.update_watcher.found.connect(self._on_update_found)
+        self._update_info: dict | None = None
         self._minimizing = False
+        self._minimize_pending = False
         self._was_minimized = False
         self._rx_timer = QTimer(self)
         self._rx_timer.setSingleShot(True)
         self._rx_timer.setInterval(28)          # ~36 fps, cheaper than per-chunk
         self._rx_timer.timeout.connect(self._flush_rx)
+
+        # ---- CLI control channel (R-112).  A serial port has one owner, so the
+        # CLI does not open it at all: it asks this window to, and every byte it
+        # sends or reads is the window's own traffic - the log shows it, the
+        # counters count it, and closing from the CLI closes it here too.
+        self.control_server = control.Server(slot=self.settings.slot.index)
+        self._control_jobs: dict[str, dict] = {}
+        #: Rolling copy of everything received, addressed by an absolute byte
+        #: counter, so a CLI read that starts a moment after its send still sees
+        #: the answer instead of losing the gap between two requests.
+        self._control_seq = 0
+        self._control_ring = bytearray()
+        self.CONTROL_RING = 1 << 20          # 1 MB, ~2 s at 4 Mbaud
+        self._control_timer = QTimer(self)
+        self._control_timer.setInterval(25)
+        self._control_timer.timeout.connect(self._poll_control)
+        if self.control_server.start():
+            self._control_timer.start()
 
         # One app-wide tooltip watcher: 1 s of steady hover, never restarted by
         # a mouse move (R-080).
@@ -531,7 +651,12 @@ class OmniWindow(QMainWindow):
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(13, 12, 13, 14)
-        layout.setSpacing(7)
+        # 4 px, not 7: with real fonts the rail content is already as tall as the
+        # viewport, so a 7 px rhythm pushed 「打开目录 / 清空记录文件」 out of
+        # sight (R-102).  Each section heading costs 19 px more, and adding the
+        # 窗口 heading overflowed a 5 px rhythm by 7 px in the default window
+        # (L-141) - 4 px keeps ~40 px of slack (R-118).
+        layout.setSpacing(4)
         self.rail_layout = layout
 
         # ---- connection
@@ -541,6 +666,12 @@ class OmniWindow(QMainWindow):
         row.setSpacing(6)
         self.port_combo = Combo()
         self.port_combo.setToolTip(tr("rail.port.tip"))
+        # The label now carries the device name, but the closed box must stay
+        # narrow enough to leave room for the refresh button (R-035).  So the
+        # *popup* is widened (that is where a long name has to be readable) and
+        # the full text goes into the tooltip; the box itself can still shrink.
+        self.port_combo.view().setMinimumWidth(300)
+        self.port_combo.currentIndexChanged.connect(self._sync_port_tooltip)
         self.port_combo.currentIndexChanged.connect(self._on_port_picked)
         row.addWidget(self.port_combo, 1)
         self.btn_refresh = GlyphButton(GlyphButton.REFRESH, self, size=theme.CTRL_H)
@@ -614,8 +745,9 @@ class OmniWindow(QMainWindow):
         dtr_row.setSpacing(18)
         # compact: label and switch sit next to each other instead of being
         # pushed to opposite ends of the column (R-039).
-        self.row_dtr = SwitchRow("DTR", True, compact=True)
-        self.row_rts = SwitchRow("RTS", True, compact=True)
+        # Off by default (R-120): raising DTR on open resets most boards.
+        self.row_dtr = SwitchRow("DTR", False, compact=True)
+        self.row_rts = SwitchRow("RTS", False, compact=True)
         dtr_row.addWidget(self.row_dtr)
         dtr_row.addWidget(self.row_rts)
         dtr_row.addStretch(1)
@@ -660,9 +792,28 @@ class OmniWindow(QMainWindow):
         self.btn_clear_capture.setToolTip(tr("rail.record.clear.tip"))
         self.btn_clear_capture.setEnabled(False)
         row2.addWidget(self.btn_clear_capture, 1)
-        # "Save view" lives in the log toolbar; repeating it here was one of the
-        # duplicated controls the user asked to remove (R-044).
         layout.addLayout(row2)
+
+        # ---- window actions, straight under 打开目录 / 清空记录文件.  A hairline
+        # keeps them visually separate from the capture actions above (the log
+        # window is not part of the file capture - R-102), and they get their own
+        # heading so the pair is not mistaken for more capture buttons (R-118).
+        layout.addWidget(self._divider())
+        self.sec_window = SectionTitle(tr("rail.window"))
+        layout.addWidget(self.sec_window)
+        row3 = QHBoxLayout()
+        row3.setSpacing(6)
+        self.btn_clear = QPushButton(tr("log.clear.btn"))
+        self.btn_clear.setObjectName("Ghost")
+        self.btn_clear.setCursor(Qt.PointingHandCursor)
+        self.btn_clear.setToolTip(tr("log.clear.tip"))
+        row3.addWidget(self.btn_clear, 1)
+        self.btn_save_log = QPushButton(tr("log.save.btn"))
+        self.btn_save_log.setObjectName("Ghost")
+        self.btn_save_log.setCursor(Qt.PointingHandCursor)
+        self.btn_save_log.setToolTip(tr("log.save.tip"))
+        row3.addWidget(self.btn_save_log, 1)
+        layout.addLayout(row3)
 
         # The port / flow / version rows that used to sit here duplicated the
         # status bar, the combo and the About dialog, so they were removed.
@@ -696,18 +847,10 @@ class OmniWindow(QMainWindow):
         log_layout.setContentsMargins(12, 8, 12, 8)
         log_layout.setSpacing(6)
 
+        # Clear / Save view moved to the left rail (R-102): this card keeps only
+        # the loss badge, so the log text starts right below the frame.
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
-        self.btn_clear = QPushButton(tr("log.clear"))
-        self.btn_clear.setObjectName("Ghost")
-        self.btn_clear.setCursor(Qt.PointingHandCursor)
-        toolbar.addWidget(self.btn_clear)
-
-        self.btn_save_log = QPushButton(tr("log.save"))
-        self.btn_save_log.setObjectName("Ghost")
-        self.btn_save_log.setCursor(Qt.PointingHandCursor)
-        toolbar.addWidget(self.btn_save_log)
-
         toolbar.addStretch(1)
         self.trim_badge = Badge("")
         toolbar.addWidget(self.trim_badge)
@@ -718,7 +861,7 @@ class OmniWindow(QMainWindow):
         log_host_layout.setContentsMargins(0, 0, 0, 0)
         log_host_layout.setSpacing(0)
 
-        self.log = LogView()
+        self.log = LogView(pixel_size=theme.log_px())
         log_host_layout.addWidget(self.log)
 
         self.scroll_pill = ScrollBottomPill(log_host)
@@ -989,6 +1132,7 @@ class OmniWindow(QMainWindow):
         self.send_panel.abortRequested.connect(self.abort_file)
 
         self.commands_panel.sendRequested.connect(self.send_payload)
+        self.log.fontZoomed.connect(self._on_log_zoom)
         self.transfer.startRequested.connect(self.start_transfer)
         self.transfer.abortRequested.connect(self.abort_transfer)
 
@@ -1053,8 +1197,8 @@ class OmniWindow(QMainWindow):
         self.parity.setCurrentIndex(max(0, self.parity.findData(s.value("serial/parity", "N"))))
         self.flow.setCurrentIndex(max(0, self.flow.findData(s.value("serial/flow", "none"))))
         self.row_auto.setChecked(s.value("serial/auto", "1") == "1")
-        self.row_dtr.setChecked(s.value("serial/dtr", "1") == "1")
-        self.row_rts.setChecked(s.value("serial/rts", "1") == "1")
+        self.row_dtr.setChecked(s.value("serial/dtr", "0") == "1")
+        self.row_rts.setChecked(s.value("serial/rts", "0") == "1")
         self.row_hex.setChecked(s.value("display/hex", "0") == "1")
         self.row_ts.setChecked(s.value("display/ts", "1") == "1")
         self.row_ctrl.setChecked(s.value("display/ctrl", "0") == "1")
@@ -1063,6 +1207,17 @@ class OmniWindow(QMainWindow):
         self.row_awake.setChecked(s.value("display/awake", "0") == "1")
         self.log.show_ts = self.row_ts.isChecked()
         self.log.autoscroll = self.row_scroll.isChecked()
+        # Enter inserts a line break unless the user turned 回车发送 on
+        # (R-094, revised 2026-10-29).
+        self.send_panel.set_enter_sends(s.value("display/enter_send", "0") == "1")
+        # Bound the list *before* loading it, so a huge legacy file cannot
+        # resurrect thousands of entries (R-116).
+        from .send_panel import HISTORY_DEFAULT, HISTORY_MAX, HISTORY_MIN
+
+        self.send_panel.set_history_limit(
+            _bounded(s.value("send/history_limit", ""), HISTORY_MIN, HISTORY_MAX,
+                     HISTORY_DEFAULT))
+        self.send_panel.set_history_entries(_history_from(s.value("send/history", "")))
         self._apply_keep_awake(self.row_awake.isChecked())
         self._on_ports(self.bridge.manager.ports())
 
@@ -1082,10 +1237,20 @@ class OmniWindow(QMainWindow):
         s.setValue("display/echo", "1" if self.row_echo.isChecked() else "0")
         s.setValue("display/scroll", "1" if self.row_scroll.isChecked() else "0")
         s.setValue("display/awake", "1" if self.row_awake.isChecked() else "0")
+        s.setValue("display/enter_send", "1" if self.send_panel.enter_sends() else "0")
+        # A JSON string, not a QStringList: the INI writer would otherwise store
+        # a comma-joined value that cannot carry a comma inside a command.
+        s.setValue("send/history",
+                   json.dumps(self.send_panel.history_entries(), ensure_ascii=False))
+        s.setValue("send/history_limit", self.send_panel.history_limit())
         s.setValue("display/buffer_mb", self.log.buffer_mb())
         s.setValue("ui/language", language())
         s.setValue("ui/accent", theme.accent())
         s.setValue("ui/wallpaper", theme.wallpaper() or "")
+        s.setValue("ui/font_family", theme.ui_family())
+        s.setValue("ui/font_px", theme.ui_font_px())
+        s.setValue("display/log_family", theme.log_family())
+        s.setValue("display/log_px", self.log.font_px())
 
     def _serial_opts(self) -> dict:
         try:
@@ -1129,13 +1294,18 @@ class OmniWindow(QMainWindow):
         if not ports:
             self.port_combo.addItem(tr("misc.noport"), "")
         for port in ports:
-            detail = port.get("description") or ""
-            label = port["name"]
-            if detail and detail != "n/a" and port["name"] not in detail:
-                label = f"{port['name']} · {detail}"
-            self.port_combo.addItem(label, port["name"])
+            # Always "COM139  USB-Enhanced-SERIAL CH340": the port number is what
+            # you click, the device name is what tells you *which* CH340 it is
+            # (R-117).  The previous version dropped the name whenever the driver
+            # had already embedded it in the description.
+            name = str(port.get("name") or "")
+            detail = _port_detail(port.get("description"))
+            label = f"{name}  {detail}" if detail and detail not in name else name
+            self.port_combo.addItem(label, name)
             index = self.port_combo.count() - 1
-            self.port_combo.setItemData(index, port.get("hwid") or "", Qt.ToolTipRole)
+            hwid = str(port.get("hwid") or "")
+            self.port_combo.setItemData(index, f"{label}\n{hwid}".strip(),
+                                        Qt.ToolTipRole)
         preferred = self._status.get("port") or current or self.settings.value(
             "serial/lastPort", "")
         if preferred:
@@ -1143,6 +1313,18 @@ class OmniWindow(QMainWindow):
             if index >= 0:
                 self.port_combo.setCurrentIndex(index)
         self.port_combo.blockSignals(False)
+        self._sync_port_tooltip()
+
+    def _sync_port_tooltip(self, _index: int = 0) -> None:
+        """Tooltip = full port label + hardware id, so a clipped label is readable."""
+        data = self.port_combo.currentData()
+        if not data:
+            self.port_combo.setToolTip(tr("rail.port.tip"))
+            return
+        index = self.port_combo.currentIndex()
+        detail = str(self.port_combo.itemData(index, Qt.ToolTipRole) or "")
+        self.port_combo.setToolTip(
+            detail or str(self.port_combo.currentText()) or tr("rail.port.tip"))
 
     def toggle_connection(self) -> None:
         if self._status.get("busy"):
@@ -1172,8 +1354,30 @@ class OmniWindow(QMainWindow):
         self.notify(tr("misc.switching", port=port), "info")
         self.bridge.open(port, self._serial_opts())
 
+    def _publish_channel(self, status: dict) -> None:
+        """Tell the CLI which serial port this window currently owns.
+
+        The endpoint file carries it, so a CLI looking for COM5 picks the window
+        that has COM5 open instead of the window that merely started first -
+        which is what kept two windows' logs clean (R-119).  ``publish`` is a
+        no-op unless something actually changed.
+        """
+        server = getattr(self, "control_server", None)
+        if server is None:
+            return
+        connected = bool(status.get("connected"))
+        port = str(status.get("port") or "")
+        if not connected and not status.get("reconnecting"):
+            # Keep the name while a reconnect is pending, but once the port is
+            # really closed the window owns nothing - a CLI must not think it
+            # still owns COM3.
+            port = ""
+        server.publish(serial=port, connected=connected)
+
+
     def _on_status(self, status: dict) -> None:
         self._status = status
+        self._publish_channel(status)
         self.btn_connect.setEnabled(not status.get("busy", False))
         chip = self.titlebar.status_chip
         if status.get("connected"):
@@ -1239,6 +1443,14 @@ class OmniWindow(QMainWindow):
         # sticky (R-049).  Chunks are accumulated and flushed once per frame.
         if not data:
             return
+        # Mirror the bytes into the control ring before printing: the agent then
+        # reads exactly what the user sees, including anything that arrived
+        # between two CLI requests (R-112).
+        self._control_seq += len(data)
+        self._control_ring += data
+        overflow = len(self._control_ring) - self.CONTROL_RING
+        if overflow > 0:
+            del self._control_ring[:overflow]
         self._rx_queue.append((ts, data))
         if not self._rx_timer.isActive():
             self._rx_timer.start()
@@ -1317,6 +1529,12 @@ class OmniWindow(QMainWindow):
         composed = self.log.compose_line(ts, direction, text)
         block = self.log.append_line(ts, direction, text, kind, keywords=words)
         self._appended += 1
+        # Capture-to-file is a mirror of the view: the very string just printed
+        # (timestamp + direction + payload) goes to disk, so a saved session and
+        # a recorded session read the same (R-101).
+        recorder = getattr(self.bridge, "recorder", None)
+        if recorder is not None and recorder.active:
+            recorder.write_line(composed)
         if self.search_panel.match(composed):
             self.search_panel.add_hit(ts, composed, block)
         return block
@@ -1734,7 +1952,8 @@ class OmniWindow(QMainWindow):
     def abort_transfer(self) -> None:
         if self._transfer is not None:
             self._transfer.cancel()
-            self.transfer.set_state("…")
+            self._transfer.wait(2000)
+            self._transfer = None
 
     # ---------------------------------------------------------------- record
     def toggle_record(self) -> None:
@@ -1878,12 +2097,20 @@ class OmniWindow(QMainWindow):
             log_dir=str(self.settings.value("paths/log_dir", "")) or paths.logs_dir(),
             accent=theme.accent(),
             wallpaper=theme.wallpaper() or "",
-            buffer_mb=self.log.buffer_mb())
+            buffer_mb=self.log.buffer_mb(),
+            ui_family=theme.ui_family(), ui_px=theme.ui_font_px(),
+            log_family=theme.log_family(), log_px=self.log.font_px(),
+            history_limit=self.send_panel.history_limit(),
+            history_count=len(self.send_panel.history_entries()))
         dialog.languageChanged.connect(self.change_language)
         dialog.logDirChanged.connect(self.apply_log_dir)
         dialog.accentChanged.connect(self.apply_accent)
         dialog.wallpaperChanged.connect(self.apply_wallpaper)
         dialog.bufferChanged.connect(self.apply_log_buffer)
+        dialog.uiFontChanged.connect(self.apply_ui_font)
+        dialog.logFontChanged.connect(self.apply_log_font)
+        dialog.historyLimitChanged.connect(self.apply_history_limit)
+        dialog.historyCleared.connect(self.clear_history)
         dialog.exec()
 
     # ------------------------------------------------------- theme + folders
@@ -1920,6 +2147,54 @@ class OmniWindow(QMainWindow):
         self.notify(tr("misc.buffer", mb=used), "ok")
         return used
 
+    def _on_log_zoom(self, pixel_size: int) -> None:
+        """Remember a Ctrl+wheel zoom so the next window opens the same size."""
+        theme.set_log_px(pixel_size)
+        self.settings.setValue("display/log_px", int(pixel_size))
+
+    def apply_ui_font(self, family: str, pixel_size: int) -> int:
+        """Change the interface face/size; the log keeps its own (R-096)."""
+        theme.set_ui_family(family)
+        used = theme.set_ui_font_px(pixel_size)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(theme.app_stylesheet())
+        self.settings.setValue("ui/font_family", theme.ui_family())
+        self.settings.setValue("ui/font_px", used)
+        # Widgets that pinned a font in their own stylesheet keep it by design
+        # (the log, the terminal); everything else follows the new stylesheet.
+        for widget in [self, *self.findChildren(QWidget)]:
+            widget.update()
+        self.notify(tr("misc.font", size=used), "ok")
+        return used
+
+    def apply_history_limit(self, limit: int) -> int:
+        """Re-cap the send history and persist it (R-116)."""
+        used = self.send_panel.set_history_limit(limit)
+        self.settings.setValue("send/history_limit", used)
+        self.settings.setValue(
+            "send/history",
+            json.dumps(self.send_panel.history_entries(), ensure_ascii=False))
+        self.notify(tr("misc.history", count=used), "ok")
+        return used
+
+    def clear_history(self) -> None:
+        """Forget every remembered command, on disk too (R-116)."""
+        self.send_panel.clear_history()
+        self.settings.setValue("send/history", "[]")
+        self.notify(tr("misc.history.cleared"), "ok")
+
+    def apply_log_font(self, family: str, pixel_size: int) -> int:
+        """Change the log face/size (terminal included) on its own (R-096)."""
+        used = self.log.apply_font(pixel_size, family)
+        for page in (self.console, self.search_panel):
+            if hasattr(page, "apply_font"):
+                page.apply_font()
+        self.settings.setValue("display/log_family", theme.log_family())
+        self.settings.setValue("display/log_px", used)
+        self.notify(tr("misc.font.log", size=used), "ok")
+        return used
+
     def apply_accent(self, name: str) -> None:
         key = theme.set_accent(name)
         app = QApplication.instance()
@@ -1954,6 +2229,45 @@ class OmniWindow(QMainWindow):
     def open_about(self) -> None:
         AboutDialog(self).exec()
 
+    # ------------------------------------------------------------- update
+    #: Delay before the first update check.  Short enough that the dot appears
+    #: while the window is still being looked at, late enough that it never runs
+    #: while the first port is opening (R-109).
+    UPDATE_DELAY_MS = 2000
+
+    def schedule_update_check(self, delay_ms: int | None = None) -> None:
+        """Ask GitHub for the newest release, once, after the window settles."""
+        from PySide6.QtCore import QTimer
+
+        delay = self.UPDATE_DELAY_MS if delay_ms is None else int(delay_ms)
+        QTimer.singleShot(delay, self.update_watcher.start)
+
+    def check_updates_now(self) -> None:
+        self.update_watcher.start()
+
+    def update_available(self) -> bool:
+        info = self._update_info or self.update_watcher.last
+        return bool(info and info.get("available"))
+
+    def _on_update_found(self, info: dict) -> None:
+        """Mark the menu button with a dot when a release is newer."""
+        self._update_info = dict(info or {})
+        if self.update_available():
+            self.titlebar.btn_menu.set_badge(True)
+            self.titlebar.btn_menu.setToolTip(tr("menu.update.tip"))
+        else:
+            self.titlebar.btn_menu.set_badge(False)
+
+    def open_update(self) -> None:
+        """Menu -> 软件更新: show the release, or check on demand."""
+        self.titlebar.btn_menu.set_badge(False)
+        dialog = UpdateDialog(self, self._update_info or self.update_watcher.last)
+        dialog.finished.connect(dialog.deleteLater)
+        if not (self._update_info or self.update_watcher.last):
+            dialog.set_status(tr("update.checking"))
+            self.update_watcher.start()
+        dialog.exec()
+
     # ---------------------------------------------------------- retranslate
     def retranslate(self) -> None:
         """Re-apply every visible string after a language switch."""
@@ -1984,14 +2298,17 @@ class OmniWindow(QMainWindow):
         self.row_scroll.setToolTip(tr("rail.scroll.tip"))
         self.row_awake.setToolTip(tr("rail.awake.tip"))
         self.sec_record.setText(tr("rail.record"))
+        self.sec_window.setText(tr("rail.window"))
         self.btn_record.setText(tr("rail.record.stop") if self.bridge.recorder.active
                                 else tr("rail.record.start"))
         self.btn_open_dir.setText(tr("rail.opendir"))
         self.btn_clear_capture.setText(tr("rail.record.clear"))
         self.btn_clear_capture.setToolTip(tr("rail.record.clear.tip"))
         self.record_hint.setText(tr("rail.record.hint"))
-        self.btn_clear.setText(tr("log.clear"))
-        self.btn_save_log.setText(tr("log.save"))
+        self.btn_clear.setText(tr("log.clear.btn"))
+        self.btn_clear.setToolTip(tr("log.clear.tip"))
+        self.btn_save_log.setText(tr("log.save.btn"))
+        self.btn_save_log.setToolTip(tr("log.save.tip"))
         self.log_hint.setText(tr("log.hint"))
         self._refresh_status_dir()
         self.commands_panel.retranslate()
@@ -2001,6 +2318,463 @@ class OmniWindow(QMainWindow):
         self.transfer.retranslate()
         self._rebuild_tabs()
         self._on_status(self._status)
+
+    # ------------------------------------------------------- CLI control (R-112)
+    #: How often the window answers the CLI.  25 ms keeps a scripted session
+    #: feeling synchronous without costing anything measurable.
+    CONTROL_POLL_MS = 25
+
+    def control_running(self) -> bool:
+        """True when the CLI can reach this window."""
+        return self.control_server.running
+
+    def _poll_control(self) -> None:
+        self.control_server.poll(self._control_request)
+
+    def _control_request(self, request: dict, reply) -> dict | None:
+        """Run one CLI request on the GUI thread.
+
+        Returning ``None`` keeps the request open: a ``read`` waits for data and
+        a file transfer runs for seconds, so those answer through ``reply``
+        later.  The GUI thread is therefore never blocked by an agent (R-112).
+        """
+        command = str(request.get("cmd") or "").strip()
+        handler = getattr(self, f"_control_{command}", None)
+        if handler is None or not command:
+            return {"ok": False, "error": f"未知命令：{command or '(空)'}"}
+        if not self.control_running():
+            return {"ok": False, "error": "窗口未就绪"}
+        args = request.get("args") or {}
+        if not isinstance(args, dict):
+            args = {}
+        key = str(request.get("id") or command)
+        job = self._control_jobs.get(key)
+        if job is None:
+            job = {"started": False}
+            self._control_jobs[key] = job
+        job["reply"] = reply
+        job["args"] = args
+        job["key"] = key
+        answer = handler(args, job)
+        if answer is not None:
+            self._control_jobs.pop(key, None)
+        return answer
+
+    # -- helpers -----------------------------------------------------------
+    def _control_fail(self, job: dict, message: str, **extra) -> dict:
+        job.pop("started", None)
+        # Every failure states which port this window owns: the CLI uses it to
+        # tell "the port is gone" from a real refusal, and a refusal must never
+        # look like a broken binding (R-119).
+        status = self.bridge.state()
+        return {
+            "ok": False, "error": message,
+            "connected": bool(status.get("connected")),
+            "owned": str(self.control_server.info.get("serial") or ""),
+            "port": str(status.get("port") or status.get("want") or ""),
+            **extra,
+        }
+
+    def _control_snapshot(self, **extra) -> dict:
+        status = self.bridge.state()
+        # Publish here as well as on the status signal: the status signal is
+        # delivered through a queued connection, so a CLI that opened a port
+        # could read the endpoint file a few milliseconds before the write and
+        # conclude nobody owns the port (R-119).  ``publish`` is a no-op
+        # unless the owned port actually changed.
+        self._publish_channel(status)
+        recorder = getattr(self.bridge, "recorder", None)
+        return {
+            "ok": True,
+            # Every reply carries the rx counter, so the CLI can continue
+            # reading exactly where the previous reply stopped (R-112).
+            "seq": self._control_seq,
+            "connected": bool(status.get("connected")),
+            "port": str(status.get("port") or status.get("want") or ""),
+            # What this window *owns* right now - the same value the endpoint
+            # file publishes, so a CLI can prove its binding is still the one it
+            # was given (R-119).
+            "owned": str(self.control_server.info.get("serial") or ""),
+            "reconnecting": bool(status.get("reconnecting")),
+            "error": str(status.get("error") or ""),
+            "opts": status.get("opts") or {},
+            "stats": self.bridge.manager.stats(),
+            "recording": bool(recorder.active) if recorder is not None else False,
+            "version": __version__,
+            **extra,
+        }
+
+    def _control_bytes_since(self, since: int) -> bytes:
+        """Everything received after absolute byte ``since`` (0 = nothing yet)."""
+        if since <= 0:
+            return b""
+        count = self._control_seq - int(since)
+        if count <= 0:
+            return b""
+        count = min(count, len(self._control_ring))
+        return bytes(self._control_ring[len(self._control_ring) - count:])
+
+    def _control_apply_opts(self, opts: dict) -> None:
+        """Show the settings the CLI asked for in the window before opening.
+
+        The CLI and the user must not diverge: if the agent opens COM1 at 9600,
+        the baud control shows 9600 as well, and the next click of 打开 uses the
+        same values (R-112).
+        """
+        if not isinstance(opts, dict):
+            return
+        baud = opts.get("baudrate")
+        if baud:
+            text = str(int(baud))
+            if self.baud.findText(text) < 0:
+                self.baud.insertItem(0, text)
+            self.baud.setCurrentText(text)
+
+        def pick(combo, value) -> None:
+            if value in (None, ""):
+                return
+            wanted = str(value)
+            for index in range(combo.count()):
+                text = str(combo.itemText(index))
+                if text == wanted or text.rstrip("0").rstrip(".") == wanted:
+                    combo.setCurrentIndex(index)
+                    return
+
+        pick(self.bytesize, opts.get("bytesize"))
+        pick(self.stopbits, opts.get("stopbits"))
+        parity = opts.get("parity")
+        if parity:
+            index = self.parity.findData(str(parity).upper()[:1])
+            if index >= 0:
+                self.parity.setCurrentIndex(index)
+        if opts.get("rtscts"):
+            index = self.flow.findData("rtscts")
+        elif opts.get("xonxoff"):
+            index = self.flow.findData("xonxoff")
+        elif "rtscts" in opts or "xonxoff" in opts:
+            index = self.flow.findData("none")
+        else:
+            index = -1
+        if index >= 0:
+            self.flow.setCurrentIndex(index)
+        for key, row in (("dtr", self.row_dtr), ("rts", self.row_rts),
+                         ("autoReconnect", self.row_auto)):
+            if key in opts:
+                row.setChecked(bool(opts[key]))
+
+    # -- commands ----------------------------------------------------------
+    def _control_ping(self, _args: dict, _job: dict) -> dict:
+        return self._control_snapshot()
+
+    def _control_state(self, _args: dict, _job: dict) -> dict:
+        return self._control_snapshot(lines=self.log.document().blockCount(),
+                                      log_px=self.log.font_px())
+
+    def _control_ports(self, args: dict, _job: dict) -> dict:
+        """The window's own port list - already cached, never a fresh enumeration.
+
+        ``list_ports.comports()`` costs 1-3 s on this machine (L-130); the
+        monitor thread keeps ``manager.ports()`` warm, so asking it is free.
+        """
+        ports = list(self.bridge.manager.ports())
+        if args.get("demo"):
+            ports.append({"name": "DEMO", "description": "虚拟演示串口",
+                          "hwid": "DEMO\\OmniCOM"})
+        return {"ok": True, "count": len(ports), "ports": ports,
+                "connected": bool(self.bridge.state().get("connected"))}
+
+    def _control_open(self, args: dict, job: dict) -> dict | None:
+        port = str(args.get("port") or "").strip()
+        if not port:
+            return self._control_fail(job, "缺少 port")
+        status = self.bridge.state()
+        if status.get("connected") and control.same_port(status.get("port"), port):
+            self._sync_port_combo(port)
+            return self._control_snapshot(already=True)
+        # Never replace the port the user is watching.  A CLI that was pointed
+        # at the wrong window used to reopen its own port here, which closed
+        # the session the user was looking at and mixed two devices in one log
+        # (R-119).  The CLI routes by port name, so this path is a real error.
+        busy = str(status.get("port") or status.get("want") or "")
+        if ((status.get("connected") or status.get("reconnecting"))
+                and busy and not args.get("takeover")):
+            return self._control_fail(
+                job, f"本窗口正在使用 {busy}，不能同时打开 {port}",
+                port=busy, busy=True)
+        if not job.get("started"):
+            job["started"] = True
+            job["deadline"] = time.monotonic() + float(args.get("timeout") or 8.0)
+            job["reply"].touch(float(args.get("timeout") or 8.0) + 4.0)
+            self._control_apply_opts(args.get("opts") or {})
+            self._sync_port_combo(port)
+            self.settings.setValue("serial/lastPort", port)
+            self.notify(tr("misc.control.open", port=port), "info")
+            self.bridge.open(port, self._serial_opts())
+            return None
+        status = self.bridge.state()
+        if status.get("connected") and str(status.get("port")) == port:
+            return self._control_snapshot(already=False)
+        if status.get("error"):
+            return self._control_fail(job, str(status["error"]), port=port)
+        if time.monotonic() > float(job.get("deadline") or 0):
+            return self._control_fail(job, f"打开 {port} 超时", port=port)
+        return None
+
+    def _control_close(self, _args: dict, job: dict) -> dict | None:
+        status = self.bridge.state()
+        if not (status.get("connected") or status.get("reconnecting")
+                or status.get("want")):
+            return self._control_snapshot(already=True)
+        if not job.get("started"):
+            job["started"] = True
+            job["deadline"] = time.monotonic() + 10.0
+            job["reply"].touch(14.0)
+            self.bridge.close()
+            return None
+        status = self.bridge.state()
+        if not (status.get("connected") or status.get("reconnecting")
+                or status.get("want")):
+            return self._control_snapshot(already=False)
+        if time.monotonic() > float(job.get("deadline") or 0):
+            return self._control_fail(job, "关闭串口超时")
+        return None
+
+    def _control_send(self, args: dict, job: dict) -> dict | None:
+        if not job.get("started"):
+            try:
+                payload = bytes.fromhex(str(args.get("hex") or ""))
+            except ValueError:
+                return self._control_fail(job, "hex 数据格式不正确")
+            if not payload:
+                return self._control_fail(job, "没有要发送的内容")
+            if not self.bridge.state().get("connected"):
+                return self._control_fail(job, "串口未打开")
+            job["started"] = True
+            job["sent"] = len(payload)
+            job["wait"] = max(0.0, float(args.get("wait") or 0.0))
+            job["expect"] = [str(item) for item in (args.get("expect") or [])
+                             if str(item)]
+            job["started_at"] = time.monotonic()
+            job["deadline"] = job["started_at"] + job["wait"] + 2.0
+            # The answer is searched from the counter *before* the write, which
+            # the CLI sends along; a byte that arrives during the write itself
+            # is therefore still part of the response (R-112).
+            job["since"] = int(args.get("since") or self._control_seq)
+            # Everything the CLI sends is printed by the window's own path, so
+            # the user sees the same TX line a manual send would print.
+            try:
+                self.bridge.manager.write(payload)
+            except Exception as exc:
+                return self._control_fail(job, str(exc))
+            self._on_tx_print(payload)
+            self._refresh_stats()
+            # The answer is searched from the byte *after* the send, which is
+            # what ``since`` records for the caller.
+            if not job["wait"] and not job["expect"]:
+                return self._control_send_result(job, b"")
+            return None
+        data = self._control_bytes_since(int(job.get("since") or 0))
+        if self._control_expect_hit(job["expect"], data):
+            return self._control_send_result(job, data, matched=True)
+        if time.monotonic() - job["started_at"] >= job["wait"]:
+            if job["expect"]:
+                return self._control_send_result(job, data, matched=False)
+            return self._control_send_result(job, data)
+        if time.monotonic() > float(job.get("deadline") or 0):
+            return self._control_fail(job, "等待应答超时")
+        return None
+
+    def _control_expect_hit(self, needles: list, buffer: bytes) -> bool:
+        if not needles or not buffer:
+            return False
+        text = buffer.decode("utf-8", "replace")
+        return any(needle in text for needle in needles)
+
+    def _control_send_result(self, job: dict, data: bytes, **extra) -> dict:
+        return self._control_snapshot(
+            sent_bytes=int(job.get("sent") or 0),
+            response_hex=data.hex(" "),
+            response_text=data.decode("utf-8", "replace"),
+            **extra)
+
+    def _control_read(self, args: dict, job: dict) -> dict | None:
+        if not job.get("started"):
+            if not self.bridge.state().get("connected"):
+                return self._control_fail(job, "串口未打开")
+            job["started"] = True
+            job["since"] = int(args.get("since") or self._control_seq)
+            job["duration"] = max(0.0, float(args.get("duration") or 0.0))
+            job["max_bytes"] = int(args.get("max_bytes") or 0)
+            job["expect"] = [str(item) for item in (args.get("expect") or [])
+                             if str(item)]
+            job["started_at"] = time.monotonic()
+            job["deadline"] = job["started_at"] + job["duration"] + 2.0
+            job["reply"].touch(job["duration"] + 6.0)
+            return None
+        data = self._control_bytes_since(int(job.get("since") or 0))
+        if self._control_expect_hit(job["expect"], data):
+            return self._control_read_result(job, data, matched=True)
+        if job["max_bytes"] and len(data) >= job["max_bytes"]:
+            return self._control_read_result(job, data[:job["max_bytes"]])
+        if time.monotonic() - job["started_at"] >= job["duration"]:
+            return self._control_read_result(job, data)
+        if time.monotonic() > float(job.get("deadline") or 0):
+            return self._control_read_result(job, data)
+        return None
+
+    def _control_read_result(self, job: dict, data: bytes,
+                             matched: bool | None = None) -> dict:
+        extra: dict = {"received_hex": data.hex(" "),
+                       "received_text": data.decode("utf-8", "replace"),
+                       "received_bytes": len(data),
+                       "elapsed_ms": int((time.monotonic()
+                                          - float(job.get("started_at") or 0)) * 1000)}
+        if matched is not None:
+            extra["matched"] = matched
+        return self._control_snapshot(**extra)
+
+    def _control_send_file(self, args: dict, job: dict) -> dict | None:
+        path = str(args.get("path") or "").strip()
+        if not path:
+            return self._control_fail(job, "缺少 path")
+        if not job.get("started"):
+            if not self.bridge.state().get("connected"):
+                return self._control_fail(job, "串口未打开")
+            try:
+                with open(path, "rb") as handle:
+                    data = handle.read()
+            except OSError as exc:
+                return self._control_fail(job, f"读取文件失败：{exc}")
+            job["started"] = True
+            job["done"] = None
+            job["error"] = ""
+            job["started_at"] = time.monotonic()
+            job["deadline"] = time.monotonic() + 600.0
+            name = str(args.get("name") or os.path.basename(path))
+            manager = self.bridge.manager
+
+            def work() -> None:
+                try:
+                    manager.send_file(data, name)
+                except Exception as exc:
+                    job["error"] = f"{type(exc).__name__}: {exc}"
+                finally:
+                    job["done"] = True
+
+            import threading
+
+            job["reply"].touch(600.0)
+            threading.Thread(target=work, name="omnicom-control-file",
+                             daemon=True).start()
+            return None
+        if job.get("done") is None:
+            if time.monotonic() > float(job.get("deadline") or 0):
+                return self._control_fail(job, "发送文件超时")
+            return None
+        if job.get("error"):
+            return self._control_fail(job, str(job["error"]))
+        return self._control_snapshot(
+            file=os.path.abspath(path),
+            sent_bytes=os.path.getsize(path) if os.path.isfile(path) else 0,
+            elapsed_ms=int((time.monotonic()
+                            - float(job.get("started_at") or 0)) * 1000))
+
+    def _control_transfer(self, args: dict, job: dict) -> dict | None:
+        protocol = str(args.get("proto") or "x")[:1].lower()
+        direction = "recv" if str(args.get("dir") or "send") == "recv" else "send"
+        if not job.get("started"):
+            if not self.bridge.state().get("connected"):
+                return self._control_fail(job, "串口未打开")
+            data = b""
+            name = str(args.get("name") or "file.bin")
+            if direction == "send":
+                path = str(args.get("path") or "")
+                if not path:
+                    return self._control_fail(job, "发送模式缺少 path")
+                try:
+                    with open(path, "rb") as handle:
+                        data = handle.read()
+                except OSError as exc:
+                    return self._control_fail(job, f"读取文件失败：{exc}")
+                name = os.path.basename(path)
+            job["started"] = True
+            job["done"] = None
+            job["error"] = ""
+            job["logs"] = []
+            job["result"] = {}
+            job["started_at"] = time.monotonic()
+            job["deadline"] = time.monotonic() + 900.0
+            manager = self.bridge.manager
+            save_dir = str(args.get("save_dir") or paths.received_dir())
+            logs: list[str] = job["logs"]
+
+            def work() -> None:
+                from ..transfer import run_transfer
+
+                try:
+                    job["result"] = run_transfer(
+                        manager, protocol, direction, name=name, data=data,
+                        log=logs.append, save_dir=save_dir) or {}
+                except Exception as exc:
+                    job["error"] = f"{type(exc).__name__}: {exc}"
+                finally:
+                    job["done"] = True
+
+            import threading
+
+            job["reply"].touch(900.0)
+            threading.Thread(target=work, name="omnicom-control-xfer",
+                             daemon=True).start()
+            return None
+        if job.get("done") is None:
+            if time.monotonic() > float(job.get("deadline") or 0):
+                return self._control_fail(job, "传输超时")
+            return None
+        if job.get("error"):
+            return self._control_fail(job, str(job["error"]), log=job.get("logs"))
+        result = job.get("result") or {}
+        return self._control_snapshot(
+            proto=protocol.upper() + "MODEM", dir=direction,
+            bytes=int(result.get("bytes") or 0),
+            files=result.get("files") or [],
+            log=job.get("logs"),
+            elapsed_ms=int((time.monotonic()
+                            - float(job.get("started_at") or 0)) * 1000))
+
+    def _control_record(self, args: dict, _job: dict) -> dict:
+        recorder = getattr(self.bridge, "recorder", None)
+        if recorder is None:
+            return {"ok": False, "error": "没有记录器"}
+        action = str(args.get("action") or "state")
+        active = bool(recorder.active)
+        # Start/stop go through the button handler so the rail label, the hint
+        # and the size-refresh timer all follow what the CLI asked for.
+        wanted = {"start": True, "stop": False}.get(action)
+        if wanted is not None and wanted != active:
+            self.toggle_record()
+        elif action == "clear":
+            self.clear_capture()
+        return {"ok": True, "record": recorder.state()}
+
+    def _control_log(self, args: dict, _job: dict) -> dict:
+        """The last rendered lines, so an agent can quote what the user sees."""
+        limit = max(1, min(2000, int(args.get("limit") or 40)))
+        lines = self.log.plain_text().splitlines()[-limit:]
+        needle = str(args.get("grep") or "")
+        if needle:
+            lines = [line for line in lines if needle.lower() in line.lower()]
+        return {"ok": True, "lines": lines, "count": len(lines),
+                "blocks": self.log.document().blockCount(),
+                "trimmed": self.log.trimmed}
+
+    def _control_stats(self, args: dict, _job: dict) -> dict:
+        if args.get("reset"):
+            return self._control_snapshot(stats=self.bridge.manager.reset_stats())
+        return self._control_snapshot()
+
+    def _control_notify(self, args: dict, _job: dict) -> dict:
+        self.notify(str(args.get("text") or ""), str(args.get("level") or "info"))
+        return {"ok": True}
 
     # -------------------------------------------------------------- window
     def toggle_maximize(self) -> None:
@@ -2012,21 +2786,11 @@ class OmniWindow(QMainWindow):
 
     # ------------------------------------------------------- window motion
     #: A translucent frameless window gets no DWM minimize animation, so the
-    #: taskbar icon used to snap the window in and out of existence.  We do the
-    #: motion ourselves: fade the layer alpha and shrink toward the bottom edge
-    #: (where the taskbar is), like a normal Windows app.  Durations match the
-    #: button motion in ``widgets.py`` (150-190 ms).
+    #: taskbar icon used to snap the window in and out of existence.  We fade
+    #: the layer alpha instead.  Durations match the button motion in
+    #: ``widgets.py`` (150-190 ms).
     RESTORE_MS = 180
     MINIMIZE_MS = 150
-    MOTION_SCALE = 0.955
-
-    @staticmethod
-    def _motion_rect(rect: QRect, factor: float) -> QRect:
-        """``rect`` scaled about its bottom-centre edge."""
-        width = max(320, int(rect.width() * factor))
-        height = max(240, int(rect.height() * factor))
-        return QRect(rect.x() + (rect.width() - width) // 2,
-                     rect.bottom() - height + 1, width, height)
 
     def _stop_motion(self) -> None:
         group, self._motion = getattr(self, "_motion", None), None
@@ -2034,28 +2798,28 @@ class OmniWindow(QMainWindow):
             group.stop()
             group.deleteLater()
 
-    def _motion_group(self, start: QRect, end: QRect, fade_from: float,
-                      fade_to: float, duration: int) -> QParallelAnimationGroup:
-        group = QParallelAnimationGroup(self)
-        fade = QPropertyAnimation(self, b"windowOpacity", group)
-        fade.setDuration(duration)
-        fade.setEasingCurve(QEasingCurve.OutCubic)
-        fade.setStartValue(fade_from)
-        fade.setEndValue(fade_to)
-        group.addAnimation(fade)
-        # A maximized window must not be resized by an animation: Qt would drop
-        # the maximized state.  Fall back to a pure fade there.
-        if start != end:
-            move = QPropertyAnimation(self, b"geometry", group)
-            move.setDuration(duration)
-            move.setEasingCurve(QEasingCurve.OutCubic)
-            move.setStartValue(start)
-            move.setEndValue(end)
-            group.addAnimation(move)
-        return group
+    def _motion_group(self, fade_from: float, fade_to: float,
+                      duration: int) -> QParallelAnimationGroup:
+        """Fade the layer alpha.  Geometry is never touched (L-142).
 
-    def _animatable(self) -> bool:
-        return not (self.isMaximized() or self.isFullScreen())
+        Resizing a translucent window while it fades left its last frame painted
+        on the desktop on some machines, which looks exactly like "the minimize
+        button does nothing" - and left the window stuck in a state where every
+        later request returned early.  A maximized window never resized, which is
+        why maximizing appeared to repair the button.
+        """
+        group = QParallelAnimationGroup(self)
+        # Only animate alpha when it really changes: every setWindowOpacity()
+        # on a layered window repaints it, so a 1.0 -> 1.0 animation would cost a
+        # frame of work and could itself blink (R-105).
+        if abs(fade_to - fade_from) > 0.001:
+            fade = QPropertyAnimation(self, b"windowOpacity", group)
+            fade.setDuration(duration)
+            fade.setEasingCurve(QEasingCurve.OutCubic)
+            fade.setStartValue(fade_from)
+            fade.setEndValue(fade_to)
+            group.addAnimation(fade)
+        return group
 
     def minimize_with_motion(self) -> None:
         """Fade out, then really minimize.
@@ -2063,75 +2827,104 @@ class OmniWindow(QMainWindow):
         Reached from the title-bar button, the taskbar icon, Alt+Space and
         Win+Down (both go through ``nativeEvent`` -> WM_SYSCOMMAND).
         """
-        if getattr(self, "_minimizing", False) or not self.isVisible():
+        if not self.isVisible() or self.isMinimized():
             return
+        # Never early-return on the flag alone: an animation whose group was
+        # stopped before it finished used to leave _minimizing True forever, after
+        # which the minimize button did nothing at all (R-103).
         self._minimizing = True
+        self._minimize_pending = True
         self._stop_motion()
-        target = self.geometry()
-        # The shrink is a real resize, so the window has to be put back to
-        # this rect once it is hidden - otherwise every minimize/restore
-        # cycle would leave it one step smaller.
-        self._motion_target = target
-        start = target
-        end = self._motion_rect(target, self.MOTION_SCALE) \
-            if self._animatable() else target
-        group = self._motion_group(start, end, 1.0, 0.0, self.MINIMIZE_MS)
+        # A minimize never resizes the window (L-142) - not even to the settled
+        # rect of an interrupted animation.  The rect is only remembered so that
+        # the restore can put it back while the window is hidden.
+        target = self._settled_rect()
+        self._still_rect = target
+        # Fade from the *current* alpha, never from a hard-coded 1.0: a minimize
+        # that arrives while the restore fade is still running used to jump the
+        # window back to fully opaque for one frame before fading - the flash the
+        # user saw when toggling show/minimize quickly (R-105).
+        current = max(0.0, min(1.0, self.windowOpacity()))
+        group = self._motion_group(current, 0.0, self.MINIMIZE_MS)
         group.finished.connect(self._finish_minimize)
         self._motion = group
         group.start()
+        # Watchdog: the animation only drives the fade.  If it is stopped or
+        # never finishes (a platform that refuses to fade a layered window), the
+        # window must still minimize (R-103).
+        QTimer.singleShot(self.MINIMIZE_MS + 150, self._ensure_minimized)
+
+    def _ensure_minimized(self) -> None:
+        if self._minimize_pending:
+            self._minimizing = True
+            self._finish_minimize()
 
     def _finish_minimize(self) -> None:
-        self._motion = None
+        # Stop and delete the group *before* putting the geometry back: a
+        # QPropertyAnimation on ``geometry`` keeps its end value and Qt may apply
+        # it one more time after ``setGeometry()``, which left the window at the
+        # shrunken size (L-131).
+        self._stop_motion()
+        self._minimize_pending = False
         if not self._minimizing:
             self._restore_geometry()
             self.setWindowOpacity(1.0)
             return
         self._minimizing = False
-        self._restore_geometry()
+        # Minimize *first*, then touch geometry and alpha: a resize of a still
+        # composited layer is what left the stale frame behind (L-142).
         self.showMinimized()
+        self._restore_geometry()
         # Never stay translucent while hidden: a restore that does not come
         # through :meth:`animate_show` would otherwise show nothing at all.
         self.setWindowOpacity(1.0)
 
+    def _settled_rect(self) -> QRect:
+        """Geometry the window must end up at after any animation.
+
+        While a grow/shrink is running ``geometry()`` is a half-way value, so it
+        cannot be used as the target (see ``minimize_with_motion``).
+        """
+        stored = getattr(self, "_still_rect", None)
+        return stored if stored is not None else self.geometry()
+
     def _restore_geometry(self) -> None:
-        target = getattr(self, "_motion_target", None)
-        self._motion_target = None
+        target = getattr(self, "_still_rect", None)
+        self._still_rect = None
         if target is not None and self.geometry() != target:
             self.setGeometry(target)
 
     def _cancel_minimize(self) -> None:
         self._minimizing = False
+        self._minimize_pending = False
         self._stop_motion()
         self._restore_geometry()
         self.setWindowOpacity(1.0)
 
     def animate_show(self) -> None:
-        """Fade and grow the window back in after a minimize."""
+        """Show the window at its real size, with no motion at all.
+
+        A restore used to *grow* the window from 95.5 % back to 100 %.  That is
+        a real resize, so every pane re-laid itself out on each animation step and
+        the whole UI visibly stretched - the user rejected it outright, and it is
+        the correct call: a restore should look instant.  The minimize keeps its
+        fade (it hides the window, so nothing can stretch), and the geometry is
+        restored in one step here (R-105, revised 2026-10-28).
+        """
         self._stop_motion()
-        if not self.isVisible():
-            self.setWindowOpacity(1.0)
-            return
-        target = self.geometry()
-        start = self._motion_rect(target, self.MOTION_SCALE) \
-            if self._animatable() else target
-        self.setWindowOpacity(0.0)
-        group = self._motion_group(start, target, 0.0, 1.0, self.RESTORE_MS)
-        group.finished.connect(self._finish_show)
-        self._motion = group
-        group.start()
+        # A restore cancels any pending minimize bookkeeping and puts back the
+        # alpha an interrupted fade may have left behind.
+        self._minimizing = False
+        self._minimize_pending = False
+        self.setWindowOpacity(1.0)
+        # An interrupted minimize shrank the real geometry, so the target is the
+        # remembered rect, not whatever size the window has right now.
+        self._restore_geometry()
 
     def _finish_show(self) -> None:
         self._motion = None
         self.setWindowOpacity(1.0)
-
-    def event(self, event) -> bool:
-        # Touching the window while it fades out means "stay here": drop the
-        # pending minimize instead of continuing to disappear under the mouse.
-        # getattr: Qt delivers events while __init__ is still running.
-        if getattr(self, "_minimizing", False) \
-                and event.type() == QEvent.WindowActivate:
-            self._cancel_minimize()
-        return super().event(event)
+        self._still_rect = None
 
     def nativeEvent(self, event_type, message):
         """Catch the Windows minimize request so it can animate out.
@@ -2149,13 +2942,29 @@ class OmniWindow(QMainWindow):
             native = ctypes.wintypes.MSG.from_address(int(message))
         except Exception:
             return super().nativeEvent(event_type, message)
-        if native.message == 0x0112 and (int(native.wParam) & 0xFFF0) == 0xF020:
-            self.minimize_with_motion()
-            return True, 0
+        if native.message == 0x0112:
+            command = int(native.wParam) & 0xFFF0
+            if command == 0xF020:                      # SC_MINIMIZE
+                self.minimize_with_motion()
+                return True, 0
+            if command == 0xF120 and getattr(self, "_minimize_pending", False):
+                # SC_RESTORE while the fade-out is still running: the user wants
+                # the window back, so drop the pending minimize instead of
+                # vanishing a moment later (R-105).
+                self._cancel_minimize()
+                return True, 0
         return super().nativeEvent(event_type, message)
 
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
+        # Cancelling a pending minimize must NOT hang off ActivationChange.
+        # Clicking the minimize button of a *background* window activates the
+        # window first; Qt then delivers the activation change while the fade is
+        # already running, and cancelling there meant "minimize does nothing"
+        # exactly when the window had been in the background - which is the
+        # state the user reported (L-132).  The window is only kept on screen
+        # when the user explicitly asks for it back (SC_RESTORE in
+        # ``nativeEvent``) or when the fade is interrupted by another minimize.
         if event.type() != QEvent.WindowStateChange:
             return
         if hasattr(self, "titlebar"):
@@ -2176,9 +2985,16 @@ class OmniWindow(QMainWindow):
                               "0" if self._sidebar_widget.isHidden() else "1")
         self.settings.setValue("ui/split", self.body_split.sizes())
         self.settings.setValue("ui/send_h", self.send_panel.height())
+        # Flush this window's file and hand its slot back, so the next launch
+        # (or another window) can claim it immediately (R-088).
+        self.settings.release()
         if self._transfer is not None and self._transfer.isRunning():
             self._transfer.cancel()
             self._transfer.wait(2000)
+        # Withdraw the CLI endpoint *before* the port goes away: a CLI request
+        # must fail fast instead of waiting for a window that is already gone.
+        self._control_timer.stop()
+        self.control_server.stop()
         self.bridge.shutdown()
         # A keep-awake request belongs to this thread; release it explicitly so
         # the machine can sleep again the moment OmniCOM is gone.

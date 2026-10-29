@@ -562,6 +562,7 @@ class GlyphButton(Button):
     TRASH = "trash"
     PLUS = "plus"
     PASTE = "paste"
+    SELECT = "select"
     INBOX = "inbox"
     UPLOAD = "upload"
     MENU = "menu"
@@ -583,6 +584,23 @@ class GlyphButton(Button):
         self.setCursor(Qt.PointingHandCursor)
         self.setFlat(True)
         self._feedback_anim = self._hover_anim
+        #: Notification dot in the top-right corner (an update is waiting).
+        self._badge = False
+
+    def set_badge(self, visible: bool) -> None:
+        """Show/hide the "there is news" dot.
+
+        Painted rather than added as a child widget: a 6 px child would need its
+        own positioning logic inside the 30 px button, and the dot must not
+        affect the layout at all (R-107).
+        """
+        visible = bool(visible)
+        if visible != self._badge:
+            self._badge = visible
+            self.update()
+
+    def has_badge(self) -> bool:
+        return self._badge
 
     def _get_feedback(self) -> float:
         return self.hover
@@ -755,6 +773,14 @@ class GlyphButton(Button):
             for offset in (-0.6, 0.0, 0.6):
                 painter.drawLine(int(cx - half), int(cy + half * offset),
                                  int(cx + half), int(cy + half * offset))
+        elif glyph == self.SELECT:
+            # A boxed tick: "pick several of these", not a toggle.
+            painter.drawRoundedRect(
+                QRectF(cx - half, cy - half, half * 2, half * 2), 2, 2)
+            painter.drawLine(int(cx - half * 0.45), int(cy + half * 0.05),
+                             int(cx - half * 0.1), int(cy + half * 0.45))
+            painter.drawLine(int(cx - half * 0.1), int(cy + half * 0.45),
+                             int(cx + half * 0.5), int(cy - half * 0.4))
         elif glyph == self.INFO:
             painter.drawEllipse(QRectF(cx - half, cy - half, half * 2, half * 2))
             painter.drawLine(int(cx), int(cy - half * 0.05), int(cx), int(cy + half * 0.65))
@@ -769,6 +795,14 @@ class GlyphButton(Button):
         else:  # close
             painter.drawLine(int(cx - half), int(cy - half), int(cx + half), int(cy + half))
             painter.drawLine(int(cx + half), int(cy - half), int(cx - half), int(cy + half))
+
+        if self._badge:
+            # A filled dot with a light rim, so it reads on any background.
+            painter.setPen(QPen(QColor("#FFFFFF"), 1.2))
+            painter.setBrush(QBrush(QColor(theme.DANGER)))
+            diameter = max(5.0, self.width() * 0.22)
+            painter.drawEllipse(QRectF(self.width() - diameter - 2.0, 2.0,
+                                       diameter, diameter))
 
 
 class Combo(QComboBox):

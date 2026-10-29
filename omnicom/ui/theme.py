@@ -58,6 +58,17 @@ ICON_SM = 24           # dense icon buttons (command rows)
 ICON_MD = 26           # panel headers
 ICON_SIZE = 28         # toolbar icon buttons
 FONT_PX = 13
+#: Everything that is *not* the log: window, rail, buttons, dialogs.  The log
+#: and the terminal get their own face and size (R-095/R-096/R-097), because the
+#: two jobs want different things - a dense monospace dump versus readable UI
+#: text - and the user asked to tune them independently.
+UI_FONT_MIN, UI_FONT_MAX = 10, 20
+LOG_FONT_MIN, LOG_FONT_MAX = 8, 32
+
+_ui_px = FONT_PX
+_ui_family = ""
+_log_family = ""
+_log_px = 13
 
 # Radii: the user asked for two very different feelings.
 #   * toggles / checkboxes -> a third of their size (soft, round)
@@ -291,8 +302,8 @@ PRIMARY_B = _darken(TEAL, 0.12)
 def app_stylesheet() -> str:
     return f"""
 * {{
-  font-family: {UI_FONT};
-  font-size: {FONT_PX}px;
+  font-family: {ui_font_css()};
+  font-size: {_ui_px}px;
   color: {INK};
   outline: none;
 }}
@@ -518,6 +529,69 @@ QSplitter::handle {{ background: transparent; }}
 """
 
 
+def ui_font_px() -> int:
+    return _ui_px
+
+
+def set_ui_font_px(pixel_size: int) -> int:
+    """Set the size of every non-log control (clamped) and return what was used."""
+    global _ui_px
+    _ui_px = max(UI_FONT_MIN, min(UI_FONT_MAX, int(pixel_size)))
+    return _ui_px
+
+
+def ui_family() -> str:
+    """Chosen UI family, or "" for the built-in stack."""
+    return _ui_family
+
+
+def ui_font_css() -> str:
+    """CSS ``font-family`` value for the UI face."""
+    if _ui_family:
+        return f'"{_ui_family}", ' + UI_FONT
+    return UI_FONT
+
+
+def set_ui_family(family: str) -> str:
+    """Pick the UI face; an empty value restores the built-in stack."""
+    global _ui_family
+    _ui_family = (family or "").strip()
+    return _ui_family
+
+
+def ui_font():
+    """``QFont`` matching the UI face and size (used by dialogs that build fonts)."""
+    from PySide6.QtGui import QFont
+
+    font = QFont(_ui_family) if _ui_family else QFont()
+    if _ui_family:
+        font.setFamilies([_ui_family])
+    font.setPixelSize(_ui_px)
+    return font
+
+
+def log_family() -> str:
+    """Chosen log family, or "" to let :func:`resolve_mono` pick one."""
+    return _log_family
+
+
+def set_log_family(family: str) -> str:
+    global _log_family
+    _log_family = (family or "").strip()
+    return _log_family
+
+
+def log_px() -> int:
+    return _log_px
+
+
+def set_log_px(pixel_size: int) -> int:
+    """Default log size (a window can override it with Ctrl+wheel, R-096)."""
+    global _log_px
+    _log_px = max(LOG_FONT_MIN, min(LOG_FONT_MAX, int(pixel_size)))
+    return _log_px
+
+
 def resolve_mono() -> str:
     """First installed family from :data:`MONO_STACK`, else a safe fallback."""
     try:
@@ -526,6 +600,12 @@ def resolve_mono() -> str:
         families = set(QFontDatabase.families())
     except Exception:
         return "Consolas"
+    if _log_family:
+        # An explicitly chosen family still has to exist: a stale name from
+        # another machine must not silently fall back to a proportional face.
+        if _log_family in families:
+            return _log_family
+        return _log_family
     for family in MONO_STACK:
         if family in families:
             return family

@@ -113,6 +113,15 @@ class CommandRow(QWidget):
         top.setContentsMargins(10, 4, 5, 4)
         top.setSpacing(6)
         outer.addLayout(top, 1)
+        # Batch mode swaps the "enabled" switch for a neutral pick box: the same
+        # square cannot mean "this command is active" and "this command is
+        # selected" at once, and merging them would let a batch delete also
+        # change which commands are enabled (R-092).
+        self.pick = QCheckBox()
+        self.pick.setToolTip(tr("cmd.batch.pick"))
+        self.pick.hide()
+        top.addWidget(self.pick)
+
         self.check = QCheckBox()
         self.check.setChecked(bool(item.get("enabled", True)))
         self.check.setToolTip(tr("cmd.enabled.tip"))
@@ -130,7 +139,7 @@ class CommandRow(QWidget):
             details.append(note)
         self.setToolTip("\n".join(details))
         self.label.setToolTip(self.toolTip())
-        self.label.mouseReleaseEvent = lambda _event: self.send.emit(item)
+        self.label.mouseReleaseEvent = self._on_label_release
         top.addWidget(self.label, 1)
         if item.get("timer"):
             timer = QLabel(f"{item.get('interval', 1000)} ms")
@@ -160,6 +169,27 @@ class CommandRow(QWidget):
             button.setToolTip(tip)
             button.clicked.connect(slot)
             top.addWidget(button)
+
+    def set_batch_mode(self, active: bool) -> None:
+        """Show the pick box instead of the enable switch (R-092)."""
+        self.pick.setVisible(active)
+        self.check.setVisible(not active)
+        if not active:
+            self.pick.setChecked(False)
+
+    def is_picked(self) -> bool:
+        return self.pick.isVisible() and self.pick.isChecked()
+
+    def _on_label_release(self, event) -> None:
+        """Left click sends; right click only opens the context menu (R-095).
+
+        The release handler used to fire for *every* button, so the right-click
+        that should merely show "send / edit / move / delete" also transmitted
+        the command - the user saw a command go out while only asking for the
+        menu (L-127).
+        """
+        if event.button() == Qt.LeftButton:
+            self.send.emit(self.item)
 
     def _align_note(self) -> None:
         """Start the note exactly under the command text (R-079).
@@ -266,7 +296,7 @@ class GroupHeader(QWidget):
         self.label = QLabel(group.get("name") or group["id"])
         self.label.setStyleSheet("color: #121A2B; font-size: 12px; font-weight: 650;")
         self.label.setCursor(Qt.PointingHandCursor)
-        self.label.mouseReleaseEvent = lambda _event: self.toggled.emit(group["id"])
+        self.label.mouseReleaseEvent = self._on_label_release
         layout.addWidget(self.label)
 
         layout.addWidget(Badge(str(count)))
@@ -287,6 +317,11 @@ class GroupHeader(QWidget):
         self.edit_btn.setToolTip(tr("cmd.edit"))
         self.edit_btn.clicked.connect(lambda: self.rename.emit(group["id"]))
         layout.addWidget(self.edit_btn)
+
+    def _on_label_release(self, event) -> None:
+        """Only a left click collapses the group; the right one opens the menu."""
+        if event.button() == Qt.LeftButton:
+            self.toggled.emit(self.group["id"])
 
     def contextMenuEvent(self, event) -> None:
         menu = QMenu(self)
@@ -556,6 +591,7 @@ class CommandsPanel(QWidget):
         self.notify = notify
         self.timers: dict[str, QTimer] = {}
         self._collapsed = False
+        self._batch = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -572,6 +608,10 @@ class CommandsPanel(QWidget):
         self.drawer = self._build_drawer()
         body_layout.addWidget(self.drawer)
         self.drawer.hide()
+
+        self.batch_bar = self._build_batch_bar()
+        body_layout.addWidget(self.batch_bar)
+        self.batch_bar.hide()
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -625,8 +665,10 @@ class CommandsPanel(QWidget):
         self.btn_export.clicked.connect(lambda: self.export_dialog(""))
         self.btn_add = self._tool(GlyphButton.PLUS, tr("cmd.add"))
         self.btn_add.clicked.connect(lambda: self.open_editor(None))
+        self.btn_batch = self._tool(GlyphButton.SELECT, tr("cmd.batch"))
+        self.btn_batch.clicked.connect(self.toggle_batch)
         for button in (self.btn_paste, self.btn_group, self.btn_import,
-                       self.btn_export, self.btn_add):
+                       self.btn_export, self.btn_add, self.btn_batch):
             layout.addWidget(button)
 
         header.setObjectName("SideHeader")
@@ -671,6 +713,18 @@ class CommandsPanel(QWidget):
         self.paste_box.pasted.connect(self._on_paste)
         layout.addWidget(self.paste_box)
 
+        # Where the pasted commands land (R-093).  Without this the drawer could
+        # only import into "ungrouped" and the user had to move them afterwards.
+        group_row = QHBoxLayout()
+        group_row.setSpacing(6)
+        self.paste_group_label = QLabel(tr("cmd.paste.group"))
+        self.paste_group_label.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
+        group_row.addWidget(self.paste_group_label)
+        self.paste_group = Combo()
+        self.paste_group.setToolTip(tr("cmd.paste.group.tip"))
+        group_row.addWidget(self.paste_group, 1)
+        layout.addLayout(group_row)
+
         row = QHBoxLayout()
         self.paste_hint = QLabel("")
         self.paste_hint.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
@@ -681,17 +735,162 @@ class CommandsPanel(QWidget):
         self.btn_confirm = QPushButton(tr("cmd.dialog.confirmimport"))
         self.btn_confirm.setObjectName("Primary")
         self.btn_confirm.clicked.connect(
-            lambda: self.import_text(self.paste_box.toPlainText()))
+            lambda: self.import_text(self.paste_box.toPlainText(),
+                                     self.paste_group.currentData() or ""))
         row.addWidget(self.btn_cancel)
         row.addWidget(self.btn_confirm)
         layout.addLayout(row)
         return drawer
 
+    def _build_batch_bar(self) -> QWidget:
+        """Selection tools: pick many, move them together, delete them together."""
+        bar = QWidget()
+        bar.setObjectName("BatchBar")
+        bar.setStyleSheet(
+            f"QWidget#BatchBar {{ background: {theme.WASH};"
+            f" border: 1px solid {theme.LINE};"
+            f" border-radius: {theme.RADIUS_CARD}px; }}")
+        layout = QVBoxLayout(bar)
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setSpacing(6)
+
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        self.batch_count = QLabel(tr("cmd.batch.count", n=0))
+        self.batch_count.setStyleSheet(f"color: {theme.INK2}; font-size: 11.5px;")
+        head.addWidget(self.batch_count, 1)
+        self.btn_pick_all = QPushButton(tr("cmd.batch.all"))
+        self.btn_pick_all.setObjectName("Ghost")
+        self.btn_pick_all.clicked.connect(lambda: self._pick_all(True))
+        self.btn_pick_none = QPushButton(tr("cmd.batch.none"))
+        self.btn_pick_none.setObjectName("Ghost")
+        self.btn_pick_none.clicked.connect(lambda: self._pick_all(False))
+        self.btn_batch_exit = QPushButton(tr("cmd.batch.exit"))
+        self.btn_batch_exit.setObjectName("Ghost")
+        self.btn_batch_exit.clicked.connect(lambda: self.set_batch_mode(False))
+        for button in (self.btn_pick_all, self.btn_pick_none, self.btn_batch_exit):
+            button.setCursor(Qt.PointingHandCursor)
+            head.addWidget(button)
+        layout.addLayout(head)
+
+        tools = QHBoxLayout()
+        tools.setSpacing(6)
+        self.batch_group = Combo()
+        self.batch_group.setToolTip(tr("cmd.paste.group.tip"))
+        tools.addWidget(self.batch_group, 1)
+        self.btn_batch_move = QPushButton(tr("cmd.batch.move"))
+        self.btn_batch_move.setObjectName("Ghost")
+        self.btn_batch_move.clicked.connect(self.batch_move)
+        tools.addWidget(self.btn_batch_move)
+        self.btn_batch_delete = QPushButton(tr("cmd.batch.delete"))
+        self.btn_batch_delete.setObjectName("Danger")
+        self.btn_batch_delete.clicked.connect(self.batch_delete)
+        tools.addWidget(self.btn_batch_delete)
+        for button in (self.btn_batch_move, self.btn_batch_delete):
+            button.setCursor(Qt.PointingHandCursor)
+        layout.addLayout(tools)
+        return bar
+
+    # ------------------------------------------------------------ batch mode
+    def rows(self) -> list[CommandRow]:
+        return list(self.list_host.findChildren(CommandRow))
+
+    def set_batch_mode(self, active: bool) -> None:
+        """Swap every row's enable switch for a pick box (R-092)."""
+        self._batch = bool(active)
+        self.batch_bar.setVisible(self._batch)
+        self.btn_batch.set_glyph(GlyphButton.CLOSE if self._batch
+                                 else GlyphButton.SELECT)
+        if self._batch:
+            self.hide_drawer()
+            self._refresh_batch_groups()
+        for row in self.rows():
+            row.set_batch_mode(self._batch)
+        self._sync_batch_count()
+
+    def toggle_batch(self) -> None:
+        self.set_batch_mode(not self._batch)
+
+    def row_reachable(self, row: CommandRow) -> bool:
+        """True when the row is actually on screen.
+
+        ``isHidden()`` is False for a row whose *group holder* was hidden, so a
+        collapsed group would otherwise be silently included in "全选" and then
+        moved or deleted without ever being visible (R-092 / L-124).
+        """
+        widget: QWidget | None = row
+        while widget is not None and widget is not self:
+            if widget.isHidden():
+                return False
+            widget = widget.parentWidget()
+        return True
+
+    def picked_rows(self) -> list[CommandRow]:
+        """Picked and visible rows only."""
+        return [row for row in self.rows()
+                if self.row_reachable(row) and row.is_picked()]
+
+    def picked_ids(self) -> list[str]:
+        return [row.item["id"] for row in self.picked_rows()]
+
+    def _sync_batch_count(self, *_args) -> None:
+        chosen = len(self.picked_ids())
+        self.batch_count.setText(tr("cmd.batch.count", n=chosen))
+        for button in (self.btn_batch_move, self.btn_batch_delete):
+            button.setEnabled(chosen > 0)
+
+    def _pick_all(self, value: bool) -> None:
+        for row in self.rows():
+            if self.row_reachable(row):
+                row.pick.setChecked(value)
+        self._sync_batch_count()
+
+    def _refresh_batch_groups(self) -> None:
+        current = self.batch_group.currentData() or ""
+        self.batch_group.blockSignals(True)
+        self.batch_group.clear()
+        self.batch_group.addItem(tr("cmd.paste.nogroup"), "")
+        for group in self.store.groups:
+            self.batch_group.addItem(group.get("name") or group["id"], group["id"])
+        index = self.batch_group.findData(current)
+        self.batch_group.setCurrentIndex(index if index >= 0 else 0)
+        self.batch_group.blockSignals(False)
+
+    def batch_move(self) -> None:
+        ids = self.picked_ids()
+        if not ids:
+            return
+        group_id = self.batch_group.currentData() or ""
+        self.store.move_many(ids, group_id)
+        group = self.store.group_by_id(group_id)
+        name = (group or {}).get("name") or tr("cmd.ungrouped")
+        self.notify(tr("cmd.batch.moved", n=len(ids), name=name), "ok")
+
+    def batch_delete(self) -> None:
+        ids = self.picked_ids()
+        if not ids:
+            return
+        removed = self.store.remove_many(ids)
+        self.notify(tr("cmd.batch.deleted", n=removed), "ok")
+
     def show_drawer(self) -> None:
         self.drawer.setVisible(not self.drawer.isVisible())
         if self.drawer.isVisible():
+            self._refresh_paste_groups()
             self.paste_box.clear()
             self.paste_box.setFocus()
+
+    def _refresh_paste_groups(self) -> None:
+        """Rebuild the target-group list; keeps the current choice if it still exists."""
+        current = self.paste_group.currentData() or ""
+        self.paste_group.blockSignals(True)
+        self.paste_group.clear()
+        self.paste_group.addItem(tr("cmd.paste.nogroup"), "")
+        for group in self.store.groups:
+            self.paste_group.addItem(group.get("name") or group["id"], group["id"])
+        index = self.paste_group.findData(current)
+        self.paste_group.setCurrentIndex(index if index >= 0 else 0)
+        self.paste_group.blockSignals(False)
 
     def hide_drawer(self) -> None:
         self.paste_box.clear()
@@ -701,7 +900,7 @@ class CommandsPanel(QWidget):
     def _on_paste(self, text: str) -> None:
         if len(self.store.split_lines(text)) > 1:
             self.paste_box.clear()
-            self.import_text(text)
+            self.import_text(text, self.paste_group.currentData() or "")
 
     def import_text(self, raw: str, group_id: str = "") -> None:
         lines = self.store.split_lines(raw)
@@ -753,11 +952,19 @@ class CommandsPanel(QWidget):
                 row.remove.connect(self.remove_item)
                 row.toggled.connect(self.set_enabled)
                 row.moveTo.connect(self.move_item)
+                row.pick.toggled.connect(self._sync_batch_count)
                 if group is None:
                     self.list_layout.insertWidget(self.list_layout.count() - 1, row)
                     continue
                 self._group_bodies[group["id"]].layout().addWidget(row)
                 self._group_rows[group["id"]].append(row)
+
+        if self._batch:
+            # A rebuild creates new rows, which start un-picked and show the
+            # enable switch; the mode has to be re-applied to them (R-092).
+            for row in self.rows():
+                row.set_batch_mode(True)
+            self._sync_batch_count()
 
         count = len(self.store.items)
         self.count.setText(str(count))
@@ -960,6 +1167,15 @@ class CommandsPanel(QWidget):
         self.btn_group.setToolTip(tr("cmd.addgroup"))
         self.btn_import.setToolTip(tr("cmd.import"))
         self.btn_export.setToolTip(tr("cmd.export"))
+        self.btn_batch.setToolTip(tr("cmd.batch"))
+        self.btn_pick_all.setText(tr("cmd.batch.all"))
+        self.btn_pick_none.setText(tr("cmd.batch.none"))
+        self.btn_batch_exit.setText(tr("cmd.batch.exit"))
+        self.btn_batch_move.setText(tr("cmd.batch.move"))
+        self.btn_batch_delete.setText(tr("cmd.batch.delete"))
+        self.batch_group.setToolTip(tr("cmd.paste.group.tip"))
+        self.paste_group_label.setText(tr("cmd.paste.group"))
+        self.paste_group.setToolTip(tr("cmd.paste.group.tip"))
         self.paste_box.setPlaceholderText(tr("cmd.paste"))
         self.btn_cancel.setText(tr("cmd.dialog.cancel"))
         self.btn_confirm.setText(tr("cmd.dialog.confirmimport"))

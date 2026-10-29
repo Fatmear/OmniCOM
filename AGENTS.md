@@ -12,8 +12,8 @@ Rules
   Package: `python tools/make_dist.py --check --zip` → `dist/OmniCOM/` + `dist/OmniCOM-<ver>-win64.zip`
   (bundled CPython runtime + trimmed Qt bindings, so the user installs nothing).
 - Verify commands: `python tools/protocol_selftest.py` (X/Y/ZMODEM loopback, 23 checks),
-  `python tools/ui_selftest.py` (286 GUI acceptance checks incl. DEMO port),
-  `python tools/acceptance_test.py` (335 checks covering R-001..R-084 + `.artifacts/acceptance.json`),
+  `python tools/ui_selftest.py` (300+ GUI acceptance checks incl. DEMO port),
+  `python tools/acceptance_test.py` (R-001..R-100 + `.artifacts/acceptance.json`),
   `python tools/ui_snapshot.py` (renders `.artifacts/ui.png` for visual review),
   `python tools/contrast_audit.py` (light-theme text contrast must stay >= 4.5:1).
   GUI checks must start with their `R-0xx` id — an un-mapped check fails the run.
@@ -37,6 +37,34 @@ Rules
   `tr()`. Chinese mode must show **only** Chinese and English mode **only** English, context menus
   included (R-033). Never translate user data (command / group names). After touching copy, re-run
   `python tools/ui_selftest.py` (R-033 fails on any CJK left in the English UI).
+- A command row sends on **left click only** (R-095): `CommandRow._on_label_release` must keep the
+  `event.button() == Qt.LeftButton` guard — Qt delivers the release for every button, so without it a
+  right-click transmits (L-127).
+- Two font pairs (R-098): interface = `ui/font_family` + `ui/font_px` (`theme.set_ui_font_px`), log =
+  `display/log_family` + `display/log_px` (`theme.set_log_px`). Ctrl+wheel over the log is the third
+  entry point and goes through `LogView.zoom_font()` → `fontZoomed` → `OmniWindow._on_log_zoom`; never
+  change the UI size from the log path.
+- Brand block (R-100): the title bar name + tagline are pinned to their **glyph** height with
+  `QFontMetrics.tightBoundingRect()` (a `QLabel` box is ascent+descent, so caps-only lines carry 4-8 px
+  of slack and the pair looks split and high — L-128). Keep `_fit_brand_lines()` called from
+  `TitleBar.retranslate()` too, or Chinese/English taglines of different heights re-open the gap.
+- Desktop shortcut (R-097): `omnicom/shortcut.py` builds the `.lnk` through `WScript.Shell` COM (no
+  pywin32); the target is `<bundle>/runtime/pythonw.exe <bundle>/OmniCOM.pyz`, the icon is
+  `assets/omnicom.ico`, the name is `OmniCOM`, and `make_dist` ships `桌面快捷方式.cmd` +
+  `Create desktop shortcut.cmd`. Keep it idempotent (one file, overwritten).
+- When editing a method that exists in **two** classes (`retranslate`, `sizeHint`, `closeEvent`), quote
+  enough of the body in the anchor, and re-run `python tools/ui_selftest.py` right after: a two-line
+  anchor once replaced `OmniWindow.retranslate` with the title-bar version and broke language switching
+  and three suites (L-129).
+
+- Capture-to-file mirrors the log window (R-101): `SerialBridge` sets `recorder.text_mode = True`
+  and `OmniWindow._log_line()` pushes the composed line into `recorder.write_line()`. Never append
+  raw bytes from the GUI path (that is the CLI's mode), and never format the line a second way -
+  the string that reached `compose_line()` is the string that must reach the file.
+- `tools/ui_selftest.py` is only as good as its `runner.add(...)` list: a step that exists but is not
+  registered never runs and its checks silently vanish (34 registrations were once lost, taking the
+  send / record / sidebar suites with them - L-132). After touching that file, compare the count.
+
 - The distribution documents itself (R-086): `omnicom.ui.main` forwards `argv[0] == "cli"` to
   `omnicom.cli.main`, and `make_pyz`/`make_dist` copy `docs/CLI.md`, `docs/AI-GUIDE.md` and
   `LICENSE` into the bundle. Never let the two CLI surfaces drift.
@@ -70,3 +98,67 @@ Rules
 - GUI serial lifecycle calls go through `SerialBridge.open/close/update_opts`, not the manager
   directly; driver calls and reader joins must stay off the GUI thread (R-055 / L-069).
 - Launcher process scans also run off-thread (L-070); response tests must span its 4 s refresh.
+- UI state lives in INI files via `ui/settings_store.py` (`settings.ini` for preferences,
+  `window-<n>.ini` per window, OS-locked slot). Never reintroduce `QSettings(org, app)`: the
+  registry is machine-wide, so a portable copy would inherit an older install (R-088 / L-121).
+- Batch command edits go through `CommandStore.move_many/remove_many` (one write), and "is this row
+  on screen" is `CommandsPanel.row_reachable()` - `isHidden()` is false inside a collapsed group
+  (L-124). Batch mode uses the row's own `pick` box, never the enable switch.
+- `SendInput` history triggers on ↑ only when the cursor is on the first line; ↓ restores the draft
+  *before* the state is reset (L-125). Shortcut matching uses `QKeySequence.StandardKey`.
+- Never override `event()` on `OmniWindow`: it crashed the whole GUI suite at teardown (L-123).
+- The send panel has **one** file button (R-113): `btn_file` reads 发送文件 while idle
+  and 停止 while a transfer runs (`set_file_busy()` swaps the text, the `Danger` object
+  name and calls `_repolish`). Never add a second stop button - it pushed the column
+  around and the two states have to share one hit area. The stop state must keep the
+  button **enabled**, or there is no way to abort.
+- The two option rows share `OPT_LABEL_W` (`label.setFixedWidth`), so the HEX switch and
+  the 回车发送 switch start at the same x (R-114). Without it "HEX" is 33 px and "回车发送"
+  44 px, and the pair looks ragged.
+- 回车发送 is **off** by default (R-094, revised): `SendInput.enter_sends = False` and
+  `display/enter_send` defaults to "0". Shift+Enter still inserts a newline when it is on,
+  and Ctrl+Enter always sends.
+- `LogView` wraps with `QTextOption.WrapAnywhere`, never `WrapAtWordBoundaryOrAnywhere`
+  (L-139): a serial payload is one enormous "word", so the word-boundary mode keeps the
+  timestamp and `发→◇` alone on the first line and pushes the body to the second.
+- Restoring from the taskbar is **instantaneous** (`animate_show()` only stops the motion
+  and restores the rect; the alpha is set to 1.0). Any geometry animation on the way *in*
+  re-lays out all three columns and the whole window visibly stretches (R-105).
+- Never hang "cancel the pending minimize" off `ActivationChange` (L-132/L-138): clicking
+  the minimize button of a *background* window activates it first, and the cancel path ate
+  the legitimate click. `nativeEvent` / `SC_RESTORE` is the only cancel.
+- `omnicom/control.py` is the CLI<->window channel: the window hosts a loopback endpoint
+  and `cli.py` talks to it (`WindowSession`) instead of opening the port itself, so the CLI
+  and the UI can share COM1. `Server.poll()` hands each request to a handler that may
+  return `None` and answer later through the `Deferred` (`read`, transfers). Never block
+  the GUI thread inside a handler.
+- **Every window publishes its own endpoint** (`<data>/control/window-<pid>.json`, with
+  `serial`/`connected`/`slot`). Never go back to one shared `control.json`: the window that
+  started first used to swallow every CLI request, so two windows / two ports could not be
+  driven independently (R-119 / L-144). `Server.publish()` rewrites the file only when the
+  owned port changes - call it from `_on_status` **and** from `_control_snapshot`, because the
+  status signal is queued and a CLI reply could otherwise outrun the file.
+- The CLI routes **by port name**, never by window age: `pick_endpoint()` prefers the window
+  that already owns the port, then an idle window, and otherwise lets the CLI take the port
+  itself. `--window <PID>` / `--port COMx` pin it. A window must refuse to swap its current
+  port for another one (`_control_open` returns busy) - hijacking tore down the session the
+  user was watching.
+- `WindowSession._check_binding()` runs on **every** reply: when the window has no port open
+  (or owns a different one) the CLI raises 绑定结束. A CLI that kept writing into a closed
+  port looked perfectly healthy while losing every byte.
+- `_pid_alive()` must use `GetExitCodeProcess == STILL_ACTIVE`; `OpenProcess` succeeds for a
+  killed child that the parent still holds, which left a stale endpoint looking alive and the
+  CLI never falling back to direct mode (L-143).
+- **DTR / RTS default to off** (`DEFAULT_OPTS`, both `SwitchRow`s, CLI `--dtr`/`--rts`). A
+  raised DTR resets CH340/CP210x boards through the RESET capacitor, so opening a port used to
+  reboot the device (R-120 / L-145). Keep the INI fallback at "0".
+- Local-package updates go through `update.stage_local()` -> `stage()`, i.e. the same apply
+  path as the network download, so `omnicom-data/` and user plugins are equally protected.
+  Version comes from `VERSION_RE` inside the zipped `OmniCOM.pyz`, not from the file name;
+  anything without `OmniCOM.pyz` is refused before a single file is written (R-121).
+- `cli.fail()` writes `ok`/`error` **last**; putting `"ok": False` first let a payload that
+  carried `ok: True` override the verdict (L-143).
+- Log line spacing is **not implemented** (L-140). `QPlainTextEdit` ignores every
+  `LineHeightTypes` value, a custom `QPlainTextDocumentLayout` does nothing, and the only
+  working trick (a document font larger than the stylesheet font) scales the glyphs too.
+  Do not add a spacing preference without switching the widget to `QTextEdit` first.

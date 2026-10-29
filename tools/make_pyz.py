@@ -109,6 +109,16 @@ def build(target: Path, *, stubs_only: bool = False) -> Path:
         source = ROOT / "docs" / doc
         if source.is_file():
             shutil.copy2(source, target / doc)
+    # The READMEs embed `docs/images/*.png`; ship them or the copy inside the
+    # bundle shows six broken pictures.
+    images = ROOT / "docs" / "images"
+    if images.is_dir():
+        destination = target / "docs" / "images"
+        if destination.exists():
+            shutil.rmtree(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        for picture in sorted(images.glob("*.png")):
+            shutil.copy2(picture, destination / picture.name)
 
     (target / f"{NAME}.cmd").write_text(LAUNCHER, encoding="utf-8", newline="\r\n")
     (target / "console.cmd").write_text(CONSOLE_LAUNCHER, encoding="utf-8",

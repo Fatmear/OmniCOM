@@ -33,8 +33,12 @@ DEFAULT_OPTS = {
     "rtscts": False,
     "xonxoff": False,
     "dsrdtr": False,
-    "dtr": True,
-    "rts": True,
+    # DTR/RTS off by default (R-120): a raised DTR resets most USB-serial
+    # boards (CH340/CP210x wire it to RESET through a capacitor), so merely
+    # opening the port rebooted the device the user was watching.  Anyone who
+    # needs the line high flips the switch.
+    "dtr": False,
+    "rts": False,
     "autoReconnect": True,
 }
 
@@ -85,11 +89,13 @@ class DemoDevice:
         self._open = True
         self._line = bytearray()
         self._tick = 0
-        self.dtr = True
-        self.rts = True
+        self.dtr = False
+        self.rts = False
         self.baudrate = 115200
         self.is_open = True
         self._stop = threading.Event()
+        #: Seconds between real port enumerations (see _monitor_loop).
+        self._ports_at = 0.0
         self._threads = [
             threading.Thread(target=self._telemetry, daemon=True),
             threading.Thread(target=self._boot, daemon=True),
@@ -189,6 +195,9 @@ class DemoDevice:
 
 
 class PortManager:
+    #: ``comports()`` is expensive; the monitor reuses its last list
+    #: for this long instead of re-enumerating every wake-up (L-130).
+    SCAN_INTERVAL = 2.0
     def __init__(self, emit: Callable[[dict], None], demo: bool = False) -> None:
         self._emit = emit
         self.demo = demo
@@ -343,8 +352,8 @@ class PortManager:
                         exclusive=True,
                     )
                 with contextlib.suppress(Exception):
-                    handle.dtr = bool(opts.get("dtr", True))
-                    handle.rts = bool(opts.get("rts", True))
+                    handle.dtr = bool(opts.get("dtr", False))
+                    handle.rts = bool(opts.get("rts", False))
                 with contextlib.suppress(Exception):
                     handle.reset_input_buffer()
             except Exception as exc:
@@ -433,17 +442,28 @@ class PortManager:
     def _monitor_loop(self) -> None:
         while not self._stopping:
             try:
-                ports = list_serial_ports()
-                if self.demo:
-                    ports = [*ports, {
-                        "name": DEMO_PORT,
-                        "description": "虚拟演示串口（AT 回环 + 遥测）",
-                        "hwid": "DEMO\\OmniCOM",
-                        "vid": None, "pid": None,
-                        "serial": "DEMO-0001",
-                        "manufacturer": "OmniCOM",
-                        "product": "Virtual Demo Port",
-                    }]
+                # ``list_ports.comports()`` walks the device tree through ctypes
+                # and can hold the interpreter lock for a second on a machine
+                # with virtual COM devices, which starves the GUI thread while it
+                # runs (L-130).  The list is therefore refreshed at most once per
+                # SCAN_INTERVAL and reused in between: the loop still wakes every
+                # 0.4 s for the reconnect logic, but it no longer re-enumerates.
+                now = time.monotonic()
+                if self._ports and now - self._ports_at < self.SCAN_INTERVAL:
+                    ports = self._ports
+                else:
+                    ports = list_serial_ports()
+                    self._ports_at = now
+                    if self.demo:
+                        ports = [*ports, {
+                            "name": DEMO_PORT,
+                            "description": "虚拟演示串口（AT 回环 + 遥测）",
+                            "hwid": "DEMO\\OmniCOM",
+                            "vid": None, "pid": None,
+                            "serial": "DEMO-0001",
+                            "manufacturer": "OmniCOM",
+                            "product": "Virtual Demo Port",
+                        }]
                 signature = tuple(sorted((item["name"], item["hwid"]) for item in ports))
                 if signature != self._ports_sig:
                     self._ports_sig = signature
@@ -639,11 +659,19 @@ def _friendly_error(exc: Exception, port: str, present: bool | None = None) -> s
 
 
 class Recorder:
-    """Streams every transferred byte to disk, independent of any UI pause state.
+    """Writes traffic to disk, independent of any UI state.
 
-    Both directions are captured, in the order the bytes were observed, as one
-    byte-exact stream - a raw file cannot label its own bytes, so per-direction
-    counters are reported through :meth:`state` instead.
+    Two modes share one file handle:
+
+    * **text mode** (the GUI, :data:`text_mode` = True): only :meth:`write_line`
+      reaches the disk, so the file holds exactly what the log window shows -
+      ``[HH:mm:ss.mmm]收←◇payload`` per line (R-101).  The reader can tell the
+      two directions apart and knows when each line happened.
+    * **raw mode** (the CLI, default): :meth:`write` appends the bytes it is
+      given, producing a byte-exact stream.
+
+    Either way the counters in :meth:`state` keep measuring *traffic* bytes, so
+    the rail can report how much was captured without caring about the mode.
     """
 
     def __init__(self, directory: str, emit: Callable[[dict], None]) -> None:
@@ -654,6 +682,9 @@ class Recorder:
         self._path: str | None = None
         self._rx = 0
         self._tx = 0
+        self._lines = 0
+        #: True when the file is a rendered log mirror instead of raw bytes.
+        self.text_mode = False
 
     @property
     def active(self) -> bool:
@@ -666,7 +697,8 @@ class Recorder:
 
     def state(self) -> dict:
         return {"active": self.active, "path": self._path,
-                "bytes": self._rx + self._tx, "rx": self._rx, "tx": self._tx}
+                "bytes": self._rx + self._tx, "rx": self._rx, "tx": self._tx,
+                "lines": self._lines}
 
     def start(self) -> dict:
         with self._lock:
@@ -680,19 +712,38 @@ class Recorder:
             self._handle = open(self._path, "ab", buffering=0)  # noqa: SIM115
             self._rx = 0
             self._tx = 0
+            self._lines = 0
         self._emit({"t": "record", **self.state()})
         return self.state()
 
     def write(self, data: bytes, direction: str = "rx") -> None:
+        """Count ``data`` and, in raw mode, append it to the file."""
         with self._lock:
             if self._handle is None:
                 return
+            if direction == "tx":
+                self._tx += len(data)
+            else:
+                self._rx += len(data)
+            if self.text_mode or not data:
+                return
             try:
                 self._handle.write(data)
-                if direction == "tx":
-                    self._tx += len(data)
-                else:
-                    self._rx += len(data)
+            except Exception:
+                self.stop(silent=True)
+
+    def write_line(self, text: str) -> None:
+        """Append one rendered log line - the same string the view shows (R-101).
+
+        Called from the single log choke point, so captured lines and on-screen
+        lines cannot drift: whatever the window printed is what the file holds.
+        """
+        with self._lock:
+            if self._handle is None or not self.text_mode:
+                return
+            try:
+                self._handle.write((text + "\n").encode("utf-8"))
+                self._lines += 1
             except Exception:
                 self.stop(silent=True)
 
@@ -713,6 +764,7 @@ class Recorder:
                     return self.state()
                 self._rx = 0
                 self._tx = 0
+                self._lines = 0
             elif self._path:
                 try:
                     with open(self._path, "wb"):
@@ -721,6 +773,7 @@ class Recorder:
                     pass
                 self._rx = 0
                 self._tx = 0
+                self._lines = 0
         self._emit({"t": "record", **self.state(), "cleared": True})
         return self.state()
 

@@ -131,18 +131,8 @@ class SearchPanel(QWidget):
 
         self.results = QListWidget()
         self.results.setObjectName("Results")
-        self.results.setFont(theme.mono_font(12))
         self.results.setUniformItemSizes(True)
-        self.results.setStyleSheet(
-            f"QListWidget#Results {{ background: {theme.CARD};"
-            f' font-family: "{theme.resolve_mono()}"; font-size: 12px;'
-            f" border: 1px solid {theme.LINE_SOFT};"
-            f" border-radius: {theme.RADIUS_CARD}px; padding: 4px; }}"
-            f"QListWidget#Results::item {{ padding: 3px 6px;"
-            f" border-radius: {theme.RADIUS_CTRL}px; }}"
-            f"QListWidget#Results::item:hover {{ background: {theme.WASH_HOVER}; }}"
-            f"QListWidget#Results::item:selected {{ background: {theme.TEAL_SOFT};"
-            f" color: {theme.INK}; }}")
+        self.apply_font()
         self.results.itemDoubleClicked.connect(self._activate)
         self.results.itemActivated.connect(self._activate)
         body.addWidget(self.results, 1)
@@ -401,6 +391,21 @@ class SearchPanel(QWidget):
         self.hint.setText(tr("search.hint.hits") if self.keywords
                           else tr("search.hint.emptyfull"))
         self.hint.setVisible(True)
+
+    def apply_font(self) -> None:
+        """Follow the log font: one notch smaller than the log itself (R-096)."""
+        size = max(8, theme.log_px() - 1)
+        self.results.setFont(theme.mono_font(size))
+        self.results.setStyleSheet(
+            f"QListWidget#Results {{ background: {theme.CARD};"
+            f' font-family: "{theme.resolve_mono()}"; font-size: {size}px;'
+            f" border: 1px solid {theme.LINE_SOFT};"
+            f" border-radius: {theme.RADIUS_CARD}px; padding: 4px; }}"
+            f"QListWidget#Results::item {{ padding: 3px 6px;"
+            f" border-radius: {theme.RADIUS_CTRL}px; }}"
+            f"QListWidget#Results::item:hover {{ background: {theme.WASH_HOVER}; }}"
+            f"QListWidget#Results::item:selected {{ background: {theme.TEAL_SOFT};"
+            f" color: {theme.INK}; }}")
 
     def show_full_hint(self) -> None:
         self._refresh_full_hint()

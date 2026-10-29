@@ -313,6 +313,35 @@ class CommandStore(QObject):
                 self._commit()
                 return
 
+    # -------------------------------------------------------------- batches
+    def move_many(self, item_ids, group_id: str) -> int:
+        """Move several commands at once; one write, one ``changed`` signal.
+
+        Doing it per item (``move_to_group`` in a loop) rewrote the library file
+        once per command, which is both slow and a chance to lose the file if the
+        process dies in the middle (R-092).
+        """
+        wanted = set(item_ids)
+        target = group_id or UNGROUPED
+        moved = 0
+        for item in self.items:
+            if item["id"] in wanted and item.get("group") != target:
+                item["group"] = target
+                moved += 1
+        if moved:
+            self._commit()
+        return moved
+
+    def remove_many(self, item_ids) -> int:
+        """Delete several commands at once (R-092)."""
+        wanted = set(item_ids)
+        before = len(self.items)
+        self.items = [item for item in self.items if item["id"] not in wanted]
+        removed = before - len(self.items)
+        if removed:
+            self._commit()
+        return removed
+
     def groups_with_items(self) -> list[tuple[dict | None, list[dict]]]:
         """``[(group, items)]`` in display order; ``None`` is the ungrouped bucket."""
         buckets: dict[str, list[dict]] = {group["id"]: [] for group in self.groups}

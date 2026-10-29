@@ -53,6 +53,22 @@ def run(argv: list[str] | None = None, demo: bool = False) -> int:
 
     argv = list(sys.argv if argv is None else argv)
 
+    # A release downloaded from the update dialog is unpacked but not applied
+    # while the program runs (Windows locks the files).  It is copied over the
+    # bundle *here*, before any module is imported by the window and before
+    # anything can hold a handle - and it never touches omnicom-data, so the
+    # command library, captures and settings survive the upgrade (R-108).
+    try:
+        from .. import update as update_module
+
+        applied = update_module.pending()
+        if applied is not None:
+            upgraded = str(applied.get("version") or "")
+            update_module.apply_pending()
+            print(f"[OmniCOM] update {upgraded} applied")
+    except Exception as error:            # a failed update must not block startup
+        print(f"[OmniCOM] update skipped: {error}")
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(argv)
@@ -70,6 +86,9 @@ def run(argv: list[str] | None = None, demo: bool = False) -> int:
 
     window = OmniWindow(demo=demo)
     window.show()
+    # Lowest priority of anything the program does: the first release check
+    # waits until the window is up and idle (R-109).
+    window.schedule_update_check()
     window.raise_()
     window.activateWindow()
     return app.exec()
@@ -85,6 +104,13 @@ def main(argv: list[str] | None = None) -> int:
         from ..cli import main as cli_main
 
         return cli_main(argv[1:])
+
+    # ``shortcut`` is the other agent-friendly sub-command: the portable folder
+    # ships a one-click .cmd that ends up calling this (R-097).
+    if argv and argv[0] == "shortcut":
+        from ..shortcut import main as shortcut_main
+
+        return shortcut_main(argv[1:])
 
     parser = argparse.ArgumentParser(prog="omnicom",
                                      description="OmniCOM — All-in-One Embedded Serial Debugger")

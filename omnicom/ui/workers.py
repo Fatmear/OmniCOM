@@ -29,6 +29,10 @@ class SerialBridge(QObject):
     """
 
     rx = Signal(float, bytes)
+    #: Every byte that reached the device, whatever path sent it.  The CLI
+    #: control channel uses this to show CLI sends in the window (R-112); the
+    #: echo setting still decides whether the *view* prints them.
+    tx = Signal(float, bytes)
     status = Signal(dict)
     ports = Signal(list)
     notice = Signal(str, str)
@@ -46,6 +50,11 @@ class SerialBridge(QObject):
             max_workers=1, thread_name_prefix="omnicom-port")
         self.manager = PortManager(self._dispatch, demo=demo)
         self.recorder = Recorder(paths.logs_dir(), self._dispatch)
+        # The GUI capture mirrors the log window: lines arrive through
+        # ``Recorder.write_line`` from the single log choke point, so the file
+        # holds timestamps and directions exactly as printed (R-101).  The CLI
+        # keeps the default raw, byte-exact mode.
+        self.recorder.text_mode = True
 
     def open(self, port: str, opts: dict) -> None:
         self._submit(self.manager.open, port, dict(opts))
@@ -87,8 +96,10 @@ class SerialBridge(QObject):
                 self.recorder.write(data, "rx")
             self.rx.emit(time.time() * 1000.0, data)
         elif kind == "tx":
+            payload = event.get("d") or b""
             if self.recorder.active:
-                self.recorder.write(event.get("d") or b"", "tx")
+                self.recorder.write(payload, "tx")
+            self.tx.emit(time.time() * 1000.0, payload)
         elif kind == "status":
             with self._operation_lock:
                 busy = self._pending > 0

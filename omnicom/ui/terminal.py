@@ -20,8 +20,10 @@ import codecs
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPlainTextEdit,
     QVBoxLayout,
     QWidget,
@@ -73,11 +75,12 @@ class TerminalView(QPlainTextEdit):
         self.setMaximumBlockCount(MAX_BLOCKS)
         self.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.setFrameShape(QPlainTextEdit.NoFrame)
-        self.setFont(theme.mono_font(13))
+        self.setFont(theme.mono_font(theme.log_px()))
         self.setStyleSheet(
             f"QPlainTextEdit#Terminal {{ background: {theme.TERM_BG};"
             f" border: 0; border-radius: 14px; padding: 8px 12px;"
-            f' font-family: "{theme.resolve_mono()}"; font-size: 13px;'
+            f' font-family: "{theme.resolve_mono()}";'
+            f" font-size: {theme.log_px()}px;"
             f" color: {theme.TERM_INK};"
             " selection-background-color: rgba(94, 226, 155, 60); }")
         self.enter = enter
@@ -86,6 +89,17 @@ class TerminalView(QPlainTextEdit):
         self._fg = DEFAULT_FG
         self._bold = False
         self._esc = ""
+
+    def apply_font(self) -> None:
+        """Follow the log font preference (same monospace face, same size)."""
+        size = theme.log_px()
+        self.setFont(theme.mono_font(size))
+        self.setStyleSheet(
+            f"QPlainTextEdit#Terminal {{ background: {theme.TERM_BG};"
+            f" border: 0; border-radius: 14px; padding: 8px 12px;"
+            f' font-family: "{theme.resolve_mono()}"; font-size: {size}px;'
+            f" color: {theme.TERM_INK};"
+            " selection-background-color: rgba(94, 226, 155, 60); }")
 
     # ------------------------------------------------------------------ input
     def set_enter(self, enter: bytes) -> None:
@@ -145,6 +159,52 @@ class TerminalView(QPlainTextEdit):
 
     IGNORED_KEYS = (Qt.Key_Shift, Qt.Key_Control, Qt.Key_Alt, Qt.Key_Meta,
                     Qt.Key_CapsLock, Qt.Key_NumLock)
+
+    # ------------------------------------------------------------------ menu
+    def contextMenuEvent(self, event) -> None:
+        """Copy / paste / select-all / clear, as a terminal is expected to have.
+
+        Paste must go through ``keyBytes`` like a typed character would: the
+        device is the destination, not this widget (which is read-only) - a
+        clipboard paste that only changed the display would look like it worked
+        while nothing reached the port (R-091).
+        """
+        menu = QMenu(self)
+        menu.setStyleSheet(theme.app_stylesheet())
+
+        copy = menu.addAction(tr("term.menu.copy"))
+        copy.setShortcut("Ctrl+Shift+C")
+        copy.setEnabled(self.textCursor().hasSelection())
+        paste = menu.addAction(tr("term.menu.paste"))
+        paste.setShortcut("Ctrl+Shift+V")
+        paste.setEnabled(bool(QApplication.clipboard().text()))
+        select_all = menu.addAction(tr("term.menu.selectall"))
+        menu.addSeparator()
+        clear = menu.addAction(tr("term.menu.clear"))
+
+        picked = menu.exec(event.globalPos())
+        if picked is copy:
+            self.copy_selection()
+        elif picked is paste:
+            self.paste_clipboard()
+        elif picked is select_all:
+            self.selectAll()
+        elif picked is clear:
+            self.reset()
+
+    def copy_selection(self) -> bool:
+        cursor = self.textCursor()
+        if not cursor.hasSelection():
+            return False
+        QApplication.clipboard().setText(
+            cursor.selectedText().replace("\u2029", "\n"))
+        return True
+
+    def paste_clipboard(self) -> None:
+        """Send the clipboard text to the device as if it were typed."""
+        text = QApplication.clipboard().text()
+        if text:
+            self.keyBytes.emit(text.encode("utf-8"))
 
     # ------------------------------------------------------------------ output
     def reset(self) -> None:
@@ -393,6 +453,10 @@ class TerminalPage(QWidget):
 
     def reset(self) -> None:
         self.view.reset()
+
+    def apply_font(self) -> None:
+        """Terminal text follows the log font setting (R-096)."""
+        self.view.apply_font()
 
     def retranslate(self) -> None:
         self.title.setText(tr("term.title"))

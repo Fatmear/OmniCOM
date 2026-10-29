@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from .. import __version__, docs, i18n, paths
 from . import theme
 from .log_view import DEFAULT_BUFFER_MB, MAX_BUFFER_MB, MIN_BUFFER_MB
+from .send_panel import HISTORY_DEFAULT, HISTORY_MAX, HISTORY_MIN
 from .widgets import Button as QPushButton
 from .widgets import Combo, GlyphButton
 
@@ -47,16 +48,24 @@ class PreferencesDialog(QDialog):
     accentChanged = Signal(str)
     wallpaperChanged = Signal(str)
     bufferChanged = Signal(int)
+    uiFontChanged = Signal(str, int)     # family ("" = built-in stack), pixel size
+    logFontChanged = Signal(str, int)
+    historyLimitChanged = Signal(int)    # how many typed commands ↑ remembers
+    historyCleared = Signal()
 
     def __init__(self, parent=None, current_language: str = "zh",
                  log_dir: str = "", accent: str = "",
-                 wallpaper: str = "", buffer_mb: int = DEFAULT_BUFFER_MB) -> None:
+                 wallpaper: str = "", buffer_mb: int = DEFAULT_BUFFER_MB,
+                 ui_family: str = "", ui_px: int = 13,
+                 log_family: str = "", log_px: int = 13,
+                 history_limit: int = 50, history_count: int = 0) -> None:
         super().__init__(parent)
         self.setWindowTitle(i18n.tr("pref.title"))
         self.setModal(True)
         self.resize(560, 566)
         self.setMinimumWidth(460)
         self._log_dir = log_dir or paths.logs_dir()
+        self._history_entries = int(history_count or 0)
         self._wallpaper = wallpaper or ""
 
         layout = QVBoxLayout(self)
@@ -156,6 +165,71 @@ class PreferencesDialog(QDialog):
         layout.addLayout(row)
         self.buffer_hint = self._hint(layout, "pref.buffer.hint")
 
+        # ---- fonts (R-096/R-098).  Two independent pairs: the interface and the
+        # log are read for different reasons, so a comfortable UI with a loud log
+        # (or the reverse) has to be possible.
+        self.ui_font_section = self._section(layout, "pref.font.ui")
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.ui_family_box = self._family_combo(ui_family)
+        row.addWidget(self.ui_family_box, 1)
+        self.ui_size = QSpinBox()
+        self.ui_size.setRange(theme.UI_FONT_MIN, theme.UI_FONT_MAX)
+        self.ui_size.setSuffix(" px")
+        self.ui_size.setValue(max(theme.UI_FONT_MIN,
+                                  min(theme.UI_FONT_MAX, int(ui_px or 13))))
+        row.addWidget(self.ui_size)
+        layout.addLayout(row)
+        self.ui_font_hint = self._hint(layout, "pref.font.ui.hint")
+
+        self.log_font_section = self._section(layout, "pref.font.log")
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.log_family_box = self._family_combo(log_family)
+        row.addWidget(self.log_family_box, 1)
+        self.log_size = QSpinBox()
+        self.log_size.setRange(theme.LOG_FONT_MIN, theme.LOG_FONT_MAX)
+        self.log_size.setSuffix(" px")
+        self.log_size.setValue(max(theme.LOG_FONT_MIN,
+                                   min(theme.LOG_FONT_MAX, int(log_px or 13))))
+        row.addWidget(self.log_size)
+        layout.addLayout(row)
+        self.log_font_hint = self._hint(layout, "pref.font.log.hint")
+
+        # ---- send history (R-116).  Bounded on purpose: an unbounded list grows
+        # the settings file forever, and ↑ stops being a shortcut.  The count is
+        # shown so 清除历史记录 has something to report.
+        self.history_section = self._section(layout, "pref.history")
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.history_value = QSpinBox()
+        self.history_value.setRange(HISTORY_MIN, HISTORY_MAX)
+        self.history_value.setSingleStep(5)
+        self.history_value.setSuffix(i18n.tr("pref.history.unit"))
+        self.history_value.setValue(
+            max(HISTORY_MIN, min(HISTORY_MAX, int(history_limit or HISTORY_DEFAULT))))
+        self.history_value.setToolTip(i18n.tr("pref.history.tip"))
+        self.history_value.valueChanged.connect(self._on_history_limit)
+        row.addWidget(self.history_value)
+        self.history_count = QLabel(
+            i18n.tr("pref.history.count", count=int(history_count or 0)))
+        self.history_count.setStyleSheet(f"color: {theme.INK2}; font-size: 11.5px;")
+        row.addWidget(self.history_count)
+        row.addStretch(1)
+        self.btn_clear_history = QPushButton(i18n.tr("pref.history.clear"))
+        self.btn_clear_history.setObjectName("Ghost")
+        self.btn_clear_history.setCursor(Qt.PointingHandCursor)
+        self.btn_clear_history.setEnabled(bool(history_count))
+        self.btn_clear_history.clicked.connect(self._on_clear_history)
+        row.addWidget(self.btn_clear_history)
+        layout.addLayout(row)
+        self.history_hint = self._hint(layout, "pref.history.hint")
+
+        self.ui_family_box.currentIndexChanged.connect(self._on_ui_font)
+        self.ui_size.valueChanged.connect(self._on_ui_font)
+        self.log_family_box.currentIndexChanged.connect(self._on_log_font)
+        self.log_size.valueChanged.connect(self._on_log_font)
+
         layout.addStretch(1)
         # The window frame already offers a close button (R-044).
 
@@ -175,6 +249,36 @@ class PreferencesDialog(QDialog):
         label.setStyleSheet(f"color: {theme.DIM}; font-size: 11.5px;")
         layout.addWidget(label)
         return label
+
+    @staticmethod
+    def _family_combo(current: str) -> Combo:
+        """Family picker: first entry follows the built-in stack, then the system."""
+        from PySide6.QtGui import QFontDatabase
+
+        box = Combo()
+        box.addItem(i18n.tr("pref.font.default"), "")
+        families = sorted(set(QFontDatabase.families()), key=str.lower)
+        for family in families:
+            box.addItem(family, family)
+        index = box.findData((current or "").strip())
+        box.setCurrentIndex(index if index >= 0 else 0)
+        return box
+
+    def _on_history_limit(self, value: int = 0) -> None:
+        self.historyLimitChanged.emit(int(value))
+
+    def _on_clear_history(self) -> None:
+        self.history_count.setText(i18n.tr("pref.history.count", count=0))
+        self.btn_clear_history.setEnabled(False)
+        self.historyCleared.emit()
+
+    def _on_ui_font(self, _index: int = 0) -> None:
+        self.uiFontChanged.emit(self.ui_family_box.currentData() or "",
+                                int(self.ui_size.value()))
+
+    def _on_log_font(self, _index: int = 0) -> None:
+        self.logFontChanged.emit(self.log_family_box.currentData() or "",
+                                 int(self.log_size.value()))
 
     def _paint_swatch(self, key: str) -> None:
         ink = theme.ACCENTS.get(key, theme.ACCENTS[theme.DEFAULT_ACCENT])[2]
@@ -245,6 +349,20 @@ class PreferencesDialog(QDialog):
         self.buffer_section.setText(i18n.tr("pref.buffer"))
         self.buffer_hint.setText(i18n.tr("pref.buffer.hint"))
         self.buffer_value.setToolTip(i18n.tr("pref.buffer.tip"))
+        self.ui_font_section.setText(i18n.tr("pref.font.ui"))
+        self.ui_font_hint.setText(i18n.tr("pref.font.ui.hint"))
+        self.log_font_section.setText(i18n.tr("pref.font.log"))
+        self.log_font_hint.setText(i18n.tr("pref.font.log.hint"))
+        self.history_section.setText(i18n.tr("pref.history"))
+        self.history_value.setToolTip(i18n.tr("pref.history.tip"))
+        self.history_value.setSuffix(i18n.tr("pref.history.unit"))
+        self.btn_clear_history.setText(i18n.tr("pref.history.clear"))
+        self.history_hint.setText(i18n.tr("pref.history.hint"))
+        self.history_count.setText(
+            i18n.tr("pref.history.count", count=self._history_entries))
+        family_default = i18n.tr("pref.font.default")
+        self.ui_family_box.setItemText(0, family_default)
+        self.log_family_box.setItemText(0, family_default)
         for index, (_key, zh, en) in enumerate(theme.accent_choices()):
             self.accent_box.setItemText(index, zh if i18n.language() == "zh" else en)
         self._show_wallpaper(self._wallpaper)

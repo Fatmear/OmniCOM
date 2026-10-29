@@ -47,7 +47,7 @@ OmniCOM.cmd cli send --port DEMO --data "AT" --expect OK --wait 2
 OmniCOM.cmd cli info
 ```
 ```json
-{"ok": true, "version": "1.1.2", "python": "3.13.14", "pyserial": "3.5",
+{"ok": true, "version": "1.1.3", "python": "3.13.14", "pyserial": "3.5",
  "serial_available": true, "data_dir": "…", "logs_dir": "…",
  "received_dir": "…", "demo_port": "DEMO", "platform": "win32"}
 ```

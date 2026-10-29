@@ -1,37 +1,54 @@
 # Current handoff
-Updated: 2026-10-28 (v1.1.2 release: self-contained portable package)
+Updated: 2026-10-29 (v1.1.3: software update, instant restore, send-panel polish)
 
-Current objective: v1.1.2 is released as a **self-contained folder** - the shipped
-`dist/OmniCOM/` carries the official CPython embeddable runtime, the trimmed Qt
-bindings and `OmniCOM.pyz`, so it starts on a machine that has nothing installed.
-Feature set of 1.1.x is complete: 100 MB log budget, glass panes, text-only caption
-row, own rounded glass tooltip, no-exe packaging, preferences (folder / accent /
-wallpaper / buffer), live search, launcher two areas, keep-awake, RX+TX capture.
-Version **1.1.2**; tagged and released as a GitHub release with the portable zip attached:
-https://github.com/Fatmear/OmniCOM/releases/tag/v1.1.2
-**86 requirements / 346 checks** pass automated verification.
+Current objective: v1.1.3 adds **self-update** and settles the window motion and the
+send panel.  A window that is idle asks the GitHub release API once, in the
+background; a newer release lights a red dot on the menu button, can be downloaded
+and staged, and the swap runs **before Qt starts** on the next launch without ever
+touching `omnicom-data/` (commands, captures, settings, plugins) - R-107/R-108.
+Still true from 1.1.2: self-contained folder, 100 MB log budget, glass panes,
+text-only caption row, own tooltip, no-exe packaging, live search, launcher, keep-awake.
+Users today have the 1.1.2 zip: https://github.com/Fatmear/OmniCOM/releases/tag/v1.1.2
+Version **1.1.3**; **97 requirements / 559 checks** pass automated verification.
 Real hardware remains untested - never infer driver timings from DEMO runs.
 
 Source run: `start.cmd`, `python run.py`, `python run.py --demo` (虚拟串口).
 CLI: `python -m omnicom.cli …` (never spawned automatically).
 Package: `python tools/make_dist.py --check --zip` → `dist/OmniCOM/` +
-`dist/OmniCOM-1.1.2-win64.zip` (~98 MB folder / 40 MB zip, no installs needed).
+`dist/OmniCOM-1.1.3-win64.zip` (~98 MB folder / 40 MB zip, no installs needed).
 
 Constraint IDs to check before acting: R-019 (no self-built exe), R-017 (no silent byte loss),
 R-012 (auto-scroll), R-024 (log line shape), R-033 (bilingual), R-035 (responsive),
 R-041 (instant collapse), R-049 (primary line + visible notes), R-054 (UI performance),
 R-055 (nonblocking lifecycle), R-063 (launcher two areas), R-066 (capture RX+TX),
-R-068 (equal side columns), R-069 (version 1.1.2), R-070 (capture folder),
+R-068 (equal side columns), R-069 (version 1.1.3), R-070 (capture folder),
 R-071 (accent + wallpaper), R-072 (live search append), R-076 (no extra console),
 R-077 (glass panes), R-078 (records folder), R-079 (note alignment), R-080 (1 s tooltip),
 R-081 (size budget + loss count), R-082 (text-only caption row), R-083 (self-contained
 package), R-084 (own rounded glass tooltip), R-085 (animated minimize/restore), R-086
-(shipped CLI docs + MIT licence). Full list: `REQUIREMENTS.md`.
+(shipped CLI docs + MIT licence), R-087 (long log lines wrap), R-088 (file-based settings, independent windows), R-089
+(Ctrl+C copies the log), R-090 (send history), R-091 (terminal paste), R-092 (batch
+commands), R-093 (import into a group), R-094 (Enter-to-send switch), R-095 (left click only),
+R-096 (Ctrl+wheel log zoom), R-097 (one-click desktop shortcut), R-098 (two font pairs),
+R-099 (file buttons inside the send column), R-100 (brand block tight + centred),
+R-101 (capture mirrors the log), R-102 (clear/save view in the rail), R-103 (file
+buttons under 发送), R-104 (one face per group), R-105 (instant restore, no stretch),
+R-106 (progress + name row), R-107 (background update check), R-108 (update never
+touches user data), R-109 (update is the lowest priority), R-110 (\r\n band with
+stacked options), R-113 (发送文件 / 停止 is one button), R-114 (option switches
+aligned), R-115 (long lines keep their prefix), R-116 (send history bounded: 50 by
+default, 300 max, clearable in Preferences), R-117 (port list shows 端口号 + 设备名),
+R-118 (rail 窗口 heading), R-119 (CLI binds to the window that owns the port; several
+windows / ports side by side; a closed port ends the CLI binding), R-120 (DTR/RTS off
+by default so opening a port never resets a board), R-121 (offline update from a local
+release zip).
+Full list: `REQUIREMENTS.md`.
 
-Verified in repository (2026-10-28):
-- `python tools/acceptance_test.py` → **346 checks, 0 failures, 0 uncovered,
-  86 requirements, ALL REQUIREMENTS VERIFIED** (`.artifacts/acceptance.json`, 2026-10-28 15:13:41).
-- GUI suite: **286/286**, including the buffer budget, the text-only strip and the tooltip card.
+Verified in repository (2026-10-29):
+- `python tools/acceptance_test.py` → **512 checks, 0 failures, 0 uncovered,
+  94 requirements, ALL REQUIREMENTS VERIFIED**.
+- GUI suite: **414/414**, including the update flow, instant restore, the one-button
+  file send and the long-line wrap.
 - `python -m ruff check .` → All checks passed; `tools/protocol_selftest.py` → 23/23;
   `tools/contrast_audit.py` → 15/15 ≥ 4.5:1; READMEs regenerated from `docs.py`.
 - `python tools/make_dist.py --check --zip` → packaged `--selftest` OK with the bundled
@@ -43,6 +60,17 @@ Verified in repository (2026-10-28):
 | --- | --- | --- |
 | 打包要能直接跑，不装依赖 | 只发 `OmniCOM.pyz`，目标机得自己装 Python/PySide6 | 包内自带 CPython embeddable 运行时 + 裁剪后的 PySide6/shiboken6/pyserial，`_pth` 钉死搜索路径 |
 | 工程里要有干净的 1.1.2 | 版本号写在 `__init__.py` | 版本、README、需求表、测试断言全部同步到 1.1.2 |
+
+## 本轮 (UI round, 2026-10-28)
+
+| 反馈 | 根因 | 现在 |
+| --- | --- | --- |
+| 右键命令也会发送 | `mouseReleaseEvent` 不看 `event.button()`，右键抬起同样走发送分支 | 只认 `LeftButton`（R-095） |
+| 日志要能 Ctrl+滚轮缩放字号 | 日志视图没有滚轮处理 | `wheelEvent` 判 Ctrl → `zoom_font(±1)` 并发 `fontZoomed`，主窗口存 `display/log_px`（R-096） |
+| 界面和日志字体要分开改 | 主题里只有一套字体令牌暴露到首选项 | 两套 family+px（`ui/*`、`display/log_*`），首选项两组控件（R-098） |
+| 打开/发送文件按钮并入发送列 | 文件区单独一列 | 三个按钮同列、文件名在其左、进度条更左（R-099） |
+| 顶部栏品牌两行离太远、想垂直居中 | `QLabel` 高度=行高（ascent+descent），全大写/中文没有下伸部 → 每行下白留 4-8 px | 按字形轮廓 `tightBoundingRect` 钉高度 + 2 px 间距 + 上下弹簧 + 2 px 下边距补偿（R-100） |
+| 打包要能一键建桌面快捷方式 | 只有 `.cmd`，用户得手动「发送到 → 桌面」 | `omnicom/shortcut.py` + 包内「桌面快捷方式.cmd」，名字/图标/目标都正确且可重复执行（R-097） |
 
 ## Performance evidence
 
@@ -93,5 +121,14 @@ Before: `.artifacts/ui-perf-before.json`; final: `.artifacts/ui-perf.json`.
   结束后必须用 `_motion_target` 还原，否则每来一次窗口小一圈（L-117）。
 - 发行包必须自带 `CLI.md` / `AI-GUIDE.md` / `LICENSE`；`OmniCOM.cmd cli …` 与
   `python -m omnicom.cli` 必须是同一个契约（R-086）。
+- 日志必须保持 `WidgetWidth` + `WrapAtWordBoundaryOrAnywhere` 且关闭横向滚动条；
+  不要为了 HEX 对齐改回 `NoWrap`（R-087/L-119）。
+- 界面状态只能走 `ui/settings_store.py`（INI 文件）；**不要再用 `QSettings(org, app)`**，那会写注册表并让便携包继承旧配置（R-088/L-121）。
+- 键盘快捷键判定用 `QKeySequence.StandardKey`，`QKeyEvent` 没有这个属性（L-122）。
+- 不要在 `OmniWindow` 上覆盖 `event()`：曾导致整套验收在退出时崩溃（L-123）。
+- 批量选择用行内独立的 `pick` 框（`set_batch_mode`），不要复用「启用」开关；判断行是
+  否可见要走 `row_reachable()`（折叠分组里 `isHidden()` 为假，L-124）。
+- 批量改动走 `CommandStore.move_many/remove_many`，不要循环调用单条 API（L-126）。
+- 发送框的 ↑ 历史只在光标位于首行时触发，多行命令必须先能在框内移动光标（R-090）。
 - 测试套件必须用自己的数据目录（`OMNICOM_DATA_DIR` → `.artifacts/test-data/…`），
   绝不允许写进仓库的 `omnicom-data/`；否则真实命令库会被污染、套件也不再可重复（L-116）。

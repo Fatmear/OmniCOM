@@ -58,6 +58,53 @@ HEADER_ZH = f"""<div align="center">
 | 自动化 | 只能手点 | 单 JSON 输出的 CLI，供 AI 与脚本直接调用 |
 | 分发 | 装 Python、装依赖 | 免安装便携包，解压即用 |
 
+### 它解决的四个具体问题
+
+**1. 日志看得见、也留得住。** 每行都带毫秒时间戳与收发方向；不可见字符（CR / LF / 0x00）可以显式画出来，排查协议时不用猜。日志按**字节预算**缓冲（默认 100 MB，首选项可调到 4 ~ 500 MB），超限先丢最早的行，丢了多少行一直显示在工具栏上——接得再快也不会把界面拖死，也不会悄悄丢字节。
+
+**2. 命令不是一次性输入。** 命令库支持分组、备注、行尾、延时、周期定时与 HEX，可以整组「依次发送」、导出成 JSON 给同事、粘贴多行自动拆分。分组折叠是即点即应（不重建列表、不写盘）。
+
+**3. 固件传完不用换工具。** XMODEM / YMODEM / ZMODEM 内置；普通文件发送按普通发送写进日志，带进度条与实时速率；接收到的文件自动落进 `omnicom-data/received/`。
+
+**4. 机器也能操作它。** 同一个入口还是 CLI：`stdout` 只有一个 JSON 文档，AI 或脚本可以直接 `json.loads`。窗口开着的时候，CLI **不抢串口**——它把请求交给已经开着该串口的那个窗口，所以你屏幕上看到的日志就是 CLI 看到的内容；窗口关了串口，CLI 的绑定立刻结束，不会往空口里静默写数据。
+
+### 一些刻意的取舍
+
+- **不做网页版**：没有本地 HTTP 服务、没有浏览器内核，窗口就是全部界面。
+- **不发布自编译 exe**：便携包内是官方 CPython 运行时 + 裁剪过的 Qt 绑定，双击 `OmniCOM.cmd` 即可，既不触发杀软误报，也不需要安装任何东西。
+- **设置放在文件里**：`settings.ini` 与每窗口 `window-<n>.ini`，便携包拷到别的机器不会继承旧注册表，也不会被别的版本覆盖。
+- **中英文严格隔离**：中文界面只出现中文，英文界面只出现英文（连右键菜单也是），测试里有一条专门扫描英文界面里的中文字符。
+- **默认不拉 DTR / RTS**：很多 USB 串口板子把 DTR 经电容接到 RESET，一开串口就复位——所以默认不动，需要时手动打开。
+
+
+## 界面
+
+![OmniCOM 主界面](docs/images/main.png)
+
+<sub>1440×900 · 左侧串口与显示选项，中间「串口日志 / 终端模式 / 文件传输」，右侧命令库与关键字搜索，底部输入框与定时发送。</sub>
+
+<table>
+<tr>
+<td width="33%" valign="top"><img src="docs/images/terminal.png" alt="终端模式"><br>
+<sub><b>终端模式</b>：键盘直接进串口，Enter / Ctrl+C / 方向键按设备要求发送。</sub></td>
+<td width="33%" valign="top"><img src="docs/images/transfer.png" alt="文件传输"><br>
+<sub><b>文件传输</b>：XMODEM / YMODEM / ZMODEM 收发，进度与吞吐实时可见。</sub></td>
+<td width="33%" valign="top"><img src="docs/images/preferences.png" alt="首选项"><br>
+<sub><b>首选项</b>：中英文、日志缓冲、字体、主题色、壁纸、发送历史。</sub></td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td width="50%" valign="top"><img src="docs/images/update.png" alt="软件更新"><br>
+<sub><b>软件更新</b>：在线查新，也可以选一个本地升级包离线安装。</sub></td>
+<td width="50%" valign="top"><img src="docs/images/manual.png" alt="使用说明"><br>
+<sub><b>使用说明</b>：随程序内置，与这份 README 同源，永不脱节。</sub></td>
+</tr>
+</table>
+
+截图由 `python tools/make_screenshots.py` 用真实程序渲染（虚拟串口 DEMO），不是拼的示意图。
+
 ## 功能
 
 <table>
@@ -235,6 +282,53 @@ local web server, no browser, and no self-built executable in the distribution.
 | Transfer | a separate protocol tool | XMODEM / YMODEM / ZMODEM built in |
 | Automation | clicking only | a single-JSON CLI for agents and scripts |
 | Distribution | install Python, install deps | a portable folder, unzip and run |
+
+### Four concrete problems it solves
+
+**1. The log is visible - and keeps itself.** Every line carries a millisecond timestamp and a direction marker; control bytes (CR / LF / 0x00) can be drawn explicitly so protocol bugs stop being guesswork. The log is buffered by a **byte budget** (100 MB by default, 4-500 MB in Preferences): the oldest lines go first and the dropped count stays on the toolbar, so a chatty device can neither freeze the UI nor lose bytes silently.
+
+**2. Commands are not throwaway typing.** The library supports groups, notes, line endings, delays, periodic sends and HEX; a whole group can be sent in order, exported as JSON for a colleague, and pasted multi-line text splits into entries automatically. Collapsing a group is instant - no list rebuild, no disk write.
+
+**3. Firmware transfer needs no second tool.** XMODEM / YMODEM / ZMODEM are built in; a plain file send is printed to the log like any other send, with a progress bar and live throughput; received files land in `omnicom-data/received/`.
+
+**4. A machine can drive it too.** The same entry point is a CLI whose `stdout` is one JSON document, ready for `json.loads`. While a window is open the CLI **does not grab the port**: it hands the request to the window that already owns it, so what you see on screen is what the agent sees - and when the window closes the port, the CLI's binding ends immediately instead of writing into nothing.
+
+### Deliberate trade-offs
+
+- **No web UI**: no local HTTP service, no browser engine - the window *is* the interface.
+- **No self-built exe**: the portable folder ships the official CPython runtime plus trimmed Qt bindings; double-click `OmniCOM.cmd`, no antivirus drama, nothing to install.
+- **Settings live in files**: `settings.ini` plus a per-window `window-<n>.ini`, so a portable copy never inherits an older install's registry.
+- **Chinese and English strictly separated**: no mixed strings, context menus included; a test scans the English UI for leftover CJK characters.
+- **DTR / RTS start low**: many USB-serial boards wire DTR to RESET through a capacitor, so raising it would reboot the device every time the port opens.
+
+
+## Screenshots
+
+![OmniCOM main window](docs/images/main.png)
+
+<sub>1440x900 - port and display options on the left, the *Serial log / Terminal / File transfer* pages in the middle, the command library and keyword search on the right, the composer and timed send at the bottom.</sub>
+
+<table>
+<tr>
+<td width="33%" valign="top"><img src="docs/images/terminal.png" alt="Terminal"><br>
+<sub><b>Terminal</b>: the keyboard goes straight to the port; Enter / Ctrl+C / arrow keys send what the device expects.</sub></td>
+<td width="33%" valign="top"><img src="docs/images/transfer.png" alt="Transfer"><br>
+<sub><b>File transfer</b>: XMODEM / YMODEM / ZMODEM with live progress and throughput.</sub></td>
+<td width="33%" valign="top"><img src="docs/images/preferences.png" alt="Preferences"><br>
+<sub><b>Preferences</b>: language, log budget, fonts, accent, wallpaper, send history.</sub></td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td width="50%" valign="top"><img src="docs/images/update.png" alt="Software update"><br>
+<sub><b>Software update</b>: checks online, or installs a local release package offline.</sub></td>
+<td width="50%" valign="top"><img src="docs/images/manual.png" alt="Manual"><br>
+<sub><b>Built-in manual</b>: the same source as this README, so they cannot drift.</sub></td>
+</tr>
+</table>
+
+The screenshots are rendered by `python tools/make_screenshots.py` from the real program (virtual DEMO port), not mocked up.
 
 ## Features
 

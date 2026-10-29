@@ -32,11 +32,66 @@
 --stopbits 1         停止位 1/1.5/2
 --parity N           校验位 N/E/O/M/S
 --flow none          none / rtscts / xonxoff
---no-dtr             打开后拉低 DTR
---no-rts             打开后拉低 RTS
+--dtr                打开后拉高 DTR（默认关闭，避免复位板子）
+--rts                打开后拉高 RTS（默认关闭）
+--no-dtr / --no-rts  保持关闭（默认行为，兼容旧脚本）
 --no-auto-reconnect  关闭拔插自动重连
 --open-timeout 6.0   打开超时（秒）
 ```
+
+## 与界面共享串口（以及多窗口）
+
+串口只能有一个占用者，所以 **CLI 从不自己开串口**：只要有一个 OmniCOM 窗口在跑，
+CLI 就把请求交给窗口，由窗口去开/发/读。于是 CLI 做的事和用户点按钮做的事完全一样 ——
+日志里看得到、计数算得上、记录文件是同一份，CLI 关串口就是关掉界面上那个串口。
+
+| 情况 | 结果 |
+| --- | --- |
+| 有窗口 | `"via": "window"`，并返回 `window_pid` / `window_slot`，告诉你这次的流量进了哪扇窗 |
+| 没有窗口 | `"via": "direct"`，CLI 自己独占串口（行为和 1.1.2 一致） |
+| `--direct` 或 `OMNICOM_CLI_DIRECT=1` | 强制直连，不碰任何窗口 |
+
+### 多个窗口、多个串口
+
+每个窗口都发布自己的端点，并公布**它当前占用的串口**，所以 CLI 是**按串口**找窗口的：
+
+1. **已经打开该串口的窗口**（日志/计数/设置都是用户正在看的那份）—— 优先；
+2. 没有开串口的**空闲窗口** —— 在那里打开；
+3. 所有窗口都在用**别的**串口 —— CLI 自己开一个（`via: direct`），**不会**把别人的串口顶掉。
+
+例外：`--window <PID>` 可以钉死某个窗口，`--port` 可以按串口挑（`state`/`close`/`log`/`stats` 
+也支持这两个参数）。
+
+窗口关掉串口后，正在运行的 CLI 会话会**立即报错结束**：
+
+```
+{"ok": false, "error": "串口错误：窗口已关闭 COM3，CLI 绑定结束"}
+```
+
+这是故意的：CLI 和界面共享同一个会话，界面把口关了，CLI 再往里面写就是静默丢数据。
+想继续就重新发一条命令（会重新开串口）。
+
+查看有哪些窗口、每个占着什么串口：
+
+```bash
+python -m omnicom.cli info
+```
+```json
+{"ok": true, "window": {"running": true, "mode": "window", "pid": 36416,
+  "port": "COM3", "windows": [{"pid": 36416, "slot": 1, "serial": "COM3", "connected": true},
+                                     {"pid": 43812, "slot": 2, "serial": "COM5", "connected": true}]}}
+```
+
+⚠ CLI 和窗口必须看**同一个数据目录**（`omnicom-data/`，可用 `OMNICOM_DATA_DIR` 改）。
+在仓库里跑 CLI、却开着 `dist\OmniCOM\` 里的窗口，两边找不到同一个端点，CLI 就退回直连。
+
+打包版要用 `runtime\python.exe OmniCOM.pyz cli ...`；`OmniCOM.cmd cli ...` 没有输出
+（它是 `start` 一个无控制台的进程，stdout 直接丢了）。
+
+### DTR / RTS
+
+默认**都不拉** —— 抬高 DTR 会把 CH340/CP210x 这类板子复位，等于一开串口就重启。
+要拉高：`--dtr` / `--rts`。旧的 `--no-dtr` / `--no-rts` 仍然接受（就是默认行为）。
 
 ## 命令
 
