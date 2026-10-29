@@ -115,7 +115,7 @@ TITLES = {
     "R-066": "收发双向记录到文件 + 随时清空并继续记录",
     "R-067": "左栏底部不再重复串口/流控/版本信息",
     "R-068": "左栏默认宽度与右侧栏一致",
-    "R-069": "版本号为 1.1.3",
+    "R-069": "版本号为 1.1.4",
     "R-070": "首选项可设置日志默认保存目录",
     "R-071": "首选项可换主题色 / 设置壁纸",
     "R-072": "日志更新时搜索结果持续追加",
@@ -165,6 +165,12 @@ TITLES = {
     "R-119": "多窗口多串口：CLI 按串口绑定窗口，窗口关口则 CLI 解绑",
     "R-120": "DTR / RTS 默认关闭（打开串口不复位板子）",
     "R-121": "可以用本地升级包离线更新",
+    "R-122": "一次调用只输出一个 JSON 文档，退出码与 ok 一致",
+    "R-123": "stdout / stderr 强制 UTF-8",
+    "R-124": "--settle / --ok-if-silent：无 marker 的命令不再空等",
+    "R-125": "同一串口的 CLI 调用串行化（端口锁）",
+    "R-126": "--repeat / --interval / --ports：一次进程多个采样",
+    "R-127": "新命令默认不勾选「依次发送」",
 }
 
 
@@ -305,6 +311,93 @@ def suite_cli() -> None:
     except json.JSONDecodeError:
         ok = False
     add("R-022", "CLI 失败也返回 JSON + 退出码 1", ok, (bad.stdout or "")[:60])
+
+    # -- 1.1.4 contract: one document, UTF-8, settle, lock, batch ----------
+    # ``--expect`` that never matches used to print the result *and* an error
+    # document, so ``json.loads(stdout)`` died with "Extra data: line 2"
+    # (L-150).  A stream only makes sense for --repeat/--ports.
+    miss = run(["-m", "omnicom.cli", "send", "--port", "DEMO", "--data", "hi",
+                "--wait", "0.4", "--expect", "NOPE"])
+    documents = [line for line in (miss.stdout or "").splitlines() if line.strip()]
+    try:
+        one = json.loads(miss.stdout or "{}")
+    except json.JSONDecodeError:
+        one = {}
+    add("R-122", "等待预期内容超时也只输出一个 JSON 文档",
+        len(documents) == 1 and one.get("ok") is False,
+        f"{len(documents)} 个文档")
+    add("R-122", "退出码与 ok 一致（ok=false -> 1）",
+        miss.returncode == 1, miss.returncode)
+    good = run(["-m", "omnicom.cli", "send", "--port", "DEMO", "--data", "AT",
+                "--wait", "1", "--expect", "OK"])
+    add("R-122", "退出码与 ok 一致（ok=true -> 0）",
+        good.returncode == 0, good.returncode)
+
+    # ``run()`` decodes with errors="replace", so a cp936 byte shows up as
+    # U+FFFD instead of raising: that is exactly the old symptom (L-147).
+    add("R-123", "stdout 是 UTF-8（中文错误消息没有替换字符）",
+        "\ufffd" not in (miss.stdout or ""), (miss.stdout or "")[:40])
+    add("R-123", "中文错误消息完整到达调用方",
+        "等待预期内容超时" in (miss.stdout or ""), (miss.stdout or "")[:40])
+
+    # --settle must cut the read short instead of burning the whole --wait.
+    started = time.monotonic()
+    settle = cli_json("send", "--port", "DEMO", "--data", "ping",
+                      "--wait", "3", "--settle", "0.2")
+    settle_wall = time.monotonic() - started
+    add("R-124", "--settle 收到数据后提前返回（不等满 --wait）",
+        settle.get("ok") is True and settle_wall < 2.0,
+        f"{settle_wall:.2f}s")
+    add("R-124", "结果里带 silent 字段说明是否收到数据",
+        settle.get("silent") is False and one.get("silent") is False,
+        settle.get("silent"))
+
+    # --ok-if-silent only forgives *silence*; a real mismatch stays a failure.
+    silent_ok = cli_json("send", "--port", "DEMO", "--data", "hello",
+                         "--wait", "0.4", "--expect", "ZZZ", "--ok-if-silent")
+    add("R-124", "--ok-if-silent 不掩盖真正的内容不匹配",
+        silent_ok.get("ok") is False, silent_ok.get("ok"))
+
+    # --repeat: one process, one port open, one JSON line per sample.
+    batch = run(["-m", "omnicom.cli", "send", "--port", "DEMO", "--data", "ping",
+                 "--wait", "0.4", "--expect", "OK", "--repeat", "3",
+                 "--interval", "0.05"])
+    samples = [json.loads(item) for item in (batch.stdout or "").splitlines()
+               if item.strip()]
+    add("R-126", "--repeat 输出 NDJSON，每个采样一行",
+        len(samples) == 3 and [item.get("sample") for item in samples] == [1, 2, 3],
+        f"{len(samples)} 行")
+    add("R-126", "--repeat 全部成功且退出码 0",
+        batch.returncode == 0 and all(item.get("ok") for item in samples),
+        batch.returncode)
+    # ``notices`` only grows on open, so three identical notice lists mean the
+    # port was opened once - which is the point of batching (L-151).
+    add("R-126", "--repeat 只打开一次串口",
+        len({tuple(item.get("notices") or []) for item in samples}) == 1
+        and bool(samples and samples[0].get("notices")),
+        (samples[0].get("notices") or [""])[0] if samples else "")
+
+    # --ports parses a comma list; a single value still yields one document.
+    fan = cli_json("send", "--ports", "DEMO", "--data", "ping", "--wait", "0.3")
+    add("R-126", "--ports 支持逗号分隔的端口列表",
+        fan.get("ok") is True and fan.get("port") == "DEMO", fan.get("port"))
+
+    # Concurrent CLI calls on one port must queue, not fight (L-149).
+    child_env = os.environ.copy()
+    child_env["PYTHONIOENCODING"] = "utf-8"
+    procs = [subprocess.Popen(
+        [sys.executable, "-m", "omnicom.cli", "send", "--port", "DEMO",
+         "--data", "ping", "--wait", "0.5"],
+        cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace", env=child_env)
+        for _ in range(3)]
+    outputs = [proc.communicate(timeout=180) for proc in procs]
+    add("R-125", "同一端口并发调用全部成功（没有互相抢占）",
+        all(proc.returncode == 0 for proc in procs),
+        [proc.returncode for proc in procs])
+    add("R-125", "并发调用各自仍只输出一个文档",
+        all(len((out or "").strip().splitlines()) == 1 for out, _ in outputs),
+        "每个进程 1 行")
 
 
 GUI_LINE = re.compile(r"^\s*(PASS|FAIL)\s+(R-\d+)\s+(.*?)\s*(?:\[(.*)\])?$")

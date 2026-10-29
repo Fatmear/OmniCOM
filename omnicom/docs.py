@@ -85,7 +85,13 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
         ("命令行（给脚本 / AI 用）", [
             "`python -m omnicom.cli ports` 列出串口；`send` 发送并等待应答；`read` 读取；`monitor` 流式输出。",
             "`session --script 文件.json` 可以跑一段脚本化的收发流程。",
-            "所有命令的 stdout 都是一个 JSON 文档，详细说明见 `docs/CLI.md`。",
+            "所有命令的 stdout 都是**一个** JSON 文档（`monitor`、`send --repeat N`、`send --ports A,B` 是每行一个），",
+            "退出码与 JSON 里的 `ok` 永远一致：成功 0、失败 1、用法错误 2。stdout 固定 UTF-8，中文不会乱码。",
+            "等应答用 `--expect OK --wait 2`；设备不回显的命令用 `--settle 0.4`（收到数据后静默 0.4 秒就返回，不必等满 `--wait`）。",
+            "可能沉默也可能报错的命令加 `--ok-if-silent`：完全没收到数据算成功，收到字节却不含预期内容仍然算失败。",
+            "高频轮询用 `--repeat 50 --interval 0.2`：同一进程只打开一次串口，每组数据输出一行并带 `sample` 编号，比反复启动快两倍以上。",
+            "两个脚本同时操作同一个串口时会自动排队（最多等 `--lock-timeout` 秒，默认 20），不会把字节写串。",
+            "详细字段与示例见 `docs/CLI.md`。",
         ]),
         ("软件更新", [
             "顶部菜单「软件更新」会在窗口空闲后安静地查一次 GitHub（失败不弹窗）；"
@@ -242,7 +248,13 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
             "`python -m omnicom.cli ports` lists ports; `send` sends and waits for a reply; `read` "
             "reads; `monitor` streams.",
             "`session --script file.json` runs a scripted exchange.",
-            "Every command writes exactly one JSON document to stdout; see `docs/CLI.md`.",
+            "Every command writes exactly **one** JSON document to stdout - `monitor`, `send --repeat N` and `send --ports A,B` write one per line.",
+            "The exit code always matches `ok`: 0 success, 1 failure, 2 bad usage. stdout is UTF-8, so non-ASCII text survives the pipe.",
+            "Wait for a fixed answer with `--expect OK --wait 2`; for commands that do not echo, use `--settle 0.4` to return 0.4 s after the last byte instead of burning the whole `--wait`.",
+            "Add `--ok-if-silent` when silence is a valid answer: no bytes at all counts as success, but bytes that lack the expected text still fail.",
+            "For polling use `--repeat 50 --interval 0.2`: one process, one port open, one JSON line per sample - more than twice as fast as starting the CLI repeatedly.",
+            "Two scripts on one port queue automatically (up to `--lock-timeout` seconds, 20 by default) instead of interleaving bytes.",
+            "Field-by-field reference and examples: `docs/CLI.md`.",
         ]),
         ("Software update", [
             "The *Software update* menu item checks GitHub once the window is idle: a new version marks the item with NEW and puts a dot on the button.",

@@ -39,6 +39,22 @@ EXIT_USAGE = 2
 
 # --------------------------------------------------------------------- output
 
+def _utf8_streams() -> None:
+    """Force UTF-8 on stdout/stderr, whatever the console code page is.
+
+    Without this, a plain PowerShell session encoded CJK payloads as GBK and
+    every Chinese string in the JSON came out as mojibake unless the caller
+    happened to export ``PYTHONIOENCODING=utf-8`` - a contract that must not
+    depend on the environment (L-147).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        with contextlib.suppress(Exception):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def _emit(payload: dict) -> None:
     """Write one JSON document to stdout."""
     sys.stdout.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
@@ -527,6 +543,153 @@ def payload_from_args(data: str | None, hex_data: str | None,
     return body.encode("utf-8") + ending, f"text:{len(body)}B+{len(ending)}B"
 
 
+#: Default granularity of a read slice.  Small enough that ``--settle`` ends
+#: near the requested quiet time, large enough to keep the window channel cheap.
+SLICE_S = 0.08
+
+
+def collect(session, duration: float, settle: float = 0.0,
+            until: Callable[[bytes], bool] | None = None,
+            max_bytes: int = 0, slice_s: float = SLICE_S) -> bytes:
+    """Read for up to ``duration`` seconds; ``settle`` ends early once quiet.
+
+    A firmware command that never echoes anything (``mesh_stop``,
+    ``iperf --stop``) used to burn the whole ``--wait``.  With ``--settle``
+    the call returns as soon as the line has been silent for that long
+    **after the first byte arrived**.  When nothing ever arrives the full
+    duration is still honoured, because "no data yet" must never be
+    confused with "the device has finished answering" (L-148).
+    """
+    buffer = bytearray()
+    deadline = time.monotonic() + max(0.0, duration)
+    last_data = 0.0
+    while True:
+        now = time.monotonic()
+        if until is not None and until(bytes(buffer)):
+            break
+        if max_bytes and len(buffer) >= max_bytes:
+            break
+        if now >= deadline:
+            break
+        if settle and last_data and now - last_data >= settle:
+            break
+        piece = min(slice_s, max(0.01, deadline - now))
+        if settle and last_data:
+            piece = min(piece, max(0.01, settle - (now - last_data)))
+        chunk = session.read_for(piece)
+        if chunk:
+            buffer += chunk
+            last_data = time.monotonic()
+    return bytes(buffer)
+
+
+#: Ports are exclusive but a CLI call is short-lived, so concurrent calls for
+#: the *same* port used to fight: one lost the race, or (through the window
+#: channel) their traffic interleaved and each read the other's answers.  A
+#: file lock turns that race into a queue (L-149).
+LOCK_DIR_NAME = "locks"
+
+
+def lock_path(port: str) -> str:
+    """One lock file per port name, shared by every CLI process."""
+    folder = os.path.join(paths.data_dir(), LOCK_DIR_NAME)
+    os.makedirs(folder, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(port or "").upper())
+    return os.path.join(folder, f"{safe or 'NOPORT'}.lock")
+
+
+class PortLock:
+    """Exclusive advisory lock on one serial port, with a bounded wait."""
+
+    def __init__(self, port: str, timeout: float = 20.0) -> None:
+        self.port = str(port or "")
+        self.timeout = max(0.0, float(timeout))
+        self._handle = None
+        self.waited = 0.0
+
+    def acquire(self) -> bool:
+        """Block until the lock is ours; False when it stayed busy."""
+        if not self.port:
+            return True
+        path = lock_path(self.port)
+        started = time.monotonic()
+        while True:
+            try:
+                # Kept open on purpose: the advisory lock lives as long as the
+                # handle, and it must outlive the whole CLI call.
+                handle = open(path, "a+")  # noqa: SIM115
+            except OSError:
+                return True          # cannot lock: never fail the call
+            if _try_lock(handle):
+                self._handle = handle
+                self.waited = time.monotonic() - started
+                if self.waited > 0.2:
+                    _hint(f"[{self.port}] 等待其它 CLI 释放串口 "
+                          f"{self.waited:.1f}s")
+                return True
+            handle.close()
+            if time.monotonic() - started >= self.timeout:
+                return False
+            time.sleep(0.05)
+
+    def release(self) -> None:
+        handle, self._handle = self._handle, None
+        if handle is None:
+            return
+        with contextlib.suppress(Exception):
+            _unlock(handle)
+        with contextlib.suppress(Exception):
+            handle.close()
+
+    def __enter__(self) -> PortLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.release()
+
+
+def _try_lock(handle) -> bool:
+    try:
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        return True
+    except ImportError:
+        pass
+    except OSError:
+        return False
+    try:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except ImportError:
+        return True              # no locking primitive: stay functional
+    except OSError:
+        return False
+
+
+def _unlock(handle) -> None:
+    try:
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    except ImportError:
+        pass
+    except OSError:
+        return
+    try:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except (ImportError, OSError):
+        pass
+
+
 def wait_until_contains(needles: Iterable[str], regex: str | None,
                         buffer: bytes) -> bool:
     text = buffer.decode("utf-8", "replace")
@@ -578,6 +741,68 @@ def cmd_info(args) -> int:
     return EXIT_OK
 
 
+def send_once(session, args, payload: bytes, kind: str, port: str,
+              sample: int = 0) -> dict:
+    """One send + read cycle, fully described by a single result document.
+
+    That document is the *only* thing written to stdout, so a caller can always
+    do ``json.loads(stdout)``.  Before 1.1.4 a failed ``--expect`` printed the
+    result first and an error document second, which broke every JSONL reader
+    with ``Extra data: line 2`` (L-150).
+    """
+    if args.drain_ms:
+        session.read_for(args.drain_ms / 1000.0)
+        session.take()
+    wants = bool(args.expect or args.expect_regex)
+    started = time.monotonic()
+    sent = session.write(payload)
+    response = collect(
+        session, args.wait, settle=args.settle,
+        until=(lambda buf: wait_until_contains(
+            args.expect or [], args.expect_regex, buf)) if wants else None,
+        max_bytes=args.max_bytes)
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    stats = session.stats()
+    result: dict = {
+        "ok": True,
+        **session_via(session),
+        "port": port,
+        "sent_bytes": sent,
+        "sent_hex": payload.hex(" "),
+        "payload_kind": kind,
+        "elapsed_ms": elapsed_ms,
+        "response": describe(response, limit=args.limit),
+        "rx_total_bytes": stats.get("rx", 0),
+        "tx_total_bytes": stats.get("tx", 0),
+        "notices": session.notices,
+        "silent": not response,
+    }
+    if sample:
+        result["sample"] = sample
+    if wants:
+        matched = wait_until_contains(args.expect or [], args.expect_regex,
+                                      response)
+        result["matched"] = matched
+        if not matched:
+            if not response and args.ok_if_silent:
+                # A command the firmware never echoes (``iperf --stop`` while
+                # nothing runs) is not a failure; it is simply silent (L-148).
+                result["note"] = "没有收到任何数据，按 --ok-if-silent 视为成功"
+            else:
+                result["ok"] = False
+                result["error"] = ("等待预期内容超时" if response
+                                   else "没有收到任何数据")
+    return result
+
+
+def parse_ports(args) -> list[str]:
+    """``--ports A,B`` wins over ``--port``; both are empty-safe."""
+    raw = str(getattr(args, "ports", "") or "").strip()
+    if raw:
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    return [str(getattr(args, "port", "") or "").strip()]
+
+
 def cmd_send(args) -> int:
     try:
         payload, kind = payload_from_args(args.data, args.hex, args.line_end)
@@ -585,74 +810,78 @@ def cmd_send(args) -> int:
         return fail(str(exc))
     if not payload:
         return fail("没有要发送的内容")
-
-    session = new_session(args, args.port, serial_opts(args))
-    try:
-        session.open(args.open_timeout)
-        if args.drain_ms:
-            session.read_for(args.drain_ms / 1000.0)
-            session.take()
-        started = time.monotonic()
-        sent = session.write(payload)
-        response = session.read_for(args.wait, max_bytes=args.max_bytes,
-                                    until=(lambda buf: wait_until_contains(
-                                        args.expect or [], args.expect_regex, buf))
-                                    if (args.expect or args.expect_regex) else None)
-        elapsed_ms = int((time.monotonic() - started) * 1000)
-        stats = session.stats()
-        info = describe(response, limit=args.limit) if response else describe(b"")
-        result = {
-            "ok": True,
-            **session_via(session),
-            "port": args.port,
-            "sent_bytes": sent,
-            "sent_hex": payload.hex(" "),
-            "payload_kind": kind,
-            "elapsed_ms": elapsed_ms,
-            "response": info,
-            "rx_total_bytes": stats.get("rx", 0),
-            "tx_total_bytes": stats.get("tx", 0),
-            "notices": session.notices,
-        }
-        if args.expect or args.expect_regex:
-            matched = wait_until_contains(args.expect or [], args.expect_regex, response)
-            result["matched"] = matched
-            _emit(result)
-            if not matched:
-                return fail("等待预期内容超时", **result)
-            return EXIT_OK
-        _emit(result)
-        return EXIT_OK
-    except (PortNotOpen, OSError) as exc:
-        return fail(f"串口错误：{exc}")
-    finally:
-        session.close()
+    ports = parse_ports(args)
+    repeat = max(1, int(getattr(args, "repeat", 1) or 1))
+    # A stream (>1 sample or >1 port) writes one document per sample, which is
+    # the same NDJSON shape ``monitor`` already uses; a single sample stays a
+    # plain one-document call so existing scripts keep working.
+    stream = repeat > 1 or len(ports) > 1
+    exit_code = EXIT_OK
+    for port in ports:
+        session = new_session(args, port, serial_opts(args))
+        try:
+            session.open(args.open_timeout)
+            for sample in range(repeat):
+                if sample:
+                    time.sleep(max(0.0, float(args.interval)))
+                try:
+                    result = send_once(session, args, payload, kind, port,
+                                       sample + 1 if stream else 0)
+                except (PortNotOpen, OSError) as exc:
+                    result = {"ok": False, "port": port,
+                              "error": f"串口错误：{exc}"}
+                _emit(result)
+                if not result.get("ok"):
+                    exit_code = EXIT_FAIL
+                    break            # a broken port must not repeat the error
+        except (PortNotOpen, OSError) as exc:
+            _emit({"ok": False, "port": port, "error": f"串口错误：{exc}"})
+            exit_code = EXIT_FAIL
+        finally:
+            session.close()
+    return exit_code
 
 
 def cmd_read(args) -> int:
+    wants = bool(args.expect or args.expect_regex)
     session = new_session(args, args.port, serial_opts(args))
     try:
         session.open(args.open_timeout)
         if args.record:
             session.recorder.start()
-        data = session.read_for(args.timeout, max_bytes=args.max_bytes,
-                                until=(lambda buf: wait_until_contains(
-                                    args.expect or [], args.expect_regex, buf))
-                                if (args.expect or args.expect_regex) else None)
+        started = time.monotonic()
+        data = collect(
+            session, args.timeout, settle=args.settle,
+            until=(lambda buf: wait_until_contains(
+                args.expect or [], args.expect_regex, buf)) if wants else None,
+            max_bytes=args.max_bytes)
         record_state = session.recorder.state()
         if args.record:
             session.recorder.stop()
-        _emit({
+        result: dict = {
             "ok": True,
             **session_via(session),
             "port": args.port,
-            "elapsed_ms": int(args.timeout * 1000),
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
             "received": describe(data, limit=args.limit),
             "stats": session.stats(),
             "notices": session.notices,
             "record": record_state if args.record else None,
-        })
-        return EXIT_OK
+            "silent": not data,
+        }
+        if wants:
+            matched = wait_until_contains(args.expect or [], args.expect_regex,
+                                          data)
+            result["matched"] = matched
+            if not matched:
+                if not data and args.ok_if_silent:
+                    result["note"] = "没有收到任何数据，按 --ok-if-silent 视为成功"
+                else:
+                    result["ok"] = False
+                    result["error"] = ("等待预期内容超时" if data
+                                       else "没有收到任何数据")
+        _emit(result)
+        return EXIT_OK if result["ok"] else EXIT_FAIL
     except (PortNotOpen, OSError) as exc:
         return fail(f"串口错误：{exc}")
     finally:
@@ -1170,7 +1399,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="omnicom-cli",
         description="OmniCOM CLI — 面向 AI 的串口调试接口（stdout 只输出 JSON）",
-        epilog="完整说明见 docs/CLI.md。示例：\n"
+        epilog="输出契约\n"
+               "  一次调用只写一个 JSON 文档；--repeat / --ports 例外："
+               "每个采样一行（NDJSON）。\n"
+               "  stdout 永远是 UTF-8，可以直接 json.loads(stdout)。\n"
+               "  ok 是唯一权威；退出码与它一致：0=ok，1=not ok，2=用法错误。\n"
+               "  silent=true 表示这一次一个字节都没收到（不是“成功”，也不是“失败”）。\n"
+               "常见做法\n"
+               "  等一个固定长度的应答：--wait 2 --expect OK\n"
+               "  固件不回显的命令：--wait 2 --settle 0.4\n"
+               "  可能沉默也可能报错的命令：--expect OK --ok-if-silent\n"
+               "  高频小查询：--repeat 50 --interval 0.2（同一进程、只开一次串口）\n"
+               "  轮询多个端口：--ports COM3,COM4\n"
+               "  同一端口被别的 CLI 占用时会排队，--lock-timeout 控制上限。\n"
+               "示例：\n"
                "  python -m omnicom.cli ports --demo\n"
                "  python -m omnicom.cli send --port DEMO --data AT --expect OK\n"
                "  python -m omnicom.cli session --port DEMO --script steps.json",
@@ -1206,6 +1448,8 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--window", type=int, default=None, metavar="PID",
                        help="指定由哪个窗口执行（默认：已打开该串口的窗口，"
                             "其次是没有占用串口的窗口）")
+        p.add_argument("--lock-timeout", type=float, default=20.0,
+                       help="同一端口被别的 CLI 占用时最多排队多少秒（默认 20）")
 
     p_ports = sub.add_parser("ports", help="列出串口（JSON）")
     p_ports.add_argument("--demo", action="store_true", help="额外列出虚拟 DEMO 端口")
@@ -1230,6 +1474,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="JSON 里 text/hex 的最大字节数（0=不限）")
     p_send.add_argument("--drain-ms", type=int, default=0,
                         help="发送前先丢弃已缓存的数据（毫秒）")
+    p_send.add_argument("--settle", type=float, default=0.0,
+                        help="收到数据后静默这么多秒就返回，不必等满 --wait"
+                             "（设备不回显的命令用）")
+    p_send.add_argument("--ok-if-silent", action="store_true",
+                        help="配 --expect 使用：完全没收到数据时算成功"
+                             "（固件不回显也不算失败）")
+    p_send.add_argument("--repeat", type=int, default=1, metavar="N",
+                        help="同一进程内重复采样 N 次（NDJSON，每次一行）")
+    p_send.add_argument("--interval", type=float, default=0.0,
+                        help="--repeat 两次采样之间等待的秒数")
+    p_send.add_argument("--ports", default="", metavar="COM1,COM2",
+                        help="一次给多个端口发同样的内容（NDJSON，每个端口一行）")
     p_send.set_defaults(func=cmd_send)
 
     p_read = sub.add_parser("read", help="持续读取指定时长")
@@ -1240,6 +1496,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_read.add_argument("--expect-regex", help="读到匹配该正则就提前返回")
     p_read.add_argument("--record", action="store_true", help="同时写入记录文件")
     p_read.add_argument("--limit", type=int, default=65536)
+    p_read.add_argument("--settle", type=float, default=0.0,
+                        help="收到数据后静默这么多秒就返回"
+                             "（不等满 --timeout）")
+    p_read.add_argument("--ok-if-silent", action="store_true",
+                        help="配 --expect 使用：完全没收到数据时算成功")
     p_read.set_defaults(func=cmd_read)
 
     def add_window(p, with_port: bool = False) -> None:
@@ -1310,21 +1571,37 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+#: Commands that touch a device, so they take the per-port lock (L-149).
+SERIAL_COMMANDS = ("send", "read", "monitor", "send-file", "transfer")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_streams()
     parser = build_parser()
     args = parser.parse_args(argv)
-    if getattr(args, "port", None) is None and args.command in (
-            "send", "read", "monitor", "send-file", "transfer", "session"):
-        if args.command == "session":
-            pass  # session may take the port from the script
-        else:
-            return fail("缺少 --port")
+    ports = [item for item in parse_ports(args) if item] \
+        if args.command in SERIAL_COMMANDS else []
+    if args.command == "send" and not ports:
+        return fail("缺少 --port（或 --ports）")
+    if args.command in SERIAL_COMMANDS and args.command != "send" and not ports:
+        return fail("缺少 --port")
+    if args.command in ("session",) and getattr(args, "port", None) is None:
+        pass  # session may take the port from the script
+    lock = None
+    if len(ports) == 1:
+        lock = PortLock(ports[0], getattr(args, "lock_timeout", 20.0))
+        if not lock.acquire():
+            return fail(f"{ports[0]} 被其它 CLI 占用超过 "
+                        f"{getattr(args, 'lock_timeout', 20.0):g}s，未执行")
     try:
         return int(args.func(args))
     except KeyboardInterrupt:
         return fail("用户中断")
     except Exception as exc:
         return fail(f"{type(exc).__name__}: {exc}")
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 if __name__ == "__main__":

@@ -99,7 +99,7 @@ class CommandRow(QWidget):
         self.item = item
         self.groups = groups
         self.setObjectName("CmdRow")
-        self._selection = float(bool(item.get("enabled", True)))
+        self._selection = float(bool(item.get("enabled", False)))
         self._selection_anim = QPropertyAnimation(self, b"selection", self)
         self._selection_anim.setDuration(150)
         self._selection_anim.setEasingCurve(QEasingCurve.OutCubic)
@@ -123,7 +123,7 @@ class CommandRow(QWidget):
         top.addWidget(self.pick)
 
         self.check = QCheckBox()
-        self.check.setChecked(bool(item.get("enabled", True)))
+        self.check.setChecked(bool(item.get("enabled", False)))
         self.check.setToolTip(tr("cmd.enabled.tip"))
         self.check.toggled.connect(self._animate_selection)
         self.check.toggled.connect(lambda value: self.toggled.emit(item["id"], value))
@@ -391,7 +391,7 @@ class CommandDialog(QDialog):
         self.hex.setChecked(bool(self.item.get("hex")))
         flags.addWidget(self.hex)
         self.enabled = QCheckBox(tr("cmd.enabled.tip"))
-        self.enabled.setChecked(bool(self.item.get("enabled", True)))
+        self.enabled.setChecked(bool(self.item.get("enabled", False)))
         flags.addWidget(self.enabled)
         flags.addStretch(1)
         layout.addLayout(flags)
@@ -1115,7 +1115,9 @@ class CommandsPanel(QWidget):
     def send_all(self) -> None:
         items = self.store.enabled_items()
         if not items:
-            self.notify(tr("cmd.enabled.tip"), "warn")
+            # New commands start unticked, so "I added one and nothing
+            # happened" is now the default confusion - say what to do (R-127).
+            self.notify(tr("cmd.sendall.none"), "warn")
             return
         self._queue = list(items)
         self._send_next()

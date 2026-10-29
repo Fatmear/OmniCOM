@@ -7,7 +7,7 @@
 **A native serial workbench: one window instead of a serial assistant, a terminal,
 a transfer tool and a script interface.**
 
-![version](https://img.shields.io/badge/version-1.1.3-2f6fed)![license](https://img.shields.io/badge/license-MIT-2ea44f)![python](https://img.shields.io/badge/python-3.13-3776ab)![ui](https://img.shields.io/badge/ui-Qt%20%2F%20PySide6-41cd52)![platform](https://img.shields.io/badge/platform-Windows-0078d4)
+![version](https://img.shields.io/badge/version-1.1.4-2f6fed)![license](https://img.shields.io/badge/license-MIT-2ea44f)![python](https://img.shields.io/badge/python-3.13-3776ab)![ui](https://img.shields.io/badge/ui-Qt%20%2F%20PySide6-41cd52)![platform](https://img.shields.io/badge/platform-Windows-0078d4)
 
 [Quick start](#quick-start) · [Features](#features) · [Portable build](#portable-build) · [CLI](#command-line-interface) · [Manual](#user-manual) · [Verify](#verify)
 
@@ -153,7 +153,7 @@ dist/OmniCOM/                # 98 MB with the bundled runtime
 ├── assets/  plugins/  logo.png
 └── README.md / README.en.md
 
-dist/OmniCOM-1.1.3-win64.zip
+dist/OmniCOM-1.1.4-win64.zip
 ```
 
 Unzip and double-click `OmniCOM.cmd`. The target machine needs **no Python, no
@@ -305,7 +305,13 @@ the bytes are printed as normal send lines and a progress bar tracks the transfe
 
 * `python -m omnicom.cli ports` lists ports; `send` sends and waits for a reply; `read` reads; `monitor` streams.
 * `session --script file.json` runs a scripted exchange.
-* Every command writes exactly one JSON document to stdout; see `docs/CLI.md`.
+* Every command writes exactly **one** JSON document to stdout - `monitor`, `send --repeat N` and `send --ports A,B` write one per line.
+* The exit code always matches `ok`: 0 success, 1 failure, 2 bad usage. stdout is UTF-8, so non-ASCII text survives the pipe.
+* Wait for a fixed answer with `--expect OK --wait 2`; for commands that do not echo, use `--settle 0.4` to return 0.4 s after the last byte instead of burning the whole `--wait`.
+* Add `--ok-if-silent` when silence is a valid answer: no bytes at all counts as success, but bytes that lack the expected text still fail.
+* For polling use `--repeat 50 --interval 0.2`: one process, one port open, one JSON line per sample - more than twice as fast as starting the CLI repeatedly.
+* Two scripts on one port queue automatically (up to `--lock-timeout` seconds, 20 by default) instead of interleaving bytes.
+* Field-by-field reference and examples: `docs/CLI.md`.
 
 ### 11. Software update
 

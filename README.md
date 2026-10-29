@@ -6,7 +6,7 @@
 
 **嵌入式串口调试工作台：一个窗口替代串口助手、终端、传输工具与脚本接口。**
 
-![version](https://img.shields.io/badge/version-1.1.3-2f6fed)![license](https://img.shields.io/badge/license-MIT-2ea44f)![python](https://img.shields.io/badge/python-3.13-3776ab)![ui](https://img.shields.io/badge/ui-Qt%20%2F%20PySide6-41cd52)![platform](https://img.shields.io/badge/platform-Windows-0078d4)
+![version](https://img.shields.io/badge/version-1.1.4-2f6fed)![license](https://img.shields.io/badge/license-MIT-2ea44f)![python](https://img.shields.io/badge/python-3.13-3776ab)![ui](https://img.shields.io/badge/ui-Qt%20%2F%20PySide6-41cd52)![platform](https://img.shields.io/badge/platform-Windows-0078d4)
 
 [快速开始](#快速开始) · [功能](#功能) · [便携包](#免安装便携包) · [命令行接口](#命令行接口) · [使用说明](#使用说明) · [验证](#验证)
 
@@ -151,7 +151,7 @@ dist/OmniCOM/                 # 98 MB，自带运行时
 ├── assets/  plugins/  logo.png
 └── README.md / README.en.md
 
-dist/OmniCOM-1.1.3-win64.zip
+dist/OmniCOM-1.1.4-win64.zip
 ```
 
 解压后直接双击 `OmniCOM.cmd`，目标机**不需要安装 Python、PySide6 或任何依赖**，
@@ -296,7 +296,13 @@ python -m ruff check .              # 代码风格
 
 * `python -m omnicom.cli ports` 列出串口；`send` 发送并等待应答；`read` 读取；`monitor` 流式输出。
 * `session --script 文件.json` 可以跑一段脚本化的收发流程。
-* 所有命令的 stdout 都是一个 JSON 文档，详细说明见 `docs/CLI.md`。
+* 所有命令的 stdout 都是**一个** JSON 文档（`monitor`、`send --repeat N`、`send --ports A,B` 是每行一个），
+* 退出码与 JSON 里的 `ok` 永远一致：成功 0、失败 1、用法错误 2。stdout 固定 UTF-8，中文不会乱码。
+* 等应答用 `--expect OK --wait 2`；设备不回显的命令用 `--settle 0.4`（收到数据后静默 0.4 秒就返回，不必等满 `--wait`）。
+* 可能沉默也可能报错的命令加 `--ok-if-silent`：完全没收到数据算成功，收到字节却不含预期内容仍然算失败。
+* 高频轮询用 `--repeat 50 --interval 0.2`：同一进程只打开一次串口，每组数据输出一行并带 `sample` 编号，比反复启动快两倍以上。
+* 两个脚本同时操作同一个串口时会自动排队（最多等 `--lock-timeout` 秒，默认 20），不会把字节写串。
+* 详细字段与示例见 `docs/CLI.md`。
 
 ### 11. 软件更新
 

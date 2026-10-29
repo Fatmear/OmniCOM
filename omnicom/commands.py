@@ -41,7 +41,11 @@ def _defaults() -> dict:
         "delay": 120,
         "interval": 1000,
         "timer": False,
-        "enabled": True,
+        # Off by default (R-127): a freshly added command must not join
+        # 依次发送 until the user ticks it.  Before this, every command the
+        # user created was live immediately and 依次发送 fired the whole
+        # library - including the one-liners added while debugging.
+        "enabled": False,
         "group": UNGROUPED,
         "note": "",
     }
@@ -420,7 +424,9 @@ class CommandStore(QObject):
 
     # ------------------------------------------------------------------ help
     def enabled_items(self) -> list[dict]:
-        return [item for item in self.items if item.get("enabled", True)]
+        # Default False to match ``_defaults()`` (R-127): a stored item that
+        # somehow lost the key is treated as "not ticked", never as on.
+        return [item for item in self.items if item.get("enabled", False)]
 
     def split_lines(self, raw: str) -> list[str]:
         out = []

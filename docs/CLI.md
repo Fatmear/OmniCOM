@@ -13,10 +13,13 @@
 
 | 事项 | 约定 |
 | --- | --- |
-| stdout | 恰好一个 JSON 对象；`monitor` 是 NDJSON（每行一个对象） |
+| stdout | **恰好一个** JSON 对象，可以直接 `json.loads(stdout)`；只有 `monitor`、`send --repeat N`（N>1）、`send --ports A,B` 是 NDJSON（每行一个对象） |
 | 成功判据 | `"ok": true`，进程退出码 `0` |
 | 失败判据 | `"ok": false` 且带 `"error"`（字符串），退出码 `1` |
 | 用法错误 | argparse 报错，退出码 `2` |
+| 权威字段 | `ok` 是唯一权威，**退出码永远等于它**；不要两者混用 |
+| 编码 | stdout / stderr 强制 UTF-8（可含中文），不会退回系统代码页 |
+| 静默 | 结果里的 `silent: true` 表示这一次一个字节都没收到（不是"成功"） |
 | 没有交互 | 不读 TTY、不等待按键，可放心从工具调用里执行 |
 | 二进制安全 | 所有数据同时给出 `text` / `hex` / `b64`，任选一种消费 |
 | 单位 | 键名自带单位：`*_ms` 毫秒、`*_bytes` 字节、`*_b64` base64 |
@@ -37,7 +40,20 @@
 --no-dtr / --no-rts  保持关闭（默认行为，兼容旧脚本）
 --no-auto-reconnect  关闭拔插自动重连
 --open-timeout 6.0   打开超时（秒）
+--lock-timeout 20    同一串口被别的 CLI 占用时最多排队多少秒
 ```
+
+### 同一串口不会抢占
+
+两个 AI / 两个脚本同时操作 COM3 时，后到的那个**排队**，不会互相打断：CLI 在
+`<data>/locks/COM3.lock` 上持系统文件锁（Windows `msvcrt` / POSIX `flock`），
+进程退出（包括崩溃）时由系统释放。排队超过 `--lock-timeout` 就直接失败：
+
+```json
+{"ok": false, "error": "COM3 被其它 CLI 占用超过 20s，未执行"}
+```
+
+多窗口场景下串口由窗口持有，这层锁只挡"两个 CLI 同时直连同一个口"。
 
 ## 与界面共享串口（以及多窗口）
 
@@ -126,12 +142,57 @@ python -m omnicom.cli send --port COM3 --hex "01 03 00 00 00 01" --wait 0.5
 - `--drain-ms N`：发送前先丢弃已缓存数据，避免旧日志干扰匹配。
 - `--limit N`：限制 JSON 里 `text/hex` 的长度（默认 65536 字节），`0` 表示不截断。
 
+#### 不等满 `--wait`：`--settle`
+
+没有 marker 可等的命令（`iperf -s`、`reboot`、只打印一行的日志命令）以前只能把
+`--wait` 睡满。`--settle 0.4` 表示**收到第一批数据后**再静默 0.4 s 就返回：
+
+```bash
+python -m omnicom.cli send --port COM3 --data "iperf -s" --wait 30 --settle 0.5
+# elapsed_ms 约 500，而不是 30000
+```
+
+静默计时只在**第一个字节到达后**才开始，所以"设备还没开口"不会被误判成"说完了"。
+
+#### 可能沉默、也可能报错：`--ok-if-silent`
+
+配合 `--expect` 使用。设备完全没回话时算成功（结果里多一个 `note` 说明），
+但**只要收到过字节却不含预期内容**，仍然是失败 —— 它不会掩盖真正的错误：
+
+```json
+{"ok": true, "silent": true, "matched": false,
+ "note": "没有收到任何数据，按 --ok-if-silent 视为成功"}
+```
+
+#### 高频轮询：`--repeat` / `--interval`
+
+同一个进程、**只打开一次串口**，采样 N 次，每次输出一行 JSON：
+
+```bash
+python -m omnicom.cli send --port COM3 --data "AT+TEMP?" --expect OK \
+    --wait 1 --repeat 50 --interval 0.2
+```
+
+每行多一个 `"sample": 1..N`。实测 5 次采样 0.86 s，而 5 次独立调用约 2.2 s ——
+省掉的是每次的 Python 启动与串口重开。它在第一个失败处停下（退出码 1）。
+
+#### 一次问多个端口：`--ports`
+
+```bash
+python -m omnicom.cli send --ports COM3,COM4,COM5 --data "AT" --expect OK --wait 1
+```
+
+每个端口一行 JSON（NDJSON），`--ports` 优先于 `--port`。串口参数（波特率等）
+对所有端口相同。
+
 ### `read` — 读一段时间
 
 ```bash
 python -m omnicom.cli read --port COM3 --timeout 2 --expect boot --record
 ```
-返回 `received`（同上面的 `text/hex/lines/b64`）、`stats`、`record`（记录文件路径与字节数）。
+返回 `received`（同上面的 `text/hex/lines/b64`）、`stats`、`record`（记录文件路径与字节数）、
+`silent`（是否一个字节都没收到）。`--settle` / `--ok-if-silent` 与 `send` 同义；
+`--expect` 没命中时 `ok:false`、退出码 1。
 
 ### `monitor` — 按行流式输出（NDJSON）
 
@@ -274,5 +335,7 @@ python -m omnicom.cli send --port DEMO --data "AT" --expect OK
 | 码 | 含义 |
 | --- | --- |
 | 0 | 成功（`ok:true`） |
-| 1 | 运行期失败（`ok:false`） |
-| 2 | 命令行用法错误 |
+| 1 | 运行期失败（`ok:false`，含"等不到预期内容"和"端口被占用"） |
+| 2 | 命令行用法错误（参数不合法） |
+
+`ok` 与退出码共用同一个判断，所以"只看退出码"和"只看 JSON"结论永远一致。

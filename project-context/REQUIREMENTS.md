@@ -129,6 +129,13 @@ Source of R-001..R-017: user request on 2026-10-27 (project kickoff). Do not wea
 | R-120 | MUST | UI | **DTR / RTS 默认关闭**：打开串口不应该把板子复位一次；需要拉高时手动打开开关（CLI 用 `--dtr` / `--rts`） (user, 2026-10-29) | GUI: `DEFAULT_OPTS` 里 `dtr`/`rts` 为 False，左栏两个开关默认不勾选，配置里没有该项时按关闭处理；CLI 默认同样关闭 | active |
 | R-121 | MUST | UI | **软件更新支持本地升级包**：把 `OmniCOM-<版本>-win64.zip` 选进来就能装（离线 / 内网 / U 盘交付），与在线下载走同一套安装流程，同样不动命令行库、记录、设置与用户插件；不是 OmniCOM 包的 zip 必须拒绝而不是覆盖一半 (user, 2026-10-29) | GUI: 更新对话框有「从升级包更新」；版本号从包内 `OmniCOM.pyz` 读取（改名也认）；非包 zip 报错且不落盘；安装后 `omnicom-data/` 与用户插件保持原样 | active |
 
+| R-122 | MUST | CLI | **一次调用只输出一个 JSON 文档**，而且退出码永远等于 `ok`：`--expect` 没命中时以前先打印结果、再打印一份错误文档，`json.loads(stdout)` 直接报 `Extra data: line 2`；同时出现 `ok:true` 却 exit 1 的自相矛盾 (user, 2026-10-30) | CLI: `send_once()`/`cmd_read()` 把成功与失败合成一份结果文档再 `_emit()` 一次；`main()` 的退出码取自同一个 `ok`；`--help` 写明 0/1/2 | active |
+| R-123 | MUST | CLI | stdout / stderr **强制 UTF-8**：错误消息里的中文此前按系统代码页输出，代理侧 `decode("utf-8")` 直接抛 `UnicodeDecodeError` (user, 2026-10-30) | CLI: `main()` 第一行 `_utf8_streams()` 对两个流 `reconfigure(encoding="utf-8", errors="replace")` | active |
+| R-124 | MUST | CLI | **没有 marker 的命令不能空等满 `--wait`**：`--settle 0.4` 表示收到第一批数据后再静默 0.4 s 就返回；固件不回显的命令用 `--ok-if-silent` 把"完全沉默"判为成功，但**收到过字节却不含预期内容仍然必须失败** (user, 2026-10-30) | CLI: `collect(..., settle=)` 的静默计时只在首个字节到达后开始；`silent` 字段说明是否收到数据；`--ok-if-silent` 只在 `not response` 时放行并附 `note` | active |
+| R-125 | MUST | CLI | **同一串口的 CLI 调用必须串行化**：两个 AI/脚本同时操作 COM3 时后者排队而不是互相打断，排队超限要明确失败并说明原因 (user, 2026-10-30) | CLI: `<data>/locks/<port>.lock` 上持 `msvcrt.locking`/`fcntl.flock` 系统锁，`--lock-timeout` 控制上限（默认 20 s）；进程崩溃时由系统释放 | active |
+| R-126 | MUST | CLI | **提供批量/并发原语**：`--repeat N --interval T` 在同一进程、**只开一次串口**的情况下采样 N 次（每次一行 JSON，带 `sample`）；`--ports A,B,C` 一次给多个端口发同样的内容 (user, 2026-10-30) | CLI: `cmd_send()` 串流模式在 `repeat>1 or len(ports)>1` 时输出 NDJSON，首个失败即停并返回 1；`parse_ports()` 以 `--ports` 优先 | active |
+| R-127 | MUST | UI | **新命令默认不勾选「依次发送」**：新建/导入的命令在用户勾选之前不参与依次发送，点「依次发送」而没有勾选时要明确提示先勾选 (user, 2026-10-30) | GUI: `commands._defaults()["enabled"]` 与 `enabled_items()` 的缺省值都是 False；`CommandRow` 勾选框同步为未勾选；`send_all()` 提示改为「还没有勾选任何命令」 | active |
+
 Superseded:
 - R-049 tooltip-only notes → visible small text below the command; primary actions remain aligned on one line (user, 2026-10-27).
 - R-018 (old: browser UI + local HTTP/WS service) → R-018 (native Qt GUI). Reason: user required a real

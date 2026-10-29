@@ -508,12 +508,12 @@ def main() -> int:
                 texts.append(widget.text())
         check("R-067 左栏底部不再出现版本号小字",
               window.__class__.__name__ and not any(
-                  text.strip() == "1.1.2" for text in texts), str(texts[-5:]))
+                  text.strip() == "1.1.4" for text in texts), str(texts[-5:]))
         next_()
 
     def step_version(next_):
         from omnicom import __version__ as current
-        check("R-069 版本号为 1.1.3", current == "1.1.3", current)
+        check("R-069 版本号为 1.1.4", current == "1.1.4", current)
         check("R-069 窗口标题显示新版本号", current in window.windowTitle(),
               window.windowTitle())
         next_()
@@ -3674,6 +3674,42 @@ def main() -> int:
         next_()
 
 
+    def step_unchecked_default(next_):
+        """R-127: a newly added command must not join 依次发送 by itself."""
+        panel = window.commands_panel
+        store = panel.store
+        before = len(store.items)
+        # ``add()`` takes an iterable - passing a bare string used to add one
+        # command per character (L-152).
+        added = store.add(["AT+R127"])
+        check("R-127 新建命令后列表多一行", len(store.items) == before + 1,
+              f"{before} -> {len(store.items)}")
+        fresh = added[0] if added else {}
+        new_id = fresh.get("id", "")
+        check("R-127 新命令默认不勾选（enabled=false）",
+              fresh.get("enabled") is False, str(fresh.get("enabled")))
+        check("R-127 新命令不参与「依次发送」",
+              all(item["id"] != new_id for item in store.enabled_items()))
+        # The row widget has to agree with the store, otherwise the box shows
+        # ticked while the store says no (and the user re-ticks it twice).
+        panel.rebuild()
+        row = next((item for item in panel.rows()
+                    if item.item["id"] == new_id), None)
+        check("R-127 行上的勾选框也是未勾选状态",
+              row is not None and row.check.isChecked() is False,
+              "no row" if row is None else str(row.check.isChecked()))
+        # Ticking it must still work, and then 依次发送 picks it up.
+        if row is not None:
+            row.check.setChecked(True)
+            check("R-127 手动勾选后进入「依次发送」",
+                  any(item["id"] == new_id for item in store.enabled_items()))
+            row.check.setChecked(False)
+        store.remove(new_id)
+        panel.rebuild()
+        check("R-127 删除测试命令后恢复原数量",
+              len(store.items) == before, f"{len(store.items)} vs {before}")
+        next_()
+
     def step_left_click_only(next_):
         """R-095: a command is sent by the left button only."""
         panel = window.commands_panel
@@ -4311,6 +4347,7 @@ def main() -> int:
     runner.add("R-116 history_limit", step_history_limit)
     runner.add("R-117 port_labels", step_port_labels)
     runner.add("R-120 dtr_defaults", step_dtr_defaults)
+    runner.add("R-127 unchecked_default", step_unchecked_default)
     runner.add("R-107 update", step_update)
 
     if "--only" in sys.argv:

@@ -23,7 +23,23 @@ Rules
   Test harnesses use `OMNICOM_SETTINGS_SUFFIX` so they never touch the real UI settings.
 - Before ending a session: replace `HANDOFF.md`, append closed items to `LEDGER.md`.
 - CLI for agents: `python -m omnicom.cli <ports|info|send|read|monitor|send-file|transfer|session|selftest>`,
-  stdout is one JSON document (R-022); full reference in `docs/CLI.md`. Use `--port DEMO` without hardware.
+  stdout is **one** JSON document (R-022/R-122) and the exit code equals `ok`; full reference in `docs/CLI.md`.
+  Use `--port DEMO` without hardware.
+- **The CLI contract is a test surface, not a style choice.**  A command writes exactly one document; the
+  only NDJSON producers are `monitor`, `send --repeat N` (N>1) and `send --ports A,B`. Never `_emit()`
+  a result and then `fail()` it - that is the `Extra data: line 2` bug (L-150). Build one result dict,
+  put `ok`/`error` in it, emit once, and return `EXIT_OK if ok else EXIT_FAIL`.
+- `main()` must keep `_utf8_streams()` as its first statement (R-123): without it Windows writes the
+  Chinese `error` text in cp936 and every agent-side `decode("utf-8")` raises (L-147).
+- Anything that opens a port goes through `PortLock` (`<data>/locks/<port>.lock`, system file lock).
+  Two CLI processes on one port must queue, never interleave bytes (R-125 / L-149). `--lock-timeout`
+  is the only escape hatch - do not "just try once".
+- Reads in `send`/`read` go through `collect(session, duration, settle=...)`, whose idle timer starts
+  only **after the first byte**. Starting it at t=0 turns "the device has not spoken yet" into "it is
+  finished" and silently truncates the answer (L-148).
+- **New commands are unticked** (R-127): `commands._defaults()["enabled"]` and `enabled_items()` both
+  default to False. 依次发送 must only fire what the user ticked, and the empty-set case has its own
+  message (`cmd.sendall.none`).
 - The theme is **light (white)**: `omnicom/ui/theme.py` holds every colour token. Never hardcode a
   light-on-dark colour in a widget — run `python tools/contrast_audit.py` after touching the palette.
 - Background is a flat solid colour — do not reintroduce gradients, grids or blobs over the whole window (R-020).

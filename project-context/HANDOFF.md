@@ -1,7 +1,15 @@
 # Current handoff
-Updated: 2026-10-29 (v1.1.3: software update, instant restore, send-panel polish)
+Updated: 2026-10-30 (v1.1.4: CLI contract, UTF-8, port lock, batch primitives)
 
-Current objective: v1.1.3 adds **self-update** and settles the window motion and the
+Current objective: v1.1.4 hardens the **CLI as an agent-facing interface**.  Every call
+now writes exactly one JSON document (a failed `--expect` used to print the result *and*
+an error document, so `json.loads(stdout)` failed with `Extra data: line 2`), `ok` and
+the exit code carry the same verdict, stdout/stderr are forced to UTF-8, concurrent
+calls on one port queue on a system file lock, and `--settle` / `--ok-if-silent` /
+`--repeat` / `--ports` close the "no marker to wait for" and "0.5 Hz polling is all
+startup cost" gaps.  `CommandStore` now starts every new command **unticked** (R-127),
+so 依次发送 only fires what the user ticked.  Still true from 1.1.3: self-update,
+offline local package, instant restore, one-button file send (R-107..R-121).
 send panel.  A window that is idle asks the GitHub release API once, in the
 background; a newer release lights a red dot on the menu button, can be downloaded
 and staged, and the swap runs **before Qt starts** on the next launch without ever
@@ -9,11 +17,14 @@ touching `omnicom-data/` (commands, captures, settings, plugins) - R-107/R-108.
 Still true from 1.1.2: self-contained folder, 100 MB log budget, glass panes,
 text-only caption row, own tooltip, no-exe packaging, live search, launcher, keep-awake.
 **1.1.3 is published**: https://github.com/Fatmear/OmniCOM/releases/tag/v1.1.3
+(asset `OmniCOM-1.1.3-win64.zip`, 41 MB). 1.1.4 is source-complete and verified but
+**not released yet** - publish it with `python tools/make_dist.py --check --zip`
+then `python tools/make_release.py --publish --hide-old v1.1.3`.
 (asset `OmniCOM-1.1.3-win64.zip`, 41 MB). The 1.1.2 release was turned into a
 **draft**, so the release page shows only 1.1.3 - and that zip is the very file
 the in-app updater downloads and the 从升级包更新 button accepts. Publish the
 next one with `python tools/make_release.py --publish --hide-old v1.1.3`.
-Version **1.1.3**; **97 requirements / 564 checks** pass automated verification.
+Version **1.1.4**; **124 requirements / 584 checks** pass automated verification.
 Real hardware remains untested - never infer driver timings from DEMO runs.
 
 Source run: `start.cmd`, `python run.py`, `python run.py --demo` (虚拟串口).
@@ -51,15 +62,31 @@ by default so opening a port never resets a board), R-121 (offline update from a
 release zip).
 Full list: `REQUIREMENTS.md`.
 
-Verified in repository (2026-10-29):
-- `python tools/acceptance_test.py` → **512 checks, 0 failures, 0 uncovered,
-  94 requirements, ALL REQUIREMENTS VERIFIED**.
-- GUI suite: **414/414**, including the update flow, instant restore, the one-button
-  file send and the long-line wrap.
+Verified in repository (2026-10-30):
+- `python tools/acceptance_test.py` → **584 checks, 0 failures, 0 uncovered,
+  124 requirements, ALL REQUIREMENTS VERIFIED**.
+- GUI suite: **444/444**, including the update flow, instant restore, the one-button
+  file send, the long-line wrap and the unticked-by-default command row.
+- CLI contract probes: one document even on failure, exit code == `ok`, UTF-8
+  stdout, `--settle 0.2` returning in 0.29 s instead of 3 s, a held lock failing
+  after its timeout, and 5 samples in 0.86 s versus 2.22 s for 5 separate calls.
 - `python -m ruff check .` → All checks passed; `tools/protocol_selftest.py` → 23/23;
   `tools/contrast_audit.py` → 15/15 ≥ 4.5:1; READMEs regenerated from `docs.py`.
 - `python tools/make_dist.py --check --zip` → packaged `--selftest` OK with the bundled
   runtime (`-E -s`), and a real windowed launch from the bundle stays up.
+
+## 本轮 (1.1.4) 内容
+
+| 反馈 | 根因 | 现在 |
+| --- | --- | --- |
+| `--expect` 未命中时输出两个 JSON 文档 | 失败路径是「先 `_emit(result)` 再 `fail()`」，一次调用写两份文档，代理侧 `json.loads(stdout)` 必然报 `Extra data: line 2` | 收发合成一个 `send_once()`，成功与失败在同一份结果里表态，只写一次（L-150 / R-122） |
+| 退出码与 `ok` 不一致 | `fail()` 里 `ok:False` 会被 `extra` 自带的 `ok:True` 覆盖，于是 `ok:true` 却 exit 1 | 判定写在最后，退出码统一取自 `result["ok"]`，`--help` 写明 0/1/2（R-122） |
+| 中文错误消息乱码 / `UnicodeDecodeError` | 从没动过 stdout 编码，Windows 上继承 cp936 | `_utf8_streams()` 在 `main()` 第一行强制 UTF-8（L-147 / R-123） |
+| 没 marker 的命令只能等满 `--wait` | 读取是纯定时循环 | `--settle T` 在首个字节到达后静默 T 秒返回，结果带 `silent`（L-148 / R-124） |
+| "成功但无输出"语义不明 | `--expect` 没命中等同失败，可设备本来就不回显 | `--ok-if-silent` 只放行"完全沉默"，收到字节却不匹配仍然失败（R-124） |
+| 同一端口并发调用互相抢占 | 每次调用都是新进程、各开各的口 | `PortLock` 在 `<data>/locks/<port>.lock` 上做系统文件锁，`--lock-timeout` 控制排队（L-149 / R-125） |
+| 0.5 Hz 轮询开销远大于数据 | 每次 = 启动 Python + 开串口 | `--repeat N --interval T` 同进程只开一次口、每采样一行 JSON；`--ports A,B` 覆盖多口（实测 5 次 0.86 s vs 2.22 s，L-151 / R-126） |
+| 新建命令自动参与依次发送 | `_defaults()["enabled"]` 是 True | 默认 False，行上勾选框同步，`send_all()` 空集提示改为「还没有勾选任何命令」（R-127） |
 
 ## 本轮 (1.1.2) 内容
 
