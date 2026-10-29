@@ -74,11 +74,23 @@
 代价是追加成本翻倍（100 行 10.8 → 21.3 ms）且要重写整个日志控件。**该需求整体撤回**，
 没有留下半成品设置项。
 
+### 文档与截图
+
+- README 中英双语都加了**真实界面截图**（主窗口、终端、文件传输、首选项、软件更新、使用说明）。截图由新增的 `python tools/make_screenshots.py` 用真实程序（虚拟串口 DEMO）渲染，不是示意图；便携包里也带上这些图片，避免正文出现坏图。
+- 内置「使用说明」扩充到 **18 章**：新增典型工作流、快捷键一览、串口与设备、多窗口、备份与迁移、遇到问题先看这里，并把软件更新与串口参数独立成章；中英文章节一一对齐，README 由同一份来源生成，永不脱节。
+- `docs/CLI.md` 补上「与界面共享串口（以及多窗口）」整节：端点如何发布、CLI 按串口选窗口的三级优先、窗口关串口后绑定结束的报错样子、以及 DTR/RTS 的新默认。
+
+### 发布
+
+- `python tools/make_release.py --publish` 一键发布：说明取自 `CHANGELOG.md` 对应版本段，资产就是便携包 zip（同时是在线更新与「从升级包更新」消费的同一份文件）。凭据沿用 git 已保存的那份，并且会先确认它对这个仓库有写权限再发布。
+
 ### 验证
 
-- `python tools/acceptance_test.py`：496 项检查 / 92 条需求，0 失败、0 未覆盖。
-- `python tools/ui_selftest.py`：414/414。
+- `python tools/acceptance_test.py`：564 项检查 / 97 条需求，0 失败、0 未覆盖。
+- `python tools/ui_selftest.py`：438/438。
+- `python tools/protocol_selftest.py`：23/23；`python tools/contrast_audit.py`：15/15 ≥ 4.5:1。
 - `python -m ruff check .` 干净。
+- `python tools/make_dist.py --check --zip`：打包自检 SELFTEST OK，`dist/OmniCOM-1.1.3-win64.zip` 41 MB；打包版 `OmniCOM.cmd cli ports` 实测输出 JSON。
 
 ## v1.1.2 — 2026-10-28
 

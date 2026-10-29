@@ -8,14 +8,21 @@ and staged, and the swap runs **before Qt starts** on the next launch without ev
 touching `omnicom-data/` (commands, captures, settings, plugins) - R-107/R-108.
 Still true from 1.1.2: self-contained folder, 100 MB log budget, glass panes,
 text-only caption row, own tooltip, no-exe packaging, live search, launcher, keep-awake.
-Users today have the 1.1.2 zip: https://github.com/Fatmear/OmniCOM/releases/tag/v1.1.2
-Version **1.1.3**; **97 requirements / 559 checks** pass automated verification.
+**1.1.3 is published**: https://github.com/Fatmear/OmniCOM/releases/tag/v1.1.3
+(asset `OmniCOM-1.1.3-win64.zip`, 41 MB). The 1.1.2 release was turned into a
+**draft**, so the release page shows only 1.1.3 - and that zip is the very file
+the in-app updater downloads and the 从升级包更新 button accepts. Publish the
+next one with `python tools/make_release.py --publish --hide-old v1.1.3`.
+Version **1.1.3**; **97 requirements / 564 checks** pass automated verification.
 Real hardware remains untested - never infer driver timings from DEMO runs.
 
 Source run: `start.cmd`, `python run.py`, `python run.py --demo` (虚拟串口).
 CLI: `python -m omnicom.cli …` (never spawned automatically).
 Package: `python tools/make_dist.py --check --zip` → `dist/OmniCOM/` +
-`dist/OmniCOM-1.1.3-win64.zip` (~98 MB folder / 40 MB zip, no installs needed).
+`dist/OmniCOM-1.1.3-win64.zip` (~99 MB folder / 41 MB zip, no installs needed).
+Screenshots: `python tools/make_screenshots.py` -> `docs/images/*.png`.
+Manual: `omnicom/docs.py` (18 chapters) -> `python tools/make_readme.py`.
+
 
 Constraint IDs to check before acting: R-019 (no self-built exe), R-017 (no silent byte loss),
 R-012 (auto-scroll), R-024 (log line shape), R-033 (bilingual), R-035 (responsive),
