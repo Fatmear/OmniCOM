@@ -21,13 +21,14 @@ and staged, and the swap runs **before Qt starts** on the next launch without ev
 touching `omnicom-data/` (commands, captures, settings, plugins) - R-107/R-108.
 Still true from 1.1.2: self-contained folder, 100 MB log budget, glass panes,
 text-only caption row, own tooltip, no-exe packaging, live search, launcher, keep-awake.
-**1.1.3 is published**: https://github.com/Fatmear/OmniCOM/releases/tag/v1.1.3
-(asset `OmniCOM-1.1.3-win64.zip`, 41 MB). 1.1.4 is source-complete and verified but
-**not released yet** - publish it with `python tools/make_dist.py --check --zip`
-then `python tools/make_release.py --publish --hide-old v1.1.3`.
-The 1.1.2 release was turned into a **draft**, so the release page shows only 1.1.3 -
-and that zip is the very file the in-app updater downloads and the 从升级包更新 button
-accepts.
+**1.1.4 is published**: https://github.com/Fatmear/OmniCOM/releases/tag/v1.1.4
+(asset `OmniCOM-1.1.4-win64.zip`, 41 MB, 42 987 738 bytes,
+sha256 `6220cbb329e5134f746f0012bfe367ab2b707ecba73b0ad4adc199db13fafbcc`).
+The 1.1.2 and 1.1.3 releases were turned into **drafts**, so the release page shows
+only 1.1.4 - and that zip is the very file the in-app updater downloads and the
+从升级包更新 button accepts. Next release: bump the version in the four places listed
+under "Next steps", then `python tools/make_dist.py --check --zip` and
+`python tools/make_release.py --publish --hide-old v1.1.4`.
 Version **1.1.4**; **138 requirements / 671 checks** pass automated verification.
 Real hardware remains untested - never infer driver timings from DEMO runs.
 

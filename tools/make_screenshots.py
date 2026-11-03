@@ -35,8 +35,8 @@ ERRORS: list[str] = []
 
 INFO = {
     "available": True,
-    "version": "1.1.3",
-    "current": "1.1.2",
+    "version": "1.1.4",
+    "current": "1.1.3",
     "url": "https://github.com/Fatmear/OmniCOM/releases/latest",
     "asset_url": "",
     "notes": (
