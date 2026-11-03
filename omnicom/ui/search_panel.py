@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import QSignalBlocker, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QHBoxLayout,
@@ -35,7 +35,7 @@ from PySide6.QtWidgets import (
 
 from ..i18n import tr
 from . import theme
-from .widgets import Badge, Chip, Combo, FlowLayout, GlyphButton
+from .widgets import Badge, Chip, Combo, FlowLayout, GlyphButton, ScrollBottomPill
 
 MAX_HITS = 20000
 
@@ -136,6 +136,18 @@ class SearchPanel(QWidget):
         self.results.itemDoubleClicked.connect(self._activate)
         self.results.itemActivated.connect(self._activate)
         body.addWidget(self.results, 1)
+
+        # 结果列表像日志一样**不自动跟随**：命中一多，强行滚到底会把用户正在
+        # 看的行拖走。需要时按这只悬浮气泡回到底部（与日志窗口同一个控件、
+        # 同一套动画，R-144）。
+        self.scroll_pill = ScrollBottomPill(self.results.viewport())
+        self.scroll_pill.setToolTip(tr("search.latest"))
+        self.scroll_pill.clicked.connect(self.jump_to_latest)
+        self.results.viewport().installEventFilter(self)
+        self.results.verticalScrollBar().valueChanged.connect(
+            self._on_results_scrolled)
+        self.results.verticalScrollBar().rangeChanged.connect(
+            lambda *_: self._on_results_scrolled())
 
         self.hint = QLabel(tr("search.hint"))
         self.hint.setAlignment(Qt.AlignCenter)
@@ -341,8 +353,9 @@ class SearchPanel(QWidget):
             if not line:
                 continue
             if self.match(line):
-                self._append_row(block, line, scroll=False)
+                self._append_row(block, line)
         self.results.scrollToTop()
+        self._on_results_scrolled()
         self._refresh_full_hint()
 
     def add_hit(self, ts: float, text: str, block: int | None = None) -> None:
@@ -352,8 +365,9 @@ class SearchPanel(QWidget):
         if block is None and self._log is not None:
             block = self._log.document().blockCount() - 1
         self._append_row(block if block is not None else -1, text)
+        self._on_results_scrolled()
 
-    def _append_row(self, block: int, text: str, scroll: bool = True) -> None:
+    def _append_row(self, block: int, text: str) -> None:
         number = block + 1 if block >= 0 else 0
         item = QListWidgetItem(f"{number:>6}  {text}")
         item.setData(Qt.UserRole, block)
@@ -362,8 +376,32 @@ class SearchPanel(QWidget):
         self.hits += 1
         self.count.setText(f"{MAX_HITS}+" if self.hits >= MAX_HITS else str(self.hits))
         self.count.show()
-        if scroll:
-            self.results.scrollToBottom()
+
+    # ------------------------------------------------------- back to newest
+    def _results_at_bottom(self) -> bool:
+        bar = self.results.verticalScrollBar()
+        return bar.value() >= bar.maximum() - 2
+
+    def _pill_anchor(self) -> QPoint:
+        view = self.results.viewport()
+        return QPoint(view.width() - 30, view.height() - 14)
+
+    def _on_results_scrolled(self) -> None:
+        """Show the bubble only while there is something below the viewport."""
+        if self._results_at_bottom() or self.results.count() == 0:
+            self.scroll_pill.hide_pill()
+            return
+        self.scroll_pill.show_pill(self._pill_anchor())
+
+    def jump_to_latest(self) -> None:
+        """Bubble / context menu: go to the newest hit and hide the bubble."""
+        self.results.scrollToBottom()
+        self.scroll_pill.hide_pill()
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.results.viewport() and event.type() == QEvent.Resize:
+            self._on_results_scrolled()
+        return super().eventFilter(watched, event)
 
     def _activate(self, item: QListWidgetItem) -> None:
         block = item.data(Qt.UserRole)
@@ -375,6 +413,7 @@ class SearchPanel(QWidget):
         self.results.clear()
         self.count.setText("0")
         self.count.hide()
+        self.scroll_pill.hide_pill()
 
     def clear_all(self) -> None:
         """Drop keywords and results (used on log clear)."""
@@ -428,6 +467,7 @@ class SearchPanel(QWidget):
         self.btn_full.setToolTip(tr("search.exitfull") if self._fullscreen
                                  else tr("search.fullscreen"))
         self.btn_clear.setToolTip(tr("search.clear"))
+        self.scroll_pill.setToolTip(tr("search.latest"))
         self.mode_box.setToolTip(tr("search.mode.tip"))
         self.case_box.setText(tr("search.case"))
         for index, key in enumerate(("search.match.plain", "search.match.fuzzy",

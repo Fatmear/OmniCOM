@@ -737,6 +737,7 @@ class OmniWindow(QMainWindow):
         #: must never compete with opening a port (R-109).
         self.update_watcher = UpdateWatcher(self)
         self.update_watcher.found.connect(self._on_update_found)
+        self.update_watcher.failed.connect(self._on_update_failed)
         self._update_info: dict | None = None
         self._minimizing = False
         self._minimize_pending = False
@@ -2462,14 +2463,27 @@ class OmniWindow(QMainWindow):
         else:
             self.titlebar.btn_menu.set_badge(False)
 
+    def _on_update_failed(self, message: str) -> None:
+        """A failed check never nags: it only clears the dot (R-107/R-143).
+
+        The reason is kept on the watcher, so opening 软件更新 shows it instead
+        of an endless "正在检查新版本…".
+        """
+        self.titlebar.btn_menu.set_badge(False)
+
     def open_update(self) -> None:
         """Menu -> 软件更新: show the release, or check on demand."""
         self.titlebar.btn_menu.set_badge(False)
-        dialog = UpdateDialog(self, self._update_info or self.update_watcher.last)
+        info = self._update_info or self.update_watcher.last
+        dialog = UpdateDialog(self, info, watcher=self.update_watcher)
         dialog.finished.connect(dialog.deleteLater)
-        if not (self._update_info or self.update_watcher.last):
-            dialog.set_status(tr("update.checking"))
-            self.update_watcher.start()
+        if not info:
+            # No answer yet (or the last attempt failed): run a check that shows
+            # its own progress and its own failure reason (R-143).
+            dialog.start_check()
+        elif self.update_watcher.error:
+            dialog.set_status(tr("update.check.failed",
+                                 err=self.update_watcher.error))
         dialog.exec()
 
     # ---------------------------------------------------------- retranslate

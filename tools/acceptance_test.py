@@ -185,6 +185,9 @@ TITLES = {
     "R-139": "窗口外圈有柔和阴影（不只是黑边，像一块浮起来的板子）",
     "R-140": "拖标题栏到屏幕顶部最大化，最大化时往下拖还原到鼠标下",
     "R-141": "两个展开分组之间只留一段行距（不是一大块空白）",
+    "R-142": "随包文档里的版本声明必须等于 __version__",
+    "R-143": "检查更新要有进度、有结论、有当前版本，失败要说明原因",
+    "R-144": "搜索结果不自动滚到最新，改为浮动「回到最新命中」按钮",
 }
 
 
@@ -852,6 +855,50 @@ def suite_visual() -> None:
     add("R-086", "打包脚本会把 CLI.md / AI-GUIDE.md / LICENSE 一起复制",
         "AI-GUIDE.md" in packaging and "CLI.md" in packaging
         and "LICENSE" in packaging)
+    # -- R-142: a version *declaration* inside a shipped file must equal
+    #    __version__.  The 1.1.4 zip had to be rebuilt because the bundled
+    #    AI-GUIDE.md still showed the previous release in its sample output.
+    #    Only declarations are matched - prose such as "行为和 1.1.2 一致" or
+    #    the interpreter version "3.13.14" is history, not a claim about this
+    #    build, and flagging it would train everyone to ignore the guard.
+    DECLARATIONS = (
+        ("JSON 示例", re.compile(r'"version"\s*:\s*"(\d+\.\d+\.\d+)"')),
+        ("版本徽章", re.compile(r"version-(\d+\.\d+\.\d+)-")),
+        ("资产名", re.compile(r"OmniCOM-(\d+\.\d+\.\d+)-win64")),
+    )
+    shipped_docs = ("docs/AI-GUIDE.md", "docs/CLI.md", "README.md",
+                    "README.en.md")
+    wrong: list[str] = []
+    seen: list[str] = []
+    absent: list[str] = []
+    for name in shipped_docs:
+        path = os.path.join(ROOT, *name.split("/"))
+        if not os.path.isfile(path):
+            absent.append(name)
+            continue
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        for label, pattern in DECLARATIONS:
+            for match in pattern.finditer(text):
+                seen.append(f"{name}/{label}")
+                if match.group(1) != __version__:
+                    wrong.append(f"{name} {label} {match.group(1)}")
+    add("R-142", "随包文档里的版本声明等于 __version__",
+        not wrong and not absent,
+        ", ".join(wrong + absent) if (wrong or absent)
+        else f"{len(seen)} 处 = {__version__}")
+    # A guard that scans nothing passes forever, so prove it still sees text.
+    add("R-142", "版本守卫确实扫到了声明（规则失效时不能静默通过）",
+        bool(seen), f"{len(seen)} 处" if seen else "一处都没扫到")
+    fixture_path = os.path.join(ROOT, "tools", "make_screenshots.py")
+    fixture = ""
+    if os.path.isfile(fixture_path):
+        with open(fixture_path, encoding="utf-8") as handle:
+            fixture = handle.read()
+    fixture_match = DECLARATIONS[0][1].search(fixture)
+    add("R-142", "截图夹具的版本与 __version__ 一致（截图随包发布）",
+        bool(fixture_match) and fixture_match.group(1) == __version__,
+        fixture_match.group(1) if fixture_match else "未找到版本声明")
     license_path = os.path.join(ROOT, "LICENSE")
     licence_text = ""
     if os.path.isfile(license_path):
@@ -1001,6 +1048,77 @@ def suite_visual() -> None:
         "schedule_update_check" in window_source
         and "threading.Thread" in dialog_source
         and "class UpdateWatcher" in dialog_source)
+
+    # -- R-143: "check for updates" must show progress, a verdict and the
+    #    current version, and must say *why* it failed.  The GUI suite proves
+    #    the wiring; here the reporter itself is exercised without a network.
+    from omnicom import update as update_mod
+
+    # Both routes point at a closed port, so this exercises the failure path
+    # without depending on the network (and without burning the API quota).
+    dead = "https://127.0.0.1:1/none"
+    unreachable = update_mod.check_release(
+        current=__version__, timeout=0.05, api=dead, atom=dead)
+    add("R-143", "检查更新失败时返回结论而不是抛异常",
+        isinstance(unreachable, dict) and unreachable.get("ok") is False
+        and bool(unreachable.get("error")),
+        f"keys={sorted(unreachable)}" if isinstance(unreachable, dict)
+        else repr(unreachable))
+    add("R-143", "检查结果带 source 字段，能分清走的是 API 还是发布页",
+        isinstance(unreachable, dict) and "source" in unreachable)
+    add("R-143", "失败原因写成一句人话（不是裸异常）",
+        isinstance(unreachable, dict)
+        and "API：" in str(unreachable.get("error"))
+        and "发布页：" in str(unreachable.get("error")),
+        str(unreachable.get("error"))[:80] if isinstance(unreachable, dict) else "")
+    add("R-143", "旧的 update.check() 失败仍安静返回 None（R-107 契约不变）",
+        update_mod.check(timeout=0.05, api=dead) is None)
+    traced_steps: list[tuple[int, int]] = []
+    update_mod.check_release(current=__version__, timeout=0.05, api=dead,
+                             atom=dead,
+                             progress=lambda index, total:
+                             traced_steps.append((index, total)))
+    add("R-143", "检查过程会回报进度，失败也会走到 100%（进度条数据源）",
+        bool(traced_steps) and traced_steps[-1] == (3, 3),
+        f"{len(traced_steps)} 次，最后 {traced_steps[-1] if traced_steps else '-'}")
+    add("R-143", "更新对话框有进度条、日志框和当前版本行",
+        "self.progress = QProgressBar" in dialog_source
+        and "QTextBrowser" in dialog_source
+        and 'tr("update.version"' in dialog_source
+        and "def _on_check_traced" in dialog_source)
+    add("R-143", "后台检查的失败与进度信号都有接收者（否则界面永远停在检查中）",
+        "failed = Signal" in dialog_source
+        and "traced = Signal" in dialog_source
+        and "chk_failed.connect" in dialog_source
+        and "chk_traced.connect" in dialog_source
+        and "update_watcher.failed.connect" in window_source)
+    add("R-143", "没有缓存信息时打开对话框会主动开始检查",
+        "def start_check" in dialog_source
+        and "dialog.start_check()" in window_source)
+    add("R-143", "API 被限流时改读发布页（releases.atom 兜底）",
+        "releases.atom" in update_source
+        and "def _check_web" in update_source
+        and "def check_release" in update_source)
+
+    # -- R-144: the result list must not follow new hits; a floating bubble
+    #    takes the user back to the newest one instead, exactly like the log.
+    search_source = source_of("omnicom", "ui", "search_panel.py")
+    add("R-144", "追加结果时不滚动（跟随会把用户正在看的那行拖走）",
+        "def _append_row" in search_source
+        and "def jump_to_latest" in search_source
+        and "scrollToBottom" not in search_source.split("def jump_to_latest")[0])
+    add("R-144", "结果视图上有和日志同款的浮动「回到最新命中」按钮",
+        "ScrollBottomPill" in search_source
+        and "self.scroll_pill" in search_source
+        # Same widget class as the log's bubble, not a second implementation.
+        and "self.scroll_pill = ScrollBottomPill(log_host)" in window_source)
+    add("R-144", "滚动位置与尺寸变化都会重算气泡该不该出现",
+        "valueChanged.connect" in search_source
+        and "rangeChanged.connect" in search_source
+        and "QEvent.Resize" in search_source)
+    add("R-144", "清空结果会收起气泡",
+        "def clear_results" in search_source
+        and "self.scroll_pill.hide_pill()" in search_source)
 
     add("R-110", "\\r\\n 框与 HEX / 回车开关组成同高的一组",
         "OPT_BAND_H = 2 * OPT_ROW_H" in send_source

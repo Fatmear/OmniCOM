@@ -329,6 +329,54 @@ def main() -> int:
               type(panel.parentWidget()).__name__)
         next_()
 
+    def step_search_pill(next_):
+        """R-144: the result list never follows, a bubble goes to the newest hit."""
+        panel = window.search_panel
+        panel.clear_all()
+        # Enough rows to overflow, otherwise "did it scroll" cannot be asked.
+        for index in range(240):
+            window.log.append_line(0.0, "RX", f"AT filler {index} " + "q" * 40,
+                                   "rx")
+        panel.add_keyword("AT")
+        app.processEvents()
+        bar = panel.results.verticalScrollBar()
+        check("R-144 全量搜索后结果列表停在第 1 条（不自动滚到最新）",
+              bar.maximum() > 0 and bar.value() == 0,
+              f"max={bar.maximum()} value={bar.value()}")
+        check("R-144 结果可以滚动时浮出「回到最新命中」按钮",
+              panel.scroll_pill.isVisible()
+              and not panel._results_at_bottom(),
+              f"visible={panel.scroll_pill.isVisible()}")
+
+        app.processEvents()
+        rows = panel.results.count()
+        window._log_line(0.0, "RX", "AT live hit while scrolled up", "rx")
+        app.processEvents()
+        texts = [panel.results.item(index).text()
+                 for index in range(panel.results.count())]
+        check("R-144 新命中只是追加，不把用户正在看的行拖走",
+              bar.value() == 0 and len(texts) > rows
+              and any("live hit while scrolled up" in row for row in texts),
+              f"value={bar.value()} rows={rows} -> {len(texts)}")
+
+        panel.jump_to_latest()
+        # No wait: live DEMO lines keep arriving, so both facts are asserted on
+        # the same instant as the click.  ``_visible`` flips immediately, while
+        # ``isVisible()`` stays true for the 170 ms fade-out.
+        check("R-144 点一下「回到最新命中」即滚到最后一条",
+              panel._results_at_bottom() and not panel.scroll_pill._visible,
+              f"max={bar.maximum()} value={bar.value()}")
+
+        bar.setValue(0)
+        app.processEvents()
+        shown = panel.scroll_pill._visible
+        panel.clear_results()
+        check("R-144 清空结果后按钮不会留在屏幕上",
+              shown and not panel.scroll_pill._visible,
+              f"before={shown}")
+        panel.clear_all()
+        next_()
+
     def step_search_all(next_):
         grown = window.search_panel.hits >= state["search_hits"]
         check("R-014 结果列表随新数据增长", grown, f"{state['search_hits']} -> {window.search_panel.hits}")
@@ -4842,6 +4890,7 @@ def main() -> int:
     runner.add("search", step_search)
     runner.add("search_check", step_search_check)
     runner.add("search_all", step_search_all)
+    runner.add("R-144 search_pill", step_search_pill)
     runner.add("import", step_import)
     runner.add("R-128 paste_notes", step_paste_notes)
     runner.add("send_command", step_send_command)

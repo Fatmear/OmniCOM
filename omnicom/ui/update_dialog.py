@@ -29,11 +29,23 @@ from ..i18n import tr
 from . import theme
 
 
+def _size(count: int) -> str:
+    """``42987769`` -> ``41.0 MB`` - used by the download log only."""
+    value = float(max(0, int(count)))
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return (f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}")
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
 class UpdateWatcher(QObject):
     """Asks GitHub for the newest release without touching the GUI thread."""
 
     found = Signal(dict)      # update.check() result
-    failed = Signal()         # offline / rate limited / malformed
+    failed = Signal(str)      # offline / rate limited / malformed + the reason
+    #: ``(step, total, line)``: progress of one check, for the dialog's log.
+    traced = Signal(int, int, str)
 
     def __init__(self, parent=None, current: str = __version__) -> None:
         super().__init__(parent)
@@ -42,6 +54,10 @@ class UpdateWatcher(QObject):
         self._busy = False
         #: Last answer, so the menu can be rebuilt without another request.
         self.last: dict | None = None
+        #: Why the last attempt failed ("" when it succeeded).
+        self.error = ""
+        #: Which route answered: ``"api"``, ``"web"`` or ``""``.
+        self.source = ""
         self._muted = False
 
     @property
@@ -58,20 +74,36 @@ class UpdateWatcher(QObject):
             return False
         self._busy = True
 
+        def log(line: str) -> None:
+            # Progress only exists while somebody is watching; the queued
+            # signal is harmless when no dialog is open.
+            if not self._muted:
+                self.traced.emit(0, 3, line)
+
+        def progress(done: int, total: int) -> None:
+            if not self._muted:
+                self.traced.emit(int(done), int(total), "")
+
         def work() -> None:
             try:
-                result = update.check(self._current)
-            except Exception:                     # a check must never crash us
+                result = update.check_release(self._current, log=log,
+                                              progress=progress)
+            except Exception as error:          # a check must never crash us
                 traceback.print_exc()
-                result = None
+                result = {"ok": False, "source": "",
+                          "error": f"{type(error).__name__}: {error}"}
             self._busy = False
+            self.error = str(result.get("error") or "")
+            self.source = str(result.get("source") or "")
+            if result.get("ok"):
+                self.last = {key: value for key, value in result.items()
+                             if key not in ("ok", "source", "error")}
             if self._muted:
                 return
-            if result is None:
-                self.failed.emit()
+            if not result.get("ok"):
+                self.failed.emit(self.error or "未知原因")
                 return
-            self.last = result
-            self.found.emit(result)
+            self.found.emit(self.last)
 
         self._thread = threading.Thread(target=work, name="omnicom-update",
                                         daemon=True)
@@ -96,17 +128,38 @@ class UpdateDialog(QDialog):
     localStaged = Signal(str, bool)
     localFailed = Signal(str)
 
-    def __init__(self, parent=None, info: dict | None = None) -> None:
+    #: Dialog-local relays, so a watcher can be shared by several dialogs and
+    #: every step still lands on the GUI thread.
+    chk_found = Signal(dict)
+    chk_failed = Signal(str)
+    chk_traced = Signal(int, int, str)
+
+    def __init__(self, parent=None, info: dict | None = None,
+                 watcher: UpdateWatcher | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("update.title"))
         self.setModal(True)
-        self.resize(560, 420)
+        self.resize(600, 520)
         self._info = dict(info or {})
         self._working = False
+        self._checking = False
+        self._watcher = watcher
+        #: Last percentage written to the download log, so it grows by ~10 %.
+        self._logged_percent = -10
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(10)
+
+        # -- which version am I running, and which one is out there (R-143).
+        # Always visible: "检查更新为什么没反应" starts with not knowing what
+        # the program currently is.
+        self.versions = QLabel("")
+        self.versions.setWordWrap(True)
+        self.versions.setStyleSheet(
+            f"color: {theme.INK2}; font-size: 12px;"
+            f" font-family: {theme.MONO_FONT};")
+        layout.addWidget(self.versions)
 
         self.heading = QLabel("")
         self.heading.setStyleSheet("font-size: 16px; font-weight: 650;")
@@ -125,6 +178,18 @@ class UpdateDialog(QDialog):
             f" border-radius: {theme.RADIUS_CTRL}px; padding: 6px 8px; }}")
         layout.addWidget(self.notes, 1)
 
+        # -- one log for both jobs: the version check and the download.  It has
+        # to be the same widget, because "为什么没反应" cannot be answered by a
+        # progress bar alone - it needs the line that stopped (R-143).
+        self.checklog = QTextBrowser()
+        self.checklog.setMaximumHeight(118)
+        self.checklog.setStyleSheet(
+            f"QTextBrowser {{ background: {theme.WASH}; color: {theme.INK2};"
+            f" border: 1px solid {theme.LINE_SOFT};"
+            f" border-radius: {theme.RADIUS_CTRL}px; padding: 5px 7px;"
+            f" font-family: {theme.MONO_FONT}; font-size: 11.5px; }}")
+        layout.addWidget(self.checklog)
+
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
@@ -138,6 +203,15 @@ class UpdateDialog(QDialog):
 
         row = QHBoxLayout()
         row.setSpacing(8)
+        # 重新检查 is always available - it is the escape hatch when the first
+        # attempt was rate limited or the network was down (R-143).
+        self.btn_check = QPushButton(tr("update.retry"))
+        self.btn_check.setObjectName("Primary")
+        self.btn_check.setCursor(Qt.PointingHandCursor)
+        self.btn_check.setToolTip(tr("update.retry.tip"))
+        self.btn_check.clicked.connect(self.recheck)
+        row.addWidget(self.btn_check)
+
         self.btn_install = QPushButton(tr("update.install"))
         self.btn_install.setObjectName("Primary")
         self.btn_install.setCursor(Qt.PointingHandCursor)
@@ -174,9 +248,30 @@ class UpdateDialog(QDialog):
         self.localStaged.connect(self._on_local_staged, Qt.QueuedConnection)
         self.localFailed.connect(self._on_local_failed, Qt.QueuedConnection)
 
+        # The relays exist even without a watcher, so the dialog is usable in
+        # tests and in the "install from a local zip"-only case.
+        self.chk_found.connect(self._on_check_found, Qt.QueuedConnection)
+        self.chk_failed.connect(self._on_check_failed, Qt.QueuedConnection)
+        self.chk_traced.connect(self._on_check_traced, Qt.QueuedConnection)
+
         self.render(self._info)
+        if watcher is not None:
+            watcher.found.connect(self.chk_found)
+            watcher.failed.connect(self.chk_failed)
+            watcher.traced.connect(self.chk_traced)
 
     # ------------------------------------------------------------------ view
+    def _update_versions(self) -> None:
+        """The two version numbers, always on screen (R-143)."""
+        current = str(self._info.get("current") or __version__)
+        latest = str(self._info.get("version") or "")
+        if not latest:
+            latest = tr("update.version.unknown")
+        elif not self._info.get("available"):
+            latest = tr("update.version.same", version=latest)
+        self.versions.setText(
+            tr("update.version", current=current, latest=latest))
+
     def render(self, info: dict) -> None:
         self._info = dict(info or {})
         available = bool(self._info.get("available"))
@@ -197,6 +292,7 @@ class UpdateDialog(QDialog):
             self.detail.setText("")
             self.notes.setPlainText("")
         has_asset = bool(self._info.get("asset_url"))
+        self.btn_check.setEnabled(not self._checking and not self._working)
         self.btn_install.setVisible(available)
         self.btn_install.setEnabled(available and has_asset and not self._working)
         self.btn_page.setVisible(available)
@@ -204,11 +300,84 @@ class UpdateDialog(QDialog):
         # that is exactly the situation where a user wants to install a zip
         # they were given by hand (R-121).
         self.btn_local.setEnabled(not self._working)
-        if not available:
-            self.btn_later.setText(tr("update.close"))
+        self.btn_later.setText(tr("update.later") if available
+                               else tr("update.close"))
+        self._update_versions()
 
     def set_status(self, text: str) -> None:
         self.status.setText(text)
+
+    def log_line(self, text: str) -> None:
+        """Append one line to the check/download log and keep it visible."""
+        if not text:
+            return
+        self.checklog.append(text)
+        bar = self.checklog.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    # ------------------------------------------------------------- the check
+    def start_check(self) -> None:
+        """Run (or attach to) the online check, with progress and a log."""
+        self._checking = True
+        self.btn_check.setEnabled(False)
+        self.progress.show()
+        self.progress.setRange(0, 3)
+        self.progress.setValue(0)
+        self.heading.setText(tr("update.checking"))
+        self.log_line(tr("update.check.start"))
+        watcher = self._watcher
+        if watcher is None:
+            self._on_check_failed("no watcher")
+            return
+        if not watcher.start():
+            # Someone else's check is already in flight: the signals it emits
+            # land here anyway, so this only has to say so (R-143).
+            self.log_line(tr("update.check.busy"))
+            self.progress.setRange(0, 3)
+            self.progress.setValue(1)
+
+    def recheck(self) -> None:
+        self.checklog.clear()
+        self._info = {}
+        self.render({})
+        self.start_check()
+
+    def _finish_check(self) -> None:
+        self._checking = False
+        self.btn_check.setEnabled(not self._working)
+
+    def _on_check_traced(self, done: int, total: int, line: str) -> None:
+        if line:
+            self.log_line(line)
+        # A step can arrive for a check that this dialog did not start (the
+        # watcher is shared), so the bar is made visible here too (R-143).
+        self.progress.show()
+        if total > 0:
+            self.progress.setRange(0, max(1, total))
+            self.progress.setValue(max(0, min(total, done)))
+        else:
+            self.progress.setRange(0, 0)
+
+    def _on_check_found(self, info: dict) -> None:
+        self._finish_check()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(100)
+        source = str(getattr(self._watcher, "source", "") or "")
+        if source in ("api", "web"):
+            # Says which route answered - useful when the API is rate limited
+            # and the answer really came from the release page (R-143).
+            self.log_line(tr("update.check.via",
+                             source=tr("update.via." + source)))
+        self.render(info)
+
+    def _on_check_failed(self, message: str) -> None:
+        self._finish_check()
+        self.progress.hide()
+        self.heading.setText(tr("update.check.failed", err=message))
+        self.detail.setText(tr("update.check.hint"))
+        self.log_line(tr("update.check.failed", err=message))
+        self._info = {}
+        self._update_versions()
 
     # ---------------------------------------------------------------- action
     def open_page(self) -> None:
@@ -225,10 +394,14 @@ class UpdateDialog(QDialog):
             return
         version = str(self._info.get("version") or "new")
         self._working = True
+        self.btn_check.setEnabled(False)
         self.btn_install.setEnabled(False)
+        self._logged_percent = -10
         self.progress.show()
         self.progress.setRange(0, 0)              # busy until the first byte
         self.set_status(tr("update.downloading"))
+        self.log_line(tr("update.downloading"))
+        self.log_line(tr("update.download.from", url=asset))
 
         def work() -> None:
             try:
@@ -255,10 +428,12 @@ class UpdateDialog(QDialog):
             return
         self._working = True
         self.btn_install.setEnabled(False)
+        self.btn_check.setEnabled(False)
         self.btn_local.setEnabled(False)
         self.progress.show()
         self.progress.setRange(0, 0)
         self.set_status(tr("update.local.reading"))
+        self.log_line(tr("update.local.reading"))
 
         def work() -> None:
             try:
@@ -276,13 +451,26 @@ class UpdateDialog(QDialog):
     def _on_progress(self, done: int, total: int) -> None:
         if total > 0:
             self.progress.setRange(0, 100)
-            self.progress.setValue(max(0, min(100, int(done * 100 / total))))
+            percent = max(0, min(100, int(done * 100 / total)))
+            self.progress.setValue(percent)
+            text = tr("update.download.pct", percent=percent,
+                      done=_size(done), total=_size(total))
+            self.set_status(text)
+            # One log line per 10 % keeps the log readable while still proving
+            # that the download is moving (R-143).
+            if percent >= self._logged_percent + 10 or percent == 100:
+                self._logged_percent = percent
+                self.log_line(text)
         else:
             self.progress.setRange(0, 0)
+            self.set_status(tr("update.download.pct", percent=0,
+                              done=_size(done), total="?"))
 
     def _on_failed(self, message: str) -> None:
         self._working = False
         self.progress.hide()
+        self.btn_check.setEnabled(True)
+        self.log_line(tr("update.failed", err=message))
         self.btn_install.setEnabled(bool(self._info.get("asset_url")))
         self.set_status(tr("update.failed", err=message))
 
@@ -291,13 +479,16 @@ class UpdateDialog(QDialog):
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
         self.set_status(tr("update.staged", version=version))
+        self.log_line(tr("update.staged", version=version))
         self.btn_install.setEnabled(False)
         self.btn_later.setText(tr("update.close"))
 
     def _on_local_failed(self, message: str) -> None:
         self._working = False
         self.progress.hide()
+        self.btn_check.setEnabled(True)
         self.btn_local.setEnabled(True)
+        self.log_line(tr("update.local.bad", err=message))
         self.btn_install.setEnabled(bool(self._info.get("asset_url")))
         self.set_status(tr("update.local.bad", err=message))
 
@@ -305,8 +496,9 @@ class UpdateDialog(QDialog):
         self._working = False
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
-        self.set_status(tr("update.staged", version=version or "?"))
+        self.log_line(tr("update.staged", version=version or "?"))
         self.btn_local.setEnabled(False)
+        self.btn_check.setEnabled(True)
         self.btn_install.setEnabled(False)
         self.btn_later.setText(tr("update.close"))
         if same:

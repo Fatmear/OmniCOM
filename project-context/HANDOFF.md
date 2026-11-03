@@ -1,18 +1,18 @@
 # Current handoff
-Updated: 2026-10-31 (v1.1.4 third batch: window drop shadow, Aero Snap on the
-title bar, group gap restored)
+Updated: 2026-11-03 (v1.1.4 fourth batch: usable update dialog, no auto-scroll in
+search results)
 
-Current objective: v1.1.4 第三批（三条反馈，全部落地并验证）。① **描边外侧再加一圈柔和阴影**
-（R-139）：8 px 渐变环，由外向内叠加圆角矩形构成，最大化/全屏时自动收掉。② **标题栏支持系统
-吸附手势**（R-140）：拖到显示器顶部即最大化，最大化状态下往下拖（40 px 迟滞）解除最大并落到
-鼠标下方，多屏按鼠标所在屏计算。③ **两个展开分组之间空隙太大**（R-141）：删掉上一批塞进分组
-正文末尾的冗余拖放条，实测组间距回到 6 px；列表末尾那条拖出目标的空投条**必须保留**。
-第二批的成果仍然有效：命令字段名「命令 / Command」、拖动不显示提示文字、
-按一次 ↑ 回到上一条、命令顺序记忆（文件锁 + 唯一临时文件 + 读改写合并）、
-按范围批量选择（全部 / 单组 / 多组）、分组标题上的垃圾桶、窗口四边 1 px 深色描边。
-第一批的成果仍然有效：CLI 一次调用只写一个 JSON 文档、UTF-8 流、端口锁、
-`--settle`/`--repeat`/`--ports`、新命令默认不勾选、`#` 备注粘贴、
-**按住命令拖动改分组与排序**、屏幕常亮启动即为关、发送后输入框不清空。
+Current objective: v1.1.4 第四批（两条反馈，全部落地并验证）。① **「软件更新」界面要能看出在做什么**
+（R-143）：检查更新点下去之后长期没有任何变化，用户以为功能坏了；现在有进度条、有流程日志、
+顶部常显「当前版本 · 最新版本」，失败会写明原因并给出「重新检查」。根因是两个问题叠加 ——
+GitHub 未登录 API 按出口 IP 限流（HTTP 403），且 `UpdateWatcher.failed` 是**无载荷、无接收者**
+的信号，于是对话框永远停在「正在检查新版本…」（L-168）。`update.check_release()` 在 API 受限时
+自动改读发布页 `releases.atom` + `releases/expanded_assets`，返回 `{ok, source, error, ...}`
+且永不抛异常；`update.check()` 保持失败返回 `None` 的旧契约（R-107）。② **搜索结果列表不自动
+滚到最新**（R-144）：改为和日志窗口同款的浮动「回到最新命中」气泡，只在下面还有内容时出现
+（L-169）。注意 `hide_pill()` 是 170 ms 淡出，断言不可见要看 `_visible`，不要看 `isVisible()`。
+第三批的成果仍然有效：窗口外圈柔和阴影（8 px 环，**不许再调大**，L-162）、
+标题栏 Aero Snap、两个展开分组之间只留一段行距。
 Still true from 1.1.3: self-update,
 offline local package, instant restore, one-button file send (R-107..R-121).
 A window that is idle asks the GitHub release API once, in the
@@ -35,7 +35,7 @@ the 从升级包更新 button both read `releases/latest`. Restoring a draft rew
 the very file the updater downloads. Next release: bump the version in the four places
 listed under "Next steps", then `python tools/make_dist.py --check --zip` and
 `python tools/make_release.py --publish` (no `--hide-old`).
-Version **1.1.4**; **138 requirements / 671 checks** pass automated verification.
+Version **1.1.4**; **141 requirements / 692 checks** pass automated verification.
 Real hardware remains untested - never infer driver timings from DEMO runs.
 
 Source run: `start.cmd`, `python run.py`, `python run.py --demo` (虚拟串口).
