@@ -28,6 +28,7 @@ fails here instead of on the user's desk.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import os
 import shutil
@@ -336,11 +337,22 @@ def verify(target: Path) -> int:
            if key not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
                           "OMNICOM_DATA_DIR", "OMNICOM_SETTINGS_SUFFIX")}
     env["PYTHONIOENCODING"] = "utf-8"
+    # ``-E`` isolates the bundle from this machine's environment - which is
+    # exactly why ``PYTHONIOENCODING`` alone cannot be trusted here: ``-E``
+    # ignores it, the child fell back to the console code page (cp936), this
+    # side decoded those bytes as UTF-8, and re-printing the resulting U+FFFD
+    # raised UnicodeEncodeError *before* the verdict was printed.  ``-X utf8``
+    # is a command-line switch, so it survives ``-E`` (L-038, L-170).
     result = subprocess.run(
-        [str(python), "-E", "-s", str(target / f"{NAME}.pyz"), "--selftest"],
+        [str(python), "-X", "utf8", "-E", "-s",
+         str(target / f"{NAME}.pyz"), "--selftest"],
         cwd=target, capture_output=True, text=True, encoding="utf-8",
         errors="replace", timeout=300, env=env)
     output = ((result.stdout or "") + (result.stderr or "")).strip()
+    # Never let the *report* decide the verdict: a character the console
+    # cannot encode must not abort the run before the pass/fail line.
+    with contextlib.suppress(Exception):
+        sys.stdout.reconfigure(errors="replace")
     print(output[-1600:] if output else "(no output)")
     if "SELFTEST OK" not in output or result.returncode != 0:
         print("packaged selftest FAILED")

@@ -33,19 +33,31 @@ from omnicom.ui.update_dialog import UpdateDialog  # noqa: E402
 OUT_DIR = os.path.join(ROOT, "docs", "images")
 ERRORS: list[str] = []
 
-INFO = {
-    "available": True,
-    "version": "1.1.4",
-    "current": "1.1.3",
-    "url": "https://github.com/Fatmear/OmniCOM/releases/latest",
-    "asset_url": "",
-    "notes": (
-        "### 本次更新\n"
-        "- 多窗口多串口：CLI 按串口绑定窗口，窗口关了串口 CLI 立即解绑\n"
-        "- DTR / RTS 默认关闭，打开串口不再复位板子\n"
-        "- 支持用本地升级包离线更新\n"
-    ),
-}
+
+def _fixture_info() -> dict:
+    """The fake release the screenshot is rendered from.
+
+    ``version`` stays a *literal* on purpose: R-142 scans this file for a
+    version declaration, so deriving it from ``__version__`` would leave the
+    guard nothing to read and it would quietly pass forever.  Bumping the
+    release means editing this line together with the other declarations.
+    """
+    return {
+        "available": True,
+        "version": "1.1.4",
+        "current": "1.1.3",
+        "url": "https://github.com/Fatmear/OmniCOM/releases/latest",
+        "asset_url": "",
+        "notes": (
+            "### 本次更新\n"
+            "- 多窗口多串口：CLI 按串口绑定窗口，窗口关了串口 CLI 立即解绑\n"
+            "- DTR / RTS 默认关闭，打开串口不再复位板子\n"
+            "- 支持用本地升级包离线更新\n"
+        ),
+    }
+
+
+INFO = _fixture_info()
 
 
 def guard(label: str, func) -> None:
