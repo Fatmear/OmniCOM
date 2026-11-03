@@ -22,8 +22,10 @@ touching `omnicom-data/` (commands, captures, settings, plugins) - R-107/R-108.
 Still true from 1.1.2: self-contained folder, 100 MB log budget, glass panes,
 text-only caption row, own tooltip, no-exe packaging, live search, launcher, keep-awake.
 **1.1.4 is published**: https://github.com/Fatmear/OmniCOM/releases/tag/v1.1.4
-(asset `OmniCOM-1.1.4-win64.zip`, 41 MB, 42 987 738 bytes,
-sha256 `6220cbb329e5134f746f0012bfe367ab2b707ecba73b0ad4adc199db13fafbcc`).
+(asset `OmniCOM-1.1.4-win64.zip`, 41 MB, 42 987 769 bytes,
+sha256 `5c04d27dcddc05335d3c6e570333d0067cb9688a5b93de085c0b32439d66defd`;
+re-uploaded after the in-bundle `AI-GUIDE.md` version example was aligned to 1.1.4,
+and the downloaded asset was byte-compared against the local zip).
 The 1.1.2 and 1.1.3 releases were turned into **drafts**, so the release page shows
 only 1.1.4 - and that zip is the very file the in-app updater downloads and the
 从升级包更新 button accepts. Next release: bump the version in the four places listed
