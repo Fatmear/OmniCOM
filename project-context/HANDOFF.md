@@ -26,11 +26,15 @@ text-only caption row, own tooltip, no-exe packaging, live search, launcher, kee
 sha256 `5c04d27dcddc05335d3c6e570333d0067cb9688a5b93de085c0b32439d66defd`;
 re-uploaded after the in-bundle `AI-GUIDE.md` version example was aligned to 1.1.4,
 and the downloaded asset was byte-compared against the local zip).
-The 1.1.2 and 1.1.3 releases were turned into **drafts**, so the release page shows
-only 1.1.4 - and that zip is the very file the in-app updater downloads and the
-从升级包更新 button accepts. Next release: bump the version in the four places listed
-under "Next steps", then `python tools/make_dist.py --check --zip` and
-`python tools/make_release.py --publish --hide-old v1.1.4`.
+**All three releases (1.1.2, 1.1.3, 1.1.4) stay public on the release page** - do not
+draft the older ones, users must be able to download any of them. Only the *latest*
+pointer is managed: it must stay on the newest version, because the in-app updater and
+the 从升级包更新 button both read `releases/latest`. Restoring a draft rewrites its
+`published_at`, which silently moves `latest` to that older tag (L-167) - fix it with
+`PATCH /releases/<id> {"make_latest": "true"}`, never by re-drafting. The 1.1.4 zip is
+the very file the updater downloads. Next release: bump the version in the four places
+listed under "Next steps", then `python tools/make_dist.py --check --zip` and
+`python tools/make_release.py --publish` (no `--hide-old`).
 Version **1.1.4**; **138 requirements / 671 checks** pass automated verification.
 Real hardware remains untested - never infer driver timings from DEMO runs.
 

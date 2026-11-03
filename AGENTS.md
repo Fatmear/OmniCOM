@@ -235,4 +235,16 @@ Rules
 - A whole-canvas pixel assertion has to be re-scoped whenever the canvas changes: the
   R-020 "single flat colour" check now samples `page_rect()` only, because the ring outside
   it is the shadow (L-165).
+- **Publishing must never hide an older release.** All versions stay public so a user can
+  download any of them; never pass `--hide-old` and never PATCH a release to `draft: true`
+  to "feature" the new one. Only the *latest* pointer is managed, and it must stay on the
+  newest version because the in-app updater and 从升级包更新 read `releases/latest` (L-167).
+- **GitHub's "latest" is chronological, not semantic.** Un-drafting / re-publishing /
+  re-uploading rewrites `published_at`, so `GET /releases/latest` silently jumps to that
+  older tag. Re-point it with `PATCH /releases/<id> {"make_latest": "true"}` - never by
+  re-drafting anything. Always re-read `/releases/latest` after touching releases; the
+  list order (`created_at desc`) is not the same thing.
+- The public `releases/latest` 302 is CDN-cached for ~10 s, so a redirect that still shows
+  the old tag right after a PATCH is not a failure - re-poll with a cache-busting query
+  before concluding anything (L-167).
 

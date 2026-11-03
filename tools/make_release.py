@@ -2,13 +2,20 @@
 
     python tools/make_release.py --check          # 看看会发什么，不动线上
     python tools/make_release.py --publish        # 建 release + 上传 zip
-    python tools/make_release.py --publish --hide-old v1.1.2
 
 The token is taken from the **same Windows credential git already uses** (no
 token on the command line, nothing written to disk), so an agent that can push
 can also publish.  Release notes come from the ``## v<version>`` section of
 `CHANGELOG.md`, and the asset is `dist/OmniCOM-<version>-win64.zip` - the exact
 file the in-app updater and the "update from a package" button consume.
+
+**Every release stays public.** Publishing never drafts, hides or deletes an
+older release: a user must be able to download any version.  What *is* managed
+is the single ``latest`` pointer, which must sit on the newest release because
+the in-app updater and "从升级包更新" both read ``releases/latest``.  GitHub
+derives that pointer from publish **time**, not from the version number, so
+anything that republishes a release (un-drafting, re-uploading) can steal it -
+so we always send ``make_latest: "true"`` explicitly (L-167).
 """
 
 from __future__ import annotations
@@ -100,6 +107,22 @@ def token() -> str:
         "先 git push 一次或配置一个有 repo 权限的 token")
 
 
+def find_release(tag: str) -> dict | None:
+    """The release of ``tag``, drafts included.
+
+    ``GET /releases/tags/<tag>`` answers **404 for a draft**, which used to
+    make an existing (hidden) release look absent and the next create fail on
+    a tag conflict, so match against the full list instead.
+    """
+    status, items = api("/releases?per_page=100")
+    if status != 200 or not isinstance(items, list):
+        return None
+    for item in items:
+        if item.get("tag_name") == tag:
+            return item
+    return None
+
+
 def api(path: str, method: str = "GET", payload: dict | None = None,
         base: str = API, raw: bytes | None = None,
         content_type: str = "application/json") -> tuple[int, dict]:
@@ -148,8 +171,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", default=__version__)
     parser.add_argument("--check", action="store_true", help="只打印计划，不请求")
     parser.add_argument("--publish", action="store_true", help="真正建 release 并上传")
-    parser.add_argument("--hide-old", default="", metavar="TAG",
-                        help="发布后把旧 tag 的 release 转为草稿（下架但可恢复）")
     parser.add_argument("--name", default="", help="release 标题")
     options = parser.parse_args(argv)
 
@@ -174,13 +195,14 @@ def main(argv: list[str] | None = None) -> int:
         print("\n（加 --publish 才会真正发布）")
         return 0
 
-    status, existing = api(f"/releases/tags/{tag}")
-    if status == 200 and existing.get("id"):
+    existing = find_release(tag)
+    if existing is not None:
         release = existing
         print(f"发布已存在 #{release['id']}，复用")
         status, updated = api(f"/releases/{release['id']}", "PATCH",
                               {"name": title, "body": body,
-                               "draft": False, "prerelease": False})
+                               "draft": False, "prerelease": False,
+                               "make_latest": "true"})
         if status >= 400:
             print("更新说明失败：", updated.get("message"))
             return 1
@@ -188,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
         status, release = api("/releases", "POST",
                               {"tag_name": tag, "target_commitish": "main",
                                "name": title, "body": body, "draft": False,
-                               "prerelease": False})
+                               "prerelease": False, "make_latest": "true"})
         if status >= 400:
             print("建 release 失败：", status, release.get("message"))
             return 1
@@ -216,18 +238,17 @@ def main(argv: list[str] | None = None) -> int:
           f"({int(result.get('size') or 0) / 1048576:.0f} MB)")
     print(f"下载地址 https://github.com/{REPO}/releases/tag/{tag}")
 
-    if options.hide_old:
-        old = options.hide_old if options.hide_old.startswith("v") \
-            else f"v{options.hide_old}"
-        status, target = api(f"/releases/tags/{old}")
-        if status != 200:
-            print(f"旧 release {old} 未找到，跳过")
-            return 0
-        status, done = api(f"/releases/{target['id']}", "PATCH", {"draft": True})
-        if status >= 400:
-            print("下架旧 release 失败：", done.get("message"))
-            return 1
-        print(f"旧 release {old} 已转为草稿（页面不再出现，仍可恢复）")
+    # ``latest`` is chronological, so an upload/re-draft elsewhere can move it
+    # away from us even though we just published.  Assert it after uploading
+    # (L-167); older releases are left exactly as they are - all stay public.
+    status, latest = api("/releases/latest")
+    if status == 200 and latest.get("tag_name") != tag:
+        api(f"/releases/{release['id']}", "PATCH", {"make_latest": "true"})
+        status, latest = api("/releases/latest")
+    print(f"latest  : {latest.get('tag_name')}")
+    if latest.get("tag_name") != tag:
+        print("警告：latest 未指向本次发布的 tag")
+        return 1
     return 0
 
 
