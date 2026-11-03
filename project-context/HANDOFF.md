@@ -1,16 +1,29 @@
 # Current handoff
-Updated: 2026-11-03 (v1.1.4 fourth batch: usable update dialog, no auto-scroll in
-search results)
+Updated: 2026-11-03 (v1.1.4 re-released with the fourth batch; v1.1.5 is a
+version-only test copy for exercising the upgrade path)
 
-Current objective: v1.1.4 第四批（两条反馈，全部落地并验证）。① **「软件更新」界面要能看出在做什么**
-（R-143）：检查更新点下去之后长期没有任何变化，用户以为功能坏了；现在有进度条、有流程日志、
-顶部常显「当前版本 · 最新版本」，失败会写明原因并给出「重新检查」。根因是两个问题叠加 ——
-GitHub 未登录 API 按出口 IP 限流（HTTP 403），且 `UpdateWatcher.failed` 是**无载荷、无接收者**
-的信号，于是对话框永远停在「正在检查新版本…」（L-168）。`update.check_release()` 在 API 受限时
-自动改读发布页 `releases.atom` + `releases/expanded_assets`，返回 `{ok, source, error, ...}`
-且永不抛异常；`update.check()` 保持失败返回 `None` 的旧契约（R-107）。② **搜索结果列表不自动
-滚到最新**（R-144）：改为和日志窗口同款的浮动「回到最新命中」气泡，只在下面还有内容时出现
-（L-169）。注意 `hide_pill()` 是 170 ms 淡出，断言不可见要看 `_visible`，不要看 `isVisible()`。
+Current objective: **v1.1.4 已把第四批修复并进去并重新构建、重新上传**。
+原则：同一版代码上的缺陷修复不占新版本号，用户拿到的应该是「修好的 1.1.4」。
+发布页状态：1.1.2 / 1.1.3 / 1.1.4 / 1.1.5 **全部公开**，`latest` 在 **v1.1.5**。
+- `v1.1.4` 资产 43 004 174 B，sha256 `84b198cb44d878fd189bb50487e4307859fbcdb4317f44c3d5cfb4c19739e388`，
+  标签已强制移到发布提交 `33c6d22`（源码与包一致）。
+- `v1.1.5` **只是升级测试副本**：代码与 1.1.4 完全相同，只抬版本号，用来验证
+  「检查更新 → 下载 → 应用 → 重启後版本变化」。资产 43 004 176 B，
+  sha256 `3d8be589be1b6bd2c0466b025acc4e33a6acbd950507fb5d7727673fae954a00`，
+  由标签 `v1.1.5`（`8d947ae`）承载；`main` 已反向提交退回 `__version__ = "1.1.4"`（`1d8704f`），
+  源码 HEAD 不应是 1.1.5。
+
+第四批做了什么：① **「软件更新」界面要能看出在做什么**（R-143）：检查更新点下去之后长期没有
+任何变化，用户以为功能坏了；现在有进度条、有流程日志、顶部常显「当前版本 · 最新版本」，
+失败会写明原因并给出「重新检查」。根因是两个问题叠加 —— GitHub 未登录 API 按出口 IP 限流
+（HTTP 403），且 `UpdateWatcher.failed` 是**无载荷、无接收者**的信号，于是对话框永远停在
+「正在检查新版本…」（L-168）。`update.check_release()` 在 API 受限时自动改读发布页
+`releases.atom` + `releases/expanded_assets`，返回 `{ok, source, error, ...}` 且永不抛异常；
+`update.check()` 保持失败返回 `None` 的旧契约（R-107）。② **搜索结果列表不自动滚到最新**
+（R-144）：改为和日志窗口同款的浮动「回到最新命中」气泡，只在下面还有内容时出现（L-169）。
+注意 `hide_pill()` 是 170 ms 淡出，断言不可见要看 `_visible`，不要看 `isVisible()`。
+另外：**发布页不再隐藏旧版本**，`make_release.py` 已移除 `--hide-old`；`latest` 显式带
+`make_latest: "true"` 并在上传后回查（L-167）。
 第三批的成果仍然有效：窗口外圈柔和阴影（8 px 环，**不许再调大**，L-162）、
 标题栏 Aero Snap、两个展开分组之间只留一段行距。
 Still true from 1.1.3: self-update,
@@ -21,11 +34,17 @@ and staged, and the swap runs **before Qt starts** on the next launch without ev
 touching `omnicom-data/` (commands, captures, settings, plugins) - R-107/R-108.
 Still true from 1.1.2: self-contained folder, 100 MB log budget, glass panes,
 text-only caption row, own tooltip, no-exe packaging, live search, launcher, keep-awake.
-**1.1.4 is published**: https://github.com/Fatmear/OmniCOM/releases/tag/v1.1.4
-(asset `OmniCOM-1.1.4-win64.zip`, 41 MB, 42 987 769 bytes,
-sha256 `5c04d27dcddc05335d3c6e570333d0067cb9688a5b93de085c0b32439d66defd`;
-re-uploaded after the in-bundle `AI-GUIDE.md` version example was aligned to 1.1.4,
-and the downloaded asset was byte-compared against the local zip).
+**1.1.4 is published (and was rebuilt once)**: https://github.com/Fatmear/OmniCOM/releases/tag/v1.1.4
+(asset `OmniCOM-1.1.4-win64.zip`, 41 MB, 43 004 174 bytes,
+sha256 `84b198cb44d878fd189bb50487e4307859fbcdb4317f44c3d5cfb4c19739e388`;
+rebuilt and re-uploaded so the fourth-batch fixes ship under the same version, and the
+downloaded asset was byte-compared against the local zip). The `v1.1.4` tag was force-moved
+to `33c6d22` so the source and the package agree.
+**A test copy `v1.1.5` exists on purpose**: identical code, version bumped only, published so the
+1.1.4 → 1.1.5 upgrade can be exercised end to end. Its notes say so in plain language
+("代码与 1.1.4 完全相同，日常使用请下载 1.1.4"). Build it with
+`.artifacts/bump_for_test_copy.py --apply` (never commit that bump to `main`), then
+`make_dist --check --zip`, tag `v1.1.5`, publish, and revert `main`.
 **All three releases (1.1.2, 1.1.3, 1.1.4) stay public on the release page** - do not
 draft the older ones, users must be able to download any of them. Only the *latest*
 pointer is managed: it must stay on the newest version, because the in-app updater and
@@ -35,7 +54,8 @@ the 从升级包更新 button both read `releases/latest`. Restoring a draft rew
 the very file the updater downloads. Next release: bump the version in the four places
 listed under "Next steps", then `python tools/make_dist.py --check --zip` and
 `python tools/make_release.py --publish` (no `--hide-old`).
-Version **1.1.4**; **141 requirements / 692 checks** pass automated verification.
+Version **1.1.4** (source HEAD; `v1.1.5` is the tag-only test copy);
+**141 requirements / 692 checks** pass automated verification.
 Real hardware remains untested - never infer driver timings from DEMO runs.
 
 Source run: `start.cmd`, `python run.py`, `python run.py --demo` (虚拟串口).
@@ -182,6 +202,13 @@ Before: `.artifacts/ui-perf-before.json`; final: `.artifacts/ui-perf.json`.
 3. Reverify on a clean machine: unzip the release, double-click `OmniCOM.cmd`.
 4. Bump `omnicom/__init__.py`, the R-069 row, `tools/acceptance_test.py` (`TITLES` + version
    check) and `tools/ui_selftest.py` together - a missed one fails the suite.
+   `tools/make_screenshots.py` carries a **literal** version string that R-142 scans; keep it a
+   literal (deriving it from `__version__` leaves the guard nothing to read and it passes forever -
+   R-142 caught exactly that on 2026-11-03).
+5. Publishing: `make_release.py --check` then `--publish`, then confirm `/releases/latest` and that
+   every older release is still public. Never `--hide-old`, never re-draft an old release (L-167).
+6. A version whose only purpose is testing the upgrade path must **not** stay on `main`: bump,
+   commit, tag, publish, then `git revert` the bump so source HEAD keeps the real version.
 
 ## Do not do
 
