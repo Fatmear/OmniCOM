@@ -614,12 +614,12 @@ def main() -> int:
                 texts.append(widget.text())
         check("R-067 左栏底部不再出现版本号小字",
               window.__class__.__name__ and not any(
-                  text.strip() == "1.1.5" for text in texts), str(texts[-5:]))
+                  text.strip() == "1.1.4" for text in texts), str(texts[-5:]))
         next_()
 
     def step_version(next_):
         from omnicom import __version__ as current
-        check("R-069 版本号为 1.1.5", current == "1.1.5", current)
+        check("R-069 版本号为 1.1.4", current == "1.1.4", current)
         check("R-069 窗口标题显示新版本号", current in window.windowTitle(),
               window.windowTitle())
         next_()
