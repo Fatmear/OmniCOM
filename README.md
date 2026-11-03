@@ -6,7 +6,7 @@
 
 **嵌入式串口调试工作台：一个窗口替代串口助手、终端、传输工具与脚本接口。**
 
-![version](https://img.shields.io/badge/version-1.1.4-2f6fed)![license](https://img.shields.io/badge/license-MIT-2ea44f)![python](https://img.shields.io/badge/python-3.13-3776ab)![ui](https://img.shields.io/badge/ui-Qt%20%2F%20PySide6-41cd52)![platform](https://img.shields.io/badge/platform-Windows-0078d4)
+![version](https://img.shields.io/badge/version-1.1.5-2f6fed)![license](https://img.shields.io/badge/license-MIT-2ea44f)![python](https://img.shields.io/badge/python-3.13-3776ab)![ui](https://img.shields.io/badge/ui-Qt%20%2F%20PySide6-41cd52)![platform](https://img.shields.io/badge/platform-Windows-0078d4)
 
 [快速开始](#快速开始) · [功能](#功能) · [便携包](#免安装便携包) · [命令行接口](#命令行接口) · [使用说明](#使用说明) · [验证](#验证)
 
@@ -151,7 +151,7 @@ dist/OmniCOM/                 # 98 MB，自带运行时
 ├── assets/  plugins/  logo.png
 └── README.md / README.en.md
 
-dist/OmniCOM-1.1.4-win64.zip
+dist/OmniCOM-1.1.5-win64.zip
 ```
 
 解压后直接双击 `OmniCOM.cmd`，目标机**不需要安装 Python、PySide6 或任何依赖**，
