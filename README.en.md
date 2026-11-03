@@ -317,10 +317,12 @@ the bytes are printed as normal send lines and a progress bar tracks the transfe
 
 ### 11. Software update
 
-* The *Software update* menu item checks GitHub once the window is idle: a new version marks the item with NEW and puts a dot on the button.
-* The dialog shows your current version and the release notes; *Download and install* stages the release and **the next start** replaces the program before the window appears.
+* The *Software update* menu item reads GitHub release pages directly once the window is idle: a new version adds red NEW text and a dot on the button.
+* The dialog shows your current version and the release notes; *Download and install* becomes *Cancel* during the download. The original window **stays open with animated progress** while files are extracted and prepared, for both downloads and local packages.
+* When preparation finishes, a confirmation explains that installation takes a little time. *Later* is the default and does not install or exit. Confirm *Restart to install* to hand over to a branded progress window with the OmniCOM logo and taskbar icon. Installation and verification finish first; the completed progress window closes before the target version starts.
+* Target versions that support result dialogs show success and their actual version once. Older versions can install without acknowledging the new installer. If another window locks files, the old version is kept and the failure is reported.
 * Only program files are replaced - the command library, captures, settings and your own plugins under `omnicom-data/` are never touched.
-* No internet needed: press *Update from a package* and pick an `OmniCOM-<version>-win64.zip`. The version is read from inside the package (a renamed file still reports its real version), and a zip that is not an OmniCOM bundle is refused.
+* No internet needed: press *Update from a package* and pick an `OmniCOM-<version>-win64.zip`. The version comes from inside the package, even if renamed. Older versions and same-version reinstalls are supported; non-OmniCOM ZIPs are refused.
 
 ### 12. Typical workflows
 

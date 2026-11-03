@@ -188,6 +188,7 @@ TITLES = {
     "R-142": "随包文档里的版本声明必须等于 __version__",
     "R-143": "检查更新要有进度、有结论、有当前版本，失败要说明原因",
     "R-144": "搜索结果不自动滚到最新，改为浮动「回到最新命中」按钮",
+    "R-145": "更新检查直接读取发布页，不访问 GitHub API",
 }
 
 
@@ -720,11 +721,312 @@ def suite_local() -> None:
             same.get("version") == __version__ and same.get("same_version") is True,
             same.get("version"))
         update.clear_pending()
+
+        older_zip = _make_release(folder, "0.0.1")
+        older = update.stage_local(older_zip)
+        add("R-121", "Older packages are accepted as downgrades, not the same version",
+            older.get("version") == "0.0.1" and older.get("downgrade") is True
+            and older.get("same_version") is False)
+        update.apply_pending(target)
+        with (
+            zipfile.ZipFile(os.path.join(target, "OmniCOM.pyz")) as installed,
+            open(user_path, encoding="utf-8") as current_data,
+            open(mine_path, encoding="utf-8") as current_plugin,
+        ):
+            actual_version = update.VERSION_RE.search(
+                installed.read("omnicom/__init__.py").decode("utf-8")).group(1)
+            preserved = current_data.read() == user_data and current_plugin.read() == mine
+        add("R-121", "A downgrade installs the older archive and preserves user files",
+            actual_version == "0.0.1" and update.pending() is None and preserved)
+
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from omnicom.update_worker import apply_files
+
+        source, destination = Path(folder) / "transaction-source", Path(folder) / "transaction-target"
+        source.mkdir()
+        destination.mkdir()
+        for name in ("first.txt", "second.txt"):
+            (source / name).write_bytes(b"new")
+            (destination / name).write_bytes(b"old")
+        (source / "added.txt").write_bytes(b"added")
+        replace = os.replace
+        commits = []
+
+        def fail_second_commit(source, target):
+            if Path(source).parent.name == "new":
+                commits.append(str(target))
+                if len(commits) == 2:
+                    raise PermissionError("injected file lock")
+            return replace(source, target)
+
+        refused = False
+        with patch("omnicom.update_worker.os.replace", side_effect=fail_second_commit):
+            try:
+                apply_files(source, destination)
+            except PermissionError:
+                refused = True
+        add("R-108", "A mid-commit failure restores original files and removes new files",
+            refused and len(commits) == 2
+            and all((destination / name).read_bytes() == b"old"
+                    for name in ("first.txt", "second.txt"))
+            and not (destination / "added.txt").exists()
+            and not list(destination.glob(".omnicom-update-*")))
     finally:
         if previous is None:
             os.environ.pop("OMNICOM_DATA_DIR", None)
         else:
             os.environ["OMNICOM_DATA_DIR"] = previous
+
+
+def suite_installer(bundle: str, older_package: str | None = None) -> None:
+    """Exercise the shipped updater with real embedded Python and Qt locks."""
+    import hashlib
+    import socket
+    import zipfile
+    from pathlib import Path
+
+    from omnicom import update as update_module
+    from omnicom.update_worker import parent_handle, wait_parent
+
+    original = Path(bundle).resolve()
+    if not (original / "runtime/python.exe").is_file():
+        add("R-108", "Portable runtime is available", False, str(original))
+        return
+    root = Path(_DATA_DIR) / "installer"
+    root.mkdir(parents=True, exist_ok=True)
+    previous_version = "0.0.1"
+    modes = ("local", "download", "locked", "defer")
+    if older_package:
+        assert Path(older_package).is_file()
+        assert update_module.parse_version(update_module.package_version(older_package)) < update_module.parse_version(__version__)
+        modes += ("downgrade",)
+    for mode in modes:
+        case = root / mode
+        target = case / "OmniCOM"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(original, target, ignore=shutil.ignore_patterns(
+            "omnicom-data", ".artifacts", ".omnicom-update-*"))
+        with zipfile.ZipFile(original / "OmniCOM.pyz") as archive:
+            with zipfile.ZipFile(target / "OmniCOM.pyz", "w") as old:
+                for item in archive.infolist():
+                    content = archive.read(item)
+                    if item.filename == "omnicom/__init__.py":
+                        initial_version = __version__ if mode == "downgrade" else previous_version
+                        content = f'__version__ = "{initial_version}"\n'.encode()
+                    old.writestr(item, content)
+        protected = {}
+        for name in ("omnicom-data/commands.json", "omnicom-data/settings.ini",
+                     "omnicom-data/logs/capture.txt", "plugins/mine/plugin.json"):
+            path = target / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"user-owned content\r\n")
+            protected[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        package = case / "release.zip"
+        with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in original.rglob("*"):
+                if path.is_file() and "omnicom-data" not in path.relative_to(original).parts:
+                    archive.write(path, "OmniCOM/" + path.relative_to(original).as_posix())
+            archive.writestr("OmniCOM/omnicom-data/commands.json", "not user data")
+            archive.writestr("OmniCOM/plugins/mine/plugin.json", "not user plugin")
+        if mode == "downgrade":
+            shutil.copyfile(older_package, package)
+        installed_version = update_module.package_version(str(package))
+        env = dict(os.environ)
+        env["OMNICOM_DATA_DIR"] = str(target / "omnicom-data")
+        env["OMNICOM_SETTINGS_SUFFIX"] = "-installer-test"
+        env["QT_QPA_PLATFORM"] = "offscreen"
+        runtime = str(target / "runtime/python.exe")
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(60)
+        config = {"target": str(target), "port": listener.getsockname()[1],
+                  "package": str(package), "mode": mode, "root": ROOT,
+                  "version": installed_version, "snapshot": str(case / "progress.png"),
+                  "trace": str(case / "progress.json")}
+        probe = "CONFIG = " + repr(config) + "\n" + '''
+import json,os,socket,sys,traceback
+connection=socket.create_connection(('127.0.0.1',CONFIG['port']),timeout=60)
+try:
+    sys.path.insert(0,CONFIG['target']+'/OmniCOM.pyz')
+    from omnicom import __version__,update,ui
+    from PySide6.QtWidgets import QApplication,QMessageBox
+    app=QApplication([])
+    messages=[]
+    def show(parent,title,text):
+        box=QMessageBox()
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.show()
+        app.processEvents()
+        messages.append({'title':box.windowTitle(),'text':box.text()})
+        box.close()
+    QMessageBox.information=show
+    QMessageBox.warning=show
+    receiver=getattr(ui,'_show_update_result',None)
+    if receiver:
+        receiver(None)
+        receiver(None)
+    result={'pid':os.getpid(),'version':__version__,'messages':messages,
+            'pending':update.pending(),
+            'result_exists':os.path.isfile(CONFIG['target']+'/omnicom-data/updates/result.json'),
+            'supports_result':receiver is not None}
+    window=None
+    if CONFIG['mode']=='downgrade':
+        os.environ['OMNICOM_DATA_DIR']=CONFIG['target']+'/../window-probe-data'
+        from omnicom.ui.main_window import OmniWindow
+        from omnicom.ui.theme import app_stylesheet
+        app.setStyle('Fusion')
+        app.setStyleSheet(app_stylesheet())
+        window=OmniWindow(demo=True)
+        window.show()
+        app.processEvents()
+        result['window_visible']=window.isVisible()
+        window.grab().save(CONFIG['target']+'/../restarted.png')
+except BaseException:
+    result={'pid':os.getpid(),'error':traceback.format_exc()}
+connection.sendall(json.dumps(result).encode('utf-8')+b'\\n')
+connection.recv(1)
+connection.close()
+if 'window' in globals() and window is not None:
+    window.close()
+    app.processEvents()
+'''
+        restart = [runtime, "-B", "-X", "utf8", "-c", probe]
+        parent_code = "CONFIG = " + repr(config) + "\nRESTART = " + repr(restart) + "\n" + '''
+import json,pathlib,sys
+from PySide6 import QtCore
+sys.path.insert(0,CONFIG['target']+'/OmniCOM.pyz')
+from omnicom import update
+if CONFIG['mode']=='download':
+    path=update.download(pathlib.Path(CONFIG['package']).as_uri(),
+                         str(pathlib.Path(update.updates_dir())/'download.zip'))
+    update.stage(path,CONFIG['version'])
+else:
+    update.stage_local(CONFIG['package'])
+worker=update.launch_installer(restart_command=RESTART,wait_confirmation=True,
+    progress_ui={'title':'OmniCOM','message':'Installing. Please keep this window open.',
+                 'complete':'Installation complete. Starting OmniCOM.',
+                 'stylesheet':'','snapshot':CONFIG['snapshot'],'trace':CONFIG['trace']})
+print(json.dumps({'worker':worker.pid}),flush=True)
+action=input()
+if action=='cancel':
+    worker.cancel()
+    print('DEFERRED',flush=True)
+else:
+    worker.confirm()
+    print('VISIBLE',flush=True)
+input()
+'''
+        locker = None
+        parent = None
+        try:
+            if mode == "locked":
+                locker = subprocess.Popen(
+                    [runtime, "-B", "-c",
+                     "from PySide6 import QtCore; print('LOCKED',flush=True); input()"],
+                    cwd=target, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, encoding="utf-8")
+                assert locker.stdout.readline().strip() == "LOCKED"
+            parent = subprocess.Popen(
+                [runtime, "-B", "-X", "utf8", "-c", parent_code],
+                cwd=target, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, encoding="utf-8")
+            ready = parent.stdout.readline()
+            if not ready:
+                raise AssertionError(parent.communicate(timeout=10)[1])
+            worker_pid = json.loads(ready)["worker"]
+            handle = parent_handle(worker_pid)
+            with zipfile.ZipFile(target / "OmniCOM.pyz") as archive:
+                before = archive.read("omnicom/__init__.py").decode()
+            add("R-108", f"{mode}: installer waits while old Python and Qt are alive",
+                (str(__version__) if mode == "downgrade" else previous_version) in before and parent.poll() is None
+                and not (target / "omnicom-data/updates/result.json").exists())
+            add("R-108", f"{mode}: file preparation completed before the old UI exits",
+                bool(list(target.glob(".omnicom-update-*/new/OmniCOM.pyz"))))
+            parent.stdin.write("cancel\n" if mode == "defer" else "confirm\n")
+            parent.stdin.flush()
+            if mode == "defer":
+                assert parent.stdout.readline().strip() == "DEFERRED"
+                wait_parent(handle, 90000)
+                add("R-108", "Declining confirmation keeps the current process and version",
+                    parent.poll() is None
+                    and not list(target.glob(".omnicom-update-*"))
+                    and (target / "omnicom-data/updates/pending.json").is_file()
+                    and not (target / "omnicom-data/updates/result.json").exists())
+                parent.communicate("\n", timeout=30)
+                continue
+            assert parent.stdout.readline().strip() == "VISIBLE"
+            from PySide6.QtGui import QImage
+
+            image = QImage(config["snapshot"])
+            add("R-108", f"{mode}: independent progress window appears before the old UI exits",
+                parent.poll() is None and not image.isNull()
+                and len({image.pixelColor(x, y).rgba()
+                         for y in range(0, image.height(), 3)
+                         for x in range(0, image.width(), 3)}) > 8)
+            visible = json.loads(Path(config["trace"]).read_text(encoding="utf-8"))["events"][0]
+            add("R-075", f"{mode}: installer has the brand logo and taskbar/window icon",
+                visible["icon"] and visible["logo"] and visible["taskbar_window"])
+            parent.communicate("\n", timeout=30)
+            assert parent.returncode == 0
+            wait_parent(handle, 90000)
+            events = json.loads(Path(config["trace"]).read_text(encoding="utf-8"))["events"]
+            add("R-108", f"{mode}: progress completes and disappears before launching the app",
+                [event["event"] for event in events] == ["visible", "complete", "restart"]
+                and events[1]["value"] == events[1]["maximum"] == 100
+                and not events[2]["visible"])
+            connection, _address = listener.accept()
+            with connection:
+                connection.settimeout(30)
+                response = connection.makefile("rb").readline()
+                result = json.loads(response)
+                restarted = parent_handle(result["pid"])
+                connection.sendall(b"1")
+            wait_parent(restarted, 30000)
+            if result.get("error"):
+                raise AssertionError(result["error"])
+            expected = previous_version if mode == "locked" else installed_version
+            add("R-108", f"{mode}: restarted process reports the actual version",
+                result["version"] == expected, str(result))
+            messages = result["messages"]
+            if result["supports_result"]:
+                add("R-108", f"{mode}: result popup contains current version exactly once",
+                    len(messages) == 1 and expected in messages[0]["text"]
+                    and (messages[0]["title"] == "\u66f4\u65b0\u6210\u529f") == (mode != "locked")
+                    and not result["result_exists"], str(messages))
+            else:
+                add("R-121", "Legacy app starts without an acknowledgment or stale result file",
+                    not messages and not result["result_exists"] and result.get("window_visible"),
+                    str(result))
+            add("R-108", f"{mode}: user files and plugins retain their hashes",
+                all(hashlib.sha256((target / name).read_bytes()).hexdigest() == value
+                    for name, value in protected.items()))
+            if mode == "locked":
+                add("R-108", "Locked Qt fails before committing and does not retry forever",
+                    bool(result["pending"].get("failed"))
+                    and "0.0.1" in result["version"]
+                    and not list(target.glob(".omnicom-update-*")))
+            else:
+                with zipfile.ZipFile(package) as archive:
+                    add("R-121", f"{mode}: program and runtime match the package after restart",
+                        all(hashlib.sha256(archive.read(name)).digest()
+                            == hashlib.sha256((target / name.removeprefix("OmniCOM/")).read_bytes()).digest()
+                            for name in archive.namelist() if not name.endswith("/")
+                            and name.startswith("OmniCOM/")
+                            and name.split("/")[1] not in ("omnicom-data", "plugins"))
+                        and result["pending"] is None)
+        finally:
+            listener.close()
+            if parent is not None and parent.poll() is None:
+                parent.communicate("\n", timeout=30)
+            if locker is not None:
+                locker.communicate("\n", timeout=30)
+    report_path = Path(ROOT) / ".artifacts/update-selftest.json"
+    report_path.write_text(json.dumps({"ok": not FAILED, "checks": RESULTS},
+                                     ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def suite_visual() -> None:
@@ -1041,8 +1343,11 @@ def suite_visual() -> None:
         'PROTECTED_DIR = "omnicom-data"' in update_source
         and "def _protected" in update_source
         and "clear_pending()" in update_source)
-    add("R-108", "更新在 Qt 启动之前应用（不打断用户操作）",
-        "apply_pending" in source_of("omnicom", "ui", "__init__.py"))
+    startup_source = source_of("omnicom", "ui", "__init__.py")
+    add("R-108", "旧待安装任务也不得绕过用户确认在启动时自动退出",
+        "update.launch_installer()" not in startup_source
+        and "wait_confirmation=True" in dialog_source
+        and "_confirm_restart(self" in dialog_source)
 
     add("R-109", "更新检查排在窗口显示之后，并在独立线程里跑",
         "schedule_update_check" in window_source
@@ -1054,8 +1359,7 @@ def suite_visual() -> None:
     #    the wiring; here the reporter itself is exercised without a network.
     from omnicom import update as update_mod
 
-    # Both routes point at a closed port, so this exercises the failure path
-    # without depending on the network (and without burning the API quota).
+    # A closed port exercises the release-page failure without a network.
     dead = "https://127.0.0.1:1/none"
     unreachable = update_mod.check_release(
         current=__version__, timeout=0.05, api=dead, atom=dead)
@@ -1064,11 +1368,10 @@ def suite_visual() -> None:
         and bool(unreachable.get("error")),
         f"keys={sorted(unreachable)}" if isinstance(unreachable, dict)
         else repr(unreachable))
-    add("R-143", "检查结果带 source 字段，能分清走的是 API 还是发布页",
+    add("R-143", "检查结果带 source 字段，标明发布页来源",
         isinstance(unreachable, dict) and "source" in unreachable)
     add("R-143", "失败原因写成一句人话（不是裸异常）",
         isinstance(unreachable, dict)
-        and "API：" in str(unreachable.get("error"))
         and "发布页：" in str(unreachable.get("error")),
         str(unreachable.get("error"))[:80] if isinstance(unreachable, dict) else "")
     add("R-143", "旧的 update.check() 失败仍安静返回 None（R-107 契约不变）",
@@ -1095,10 +1398,89 @@ def suite_visual() -> None:
     add("R-143", "没有缓存信息时打开对话框会主动开始检查",
         "def start_check" in dialog_source
         and "dialog.start_check()" in window_source)
-    add("R-143", "API 被限流时改读发布页（releases.atom 兜底）",
+    add("R-143", "直接读取发布页（releases.atom）",
         "releases.atom" in update_source
         and "def _check_web" in update_source
         and "def check_release" in update_source)
+
+    import io
+    import tempfile
+    from unittest.mock import patch
+
+    from omnicom.i18n import language, set_language
+
+    logs = []
+    requested_urls = []
+
+    def release_response(url, *args, **kwargs):
+        requested_urls.append(url)
+        if url == update_mod.RELEASES_ATOM:
+            return io.BytesIO(b'<entry><link href="https://github.com/Fatmear/OmniCOM/releases/tag/v9.9.9"/></entry>')
+        if url.startswith(update_mod.RELEASES_ASSETS):
+            return io.BytesIO(b'<a href="/Fatmear/OmniCOM/releases/download/v9.9.9/OmniCOM-9.9.9-win64.zip">zip</a>')
+        raise AssertionError(f"unexpected request: {url}")
+
+    with patch.object(update_mod, "_request", side_effect=release_response):
+        page_result = update_mod.check_release(log=logs.append)
+        quiet_result = update_mod.check()
+    add("R-145", "两种检查入口都直接读发布页，不调用 API",
+        page_result.get("ok") and page_result.get("source") == "web"
+        and quiet_result.get("version") == "9.9.9"
+        and len(requested_urls) == 4
+        and all("api.github.com" not in url for url in requested_urls))
+    previous_language = language()
+    try:
+        set_language("en")
+        english_logs = []
+        with patch.object(update_mod, "_check_web", side_effect=OSError("offline")):
+            failed_page = update_mod.check_release(log=english_logs.append)
+        add("R-145", "英文检查失败日志不含中文且明确给出结论",
+            failed_page.get("ok") is False
+            and "Release page" in failed_page.get("error", "")
+            and not re.search(r"[\u4e00-\u9fff]", " ".join(english_logs)))
+    finally:
+        set_language(previous_language)
+
+    class DownloadResponse(io.BytesIO):
+        def __init__(self, data):
+            super().__init__(data)
+            self.headers = {"Content-Length": "131072"}
+
+    with tempfile.TemporaryDirectory() as download_dir:
+        destination = os.path.join(download_dir, "update.zip")
+        cancel_requested = []
+        cancelled_download = False
+        with patch.object(update_mod, "_request",
+                          return_value=DownloadResponse(b"x" * 131072)):
+            try:
+                update_mod.download(
+                    "test", destination,
+                    progress=lambda *_: cancel_requested.append(True),
+                    cancelled=lambda: bool(cancel_requested))
+            except update_mod.DownloadCancelled:
+                cancelled_download = True
+        add("R-107", "下载中取消会删除部分文件且不生成完成文件",
+            cancelled_download and not os.path.exists(destination)
+            and not os.path.exists(destination + ".part"))
+        with patch.object(update_mod, "_request",
+                          return_value=DownloadResponse(b"complete")):
+            update_mod.download("test", destination)
+        with open(destination, "rb") as downloaded:
+            add("R-107", "正常下载完整落盘且清除临时文件",
+                downloaded.read() == b"complete"
+                and not os.path.exists(destination + ".part"))
+        with patch.object(update_mod, "updates_dir", return_value=download_dir), \
+                patch.object(update_mod.zipfile, "ZipFile"), \
+                patch.object(update_mod, "_safe_extract",
+                             side_effect=lambda *_: cancel_requested.append(True)):
+            cancel_requested.clear()
+            with contextlib.suppress(update_mod.DownloadCancelled):
+                update_mod.stage(destination, "9.9.9",
+                                 cancelled=lambda: bool(cancel_requested))
+        add("R-107", "解包结束时取消也不会写入待安装标记",
+            bool(cancel_requested)
+            and not os.path.exists(os.path.join(download_dir, update_mod.PENDING_MARKER))
+            and not os.path.exists(os.path.join(download_dir, "staged-9.9.9")))
 
     # -- R-144: the result list must not follow new hits; a floating bubble
     #    takes the user back to the newest one instead, exactly like the log.
@@ -1423,9 +1805,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="OmniCOM 全功能验收测试")
     parser.add_argument("--fast", action="store_true", help="跳过耗时最长的 GUI 套件")
     parser.add_argument("--only",
-                        choices=["protocol", "cli", "gui", "multi", "local", "visual"],
+                        choices=["protocol", "cli", "gui", "multi", "local", "visual", "installer"],
                         help="只跑某一个套件")
+    parser.add_argument("--bundle", default=os.path.join(ROOT, "dist", "OmniCOM"))
+    parser.add_argument("--older-package", help="Test a genuine older release ZIP as well")
     options = parser.parse_args()
+
+    if options.only == "installer":
+        suite_installer(options.bundle, options.older_package)
+        return 1 if FAILED else 0
 
     started = time.time()
     suites = {

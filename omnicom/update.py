@@ -3,16 +3,16 @@
 Three separate jobs, so each can be tested without a window or a network:
 
 ``check``
-    one HTTPS request to the releases API; anything unexpected (offline, proxy,
-    rate limit, malformed JSON) comes back as ``None`` instead of raising - an
+    read the release pages; anything unexpected (offline, proxy,
+    malformed response) comes back as ``None`` instead of raising - an
     update check must never be able to disturb the app (R-107).
 ``stage``
     download the release asset and unpack it next to the data folder.  Nothing
     in the running bundle is touched while the program is open.
 ``apply_pending``
-    called at startup *before* any widget exists: copy the staged files over the
-    bundle, **skipping ``omnicom-data/``**, so a version upgrade can never lose
-    commands, captures, settings or plugins (R-108).
+    transactional file installation for an unlocked bundle; the live app uses
+    ``launch_installer`` to wait for its exit in an isolated runtime, install
+    without touching user data, and restart automatically (R-108).
 """
 
 from __future__ import annotations
@@ -22,19 +22,25 @@ import html as html_unescape_module
 import io
 import json
 import os
+import queue
 import re
 import shutil
+import subprocess
+import sys
+import tempfile
+import threading
 import urllib.error
 import urllib.request
 import zipfile
+from importlib.resources import files
+from pathlib import Path
 
 from . import __version__, paths
+from .i18n import tr
 
 #: ``html.unescape`` without the module name clashing with a local variable.
 html_unescape = html_unescape_module.unescape
 
-#: Public endpoint - no token needed for an unauthenticated read.
-RELEASES_API = "https://api.github.com/repos/Fatmear/OmniCOM/releases/latest"
 #: Where a human should be sent when the automatic install is not an option.
 RELEASES_PAGE = "https://github.com/Fatmear/OmniCOM/releases/latest"
 USER_AGENT = "OmniCOM-updater"
@@ -69,44 +75,14 @@ def is_newer(latest: str, current: str = __version__) -> bool:
 
 # ------------------------------------------------------------------- network
 def _request(url: str, timeout: float, headers: dict | None = None):
-    merged = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
+    merged = {"User-Agent": USER_AGENT, "Accept": "*/*"}
     merged.update(headers or {})
     return urllib.request.urlopen(
         urllib.request.Request(url, headers=merged), timeout=timeout)
 
 
-def _check_api(current: str, timeout: float, api: str) -> dict:
-    """One API read that **raises** instead of hiding why it failed."""
-    with _request(api, timeout) as response:
-        payload = json.loads(response.read().decode("utf-8", "replace"))
-    if not isinstance(payload, dict):
-        raise ValueError("发布信息不是 JSON 对象")
-    tag = str(payload.get("tag_name") or payload.get("name") or "").strip()
-    if not tag:
-        raise ValueError("发布信息里没有版本号")
-    asset_name, asset_url, asset_size = "", "", 0
-    for asset in payload.get("assets") or []:
-        name = str(asset.get("name") or "")
-        if name.lower().endswith(".zip"):
-            asset_name = name
-            asset_url = str(asset.get("browser_download_url") or "")
-            asset_size = int(asset.get("size") or 0)
-            break
-    return {
-        "available": is_newer(tag, current),
-        "current": current,
-        "version": tag.lstrip("vV"),
-        "tag": tag,
-        "url": str(payload.get("html_url") or RELEASES_PAGE),
-        "notes": str(payload.get("body") or "")[:4000],
-        "asset": asset_name,
-        "asset_url": asset_url,
-        "asset_size": asset_size,
-    }
-
-
 def check(current: str = __version__, timeout: float = 3.0,
-          api: str = RELEASES_API) -> dict | None:
+          api: str | None = None, atom: str | None = None) -> dict | None:
     """Return ``{"available", "version", "url", "notes", "asset", ...}`` or None.
 
     Never raises: the caller runs this in the background and a failure simply
@@ -114,7 +90,7 @@ def check(current: str = __version__, timeout: float = 3.0,
     failure has to be shown to the user.
     """
     try:
-        return _check_api(current, timeout, api)
+        return _check_web(current, timeout, atom=atom or api or RELEASES_ATOM)
     except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
         return None
 
@@ -125,7 +101,7 @@ def check(current: str = __version__, timeout: float = 3.0,
 #: so the allowance is gone within minutes and every check came back ``None``
 #: with HTTP 403 - and the dialog, which only ever waited for a success, sat on
 #: "正在检查新版本…" forever (L-168).  These two pages carry the same facts and
-#: are not rate limited, so they are the fallback.
+#: avoid that API quota and are now the only check path (R-145).
 RELEASES_ATOM = "https://github.com/Fatmear/OmniCOM/releases.atom"
 RELEASES_ASSETS = "https://github.com/Fatmear/OmniCOM/releases/expanded_assets"
 RELEASES_DOWNLOAD = "https://github.com/Fatmear/OmniCOM/releases/download"
@@ -150,14 +126,14 @@ def _atom_release(text: str) -> tuple[str, str]:
     """``(tag, notes)`` from the releases Atom feed; the newest entry wins."""
     entry = _ATOM_ENTRY.search(text or "")
     if entry is None:
-        raise ValueError("Atom feed 里没有条目")
+        raise ValueError(tr("update.check.no.entries"))
     body = entry.group(1)
     link = _ATOM_LINK.search(body)
     tag = ""
     if link:
         tag = link.group(1).rstrip("/").rsplit("/", 1)[-1]
     if not tag:
-        raise ValueError("Atom 条目里没有版本号")
+        raise ValueError(tr("update.check.no.version"))
     content = _ATOM_CONTENT.search(body)
     notes = ""
     if content:
@@ -195,7 +171,7 @@ def _check_web(current: str, timeout: float, log=None,
     try:
         href, name, size = _page_asset(tag, timeout)
     except Exception as error:              # cosmetic only: the URL above works
-        _say(log, f"    资产列表读取失败，沿用约定文件名（{error}）")
+        _say(log, tr("update.check.assets", err=_reason(error)))
     else:
         if href:
             asset_url, asset_name, asset_size = href, name, size
@@ -220,15 +196,15 @@ def _say(log, text: str) -> None:
 
 
 def check_release(current: str = __version__, timeout: float = 6.0,
-                  log=None, progress=None, api: str = RELEASES_API,
+                  log=None, progress=None, api: str | None = None,
                   atom: str = RELEASES_ATOM) -> dict:
-    """Find the newest release, falling back to the pages when the API is out.
+    """Find the newest release directly from GitHub release pages.
 
-    Returns ``{"ok": bool, "source": "api"|"web"|"", "error": str, **info}``.
+    Returns ``{"ok": bool, "source": "web"|"", "error": str, **info}``.
     Never raises: the whole point is that the dialog can always print a verdict
     instead of waiting forever (R-143).  ``log`` receives progress lines and
-    ``progress(done, total)`` drives the bar.  ``api`` / ``atom`` are injectable
-    so the failure path can be exercised without a network.
+    ``progress(done, total)`` drives the bar. ``atom`` is injectable for tests.
+    ``api`` is accepted for compatibility but is never contacted.
     """
     errors: list[str] = []
 
@@ -239,27 +215,16 @@ def check_release(current: str = __version__, timeout: float = 6.0,
             with contextlib.suppress(Exception):
                 progress(index, 3)
 
-    step(1, "① 连接 GitHub API（api.github.com）…")
-    try:
-        info = _check_api(current, timeout, api)
-    except Exception as error:              # report, never raise: the caller paints it
-        errors.append(f"API：{_reason(error)}")
-        _say(log, f"    API 不可用：{_reason(error)}")
-    else:
-        step(3, "✓ 通过 API 拿到发布信息")
-        return {**info, "ok": True, "source": "api", "error": ""}
-
-    step(2, "② API 受限，改读发布页（releases.atom）…")
+    step(1, tr("update.check.web"))
     try:
         info = _check_web(current, timeout, log, atom=atom)
-    except Exception as error:              # both routes failed, say why
-        errors.append(f"发布页：{_reason(error)}")
-        _say(log, f"    发布页也不可用：{_reason(error)}")
+    except Exception as error:
+        errors.append(tr("update.check.web.failed", err=_reason(error)))
+        _say(log, errors[-1])
     else:
-        step(3, f"✓ 通过发布页拿到 v{info['version']}")
+        step(3, tr("update.check.web.found", version=info["version"]))
         return {**info, "ok": True, "source": "web", "error": ""}
 
-    _say(log, "✗ 两种方式都失败")
     if progress is not None:
         # The bar must reach 100% even on failure, otherwise it looks stuck.
         with contextlib.suppress(Exception):
@@ -272,31 +237,49 @@ def _reason(error: BaseException) -> str:
     """A one-line, human-sized reason for a failed request."""
     if isinstance(error, urllib.error.HTTPError):
         if error.code == 403:
-            return "HTTP 403 访问次数超限（GitHub 对未登录的同一出口 IP 限流）"
+            return tr("update.check.forbidden")
         return f"HTTP {error.code} {error.reason}"
     if isinstance(error, urllib.error.URLError):
-        return f"网络不通（{error.reason}）"
+        return tr("update.check.network", err=error.reason)
     text = str(error) or type(error).__name__
     return text[:160]
 
 
+class DownloadCancelled(Exception):
+    """The user cancelled before the update was committed."""
+
+
+def _check_cancelled(cancelled) -> None:
+    if cancelled is not None and cancelled():
+        raise DownloadCancelled()
+
+
 def download(url: str, target: str, timeout: float = 30.0,
-             progress=None) -> str:
+             progress=None, cancelled=None) -> str:
     """Stream the asset to ``target``; ``progress(done, total)`` is optional."""
     os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
     partial = target + ".part"
-    with _request(url, timeout) as response, open(partial, "wb") as handle:
-        total = int(response.headers.get("Content-Length") or 0)
-        done = 0
-        while True:
-            chunk = response.read(65536)
-            if not chunk:
-                break
-            handle.write(chunk)
-            done += len(chunk)
-            if progress is not None:
-                progress(done, total)
-    os.replace(partial, target)
+    try:
+        _check_cancelled(cancelled)
+        with _request(url, timeout) as response, open(partial, "wb") as handle:
+            total = int(response.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                _check_cancelled(cancelled)
+                chunk = response.read(65536)
+                _check_cancelled(cancelled)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                done += len(chunk)
+                if progress is not None:
+                    progress(done, total)
+        _check_cancelled(cancelled)
+        os.replace(partial, target)
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.remove(partial)
+        raise
     return target
 
 
@@ -324,13 +307,19 @@ def _safe_extract(archive: zipfile.ZipFile, target: str) -> str:
     return root
 
 
-def stage(zip_path: str, version: str) -> str:
+def stage(zip_path: str, version: str, cancelled=None) -> str:
     """Unpack ``zip_path`` into the updates folder and mark it pending."""
+    _check_cancelled(cancelled)
     target = os.path.join(updates_dir(), f"staged-{version}")
     shutil.rmtree(target, ignore_errors=True)
     os.makedirs(target, exist_ok=True)
     with zipfile.ZipFile(zip_path) as archive:
         bundle = _safe_extract(archive, target)
+    try:
+        _check_cancelled(cancelled)
+    except DownloadCancelled:
+        shutil.rmtree(target, ignore_errors=True)
+        raise
     with open(os.path.join(updates_dir(), PENDING_MARKER), "w",
               encoding="utf-8") as handle:
         json.dump({"version": version, "source": bundle}, handle)
@@ -414,9 +403,10 @@ def stage_local(zip_path: str) -> dict:
     # Not a blocker - a user may deliberately reinstall or roll back - but the
     # dialog says so, otherwise "updated to the version I already had" looks
     # like a failure.
-    same = bool(version) and version != "local" and not is_newer(version)
+    same = version != "local" and parse_version(version) == parse_version(__version__)
     bundle = stage(path, version)
     return {"version": version, "source": bundle, "same_version": same,
+            "downgrade": version != "local" and parse_version(version) < parse_version(__version__),
             "path": path}
 
 
@@ -455,26 +445,167 @@ def apply_pending(bundle_dir: str | None = None) -> list[str]:
     data = pending()
     if data is None:
         return []
-    source = str(data["source"])
-    target = os.path.abspath(bundle_dir or paths.app_dir())
-    if os.path.abspath(source) == target:
-        return []
-    written: list[str] = []
-    for base, folders, files in os.walk(source):
-        folders[:] = [item for item in folders if item.lower() != PROTECTED_DIR]
-        for name in files:
-            full = os.path.join(base, name)
-            relative = os.path.relpath(full, source)
-            if _protected(relative):
-                continue
-            destination = os.path.join(target, relative)
-            keep = (relative.replace("\\", "/").lower().startswith("plugins/")
-                    and os.path.exists(destination))
-            if keep:
-                continue
-            os.makedirs(os.path.dirname(destination), exist_ok=True)
-            shutil.copy2(full, destination)
-            written.append(relative)
+    from .update_worker import apply_files
+
+    source = Path(data["source"])
+    target = Path(bundle_dir or paths.app_dir())
+    written = apply_files(source, target)
     clear_pending()
     shutil.rmtree(source, ignore_errors=True)
     return written
+
+
+def result_path() -> Path:
+    return Path(updates_dir()) / "result.json"
+
+
+def take_result() -> dict | None:
+    path = result_path()
+    claimed = path.with_name(f"result-{os.getpid()}.json")
+    try:
+        os.replace(path, claimed)
+    except FileNotFoundError:
+        return None
+    try:
+        result = json.loads(claimed.read_text(encoding="utf-8"))
+        if not isinstance(result, dict):
+            raise ValueError("Invalid installation result")
+        return result
+    finally:
+        claimed.unlink()
+
+
+class Installer:
+    def __init__(self, process, workspace: Path, messages):
+        self.process = process
+        self.workspace = workspace
+        self.messages = messages
+
+    @property
+    def pid(self):
+        return self.process.pid
+
+    def confirm(self):
+        self.process.stdin.write(b"INSTALL\n")
+        self.process.stdin.flush()
+        self.process.stdin.close()
+        if self.messages.get(timeout=60).strip() != b"VISIBLE":
+            raise OSError("Installer progress window did not become ready")
+
+    def cancel(self):
+        if self.process.poll() is None:
+            self.process.stdin.write(b"CANCEL\n")
+            self.process.stdin.flush()
+            self.process.stdin.close()
+        self.process.wait(timeout=60)
+        shutil.rmtree(self.workspace, ignore_errors=True)
+
+
+def launch_installer(bundle_dir: str | None = None,
+                     restart_command: list[str] | None = None, *,
+                     wait_confirmation: bool = False, progress=None,
+                     progress_ui: dict | None = None) -> int | Installer:
+    """Start an isolated installer and wait for its ready handshake."""
+    data = pending()
+    if data is None:
+        raise OSError("No staged update")
+    target = Path(bundle_dir or paths.app_dir()).resolve()
+    workspace = Path(tempfile.mkdtemp(prefix="installer-", dir=updates_dir()))
+    process = None
+    try:
+        script = workspace / "worker.py"
+        script.write_bytes(
+            files("omnicom").joinpath("update_worker.py").read_bytes())
+        if progress_ui is not None:
+            progress_ui = dict(progress_ui)
+            for key, name in (("icon", "omnicom.ico"), ("logo", "omnicom.png")):
+                source = target / "assets" / name
+                if not source.is_file():
+                    source = Path(paths.resource_file("assets", name) or "")
+                if not source.is_file():
+                    raise OSError(f"Missing installer branding: {name}")
+                destination = workspace / name
+                shutil.copy2(source, destination)
+                progress_ui[key] = str(destination)
+        python = Path(sys.executable)
+        if python.parent.resolve() == (target / "runtime").resolve():
+            runtime = workspace / "runtime"
+            runtime.mkdir()
+            candidates = list(python.parent.rglob("*") if progress_ui
+                              else python.parent.iterdir())
+            candidates = [path for path in candidates if path.is_file()]
+            for index, path in enumerate(candidates, 1):
+                destination = runtime / path.relative_to(python.parent)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, destination)
+                if progress is not None:
+                    progress(index, len(candidates))
+            python = runtime / "python.exe"
+        restart = restart_command
+        if restart is None:
+            executable = target / "runtime" / "pythonw.exe"
+            if not executable.is_file():
+                executable = Path(sys.executable)
+            entry = target / "OmniCOM.pyz"
+            if not entry.is_file():
+                entry = target / "run.py"
+            restart = [str(executable), "-B", "-X", "utf8", str(entry)]
+            if "--demo" in sys.argv:
+                restart.append("--demo")
+        job = {
+            "pid": os.getpid(),
+            "source": data["source"],
+            "version": data["version"],
+            "target": str(target),
+            "marker": str(Path(updates_dir()) / PENDING_MARKER),
+            "result": str(result_path()),
+            "restart": restart,
+            "wait_confirmation": wait_confirmation,
+            "progress_ui": progress_ui,
+            "ready": str(workspace / "window-ready"),
+        }
+        job_path = workspace / "job.json"
+        job_path.write_text(json.dumps(job), encoding="utf-8")
+        log_path = workspace / "installer.log"
+        with log_path.open("wb") as log:
+            process = subprocess.Popen(
+                [str(python), "-I", "-B", "-X", "utf8",
+                 str(script), str(job_path)],
+                cwd=workspace,
+                stdin=subprocess.PIPE if wait_confirmation else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=log, close_fds=True,
+                creationflags=(0x08000000 if sys.platform == "win32" else 0))
+        output = process.stdout
+        assert output is not None
+        ready: queue.Queue[bytes] = queue.Queue()
+        def read_output():
+            try:
+                for line in output:
+                    ready.put(line)
+            finally:
+                ready.put(b"")
+                output.close()
+
+        threading.Thread(target=read_output, daemon=True).start()
+        while True:
+            message = ready.get(timeout=60).strip()
+            if message == b"READY":
+                break
+            if not message:
+                raise OSError(log_path.read_text(
+                    encoding="utf-8", errors="replace")
+                              or "Installer exited before becoming ready")
+            details = json.loads(message)
+            if progress is not None:
+                progress(details["progress"], details["total"])
+        if wait_confirmation:
+            return Installer(process, workspace, ready)
+        return process.pid
+    except Exception:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=10)
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise

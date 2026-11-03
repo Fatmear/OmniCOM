@@ -358,7 +358,11 @@ def verify(target: Path) -> int:
         print("packaged selftest FAILED")
         return result.returncode or 1
     print("packaged selftest OK (bundled runtime, no external packages)")
-    return 0
+    installer = subprocess.run(
+        [sys.executable, "-X", "utf8", str(ROOT / "tools/acceptance_test.py"),
+         "--only", "installer", "--bundle", str(target)],
+        cwd=ROOT, timeout=300)
+    return installer.returncode
 
 
 def archive(target: Path, version: str) -> Path:

@@ -4493,6 +4493,34 @@ def main() -> int:
         check("R-107 有新版本时菜单项后面带 NEW",
               "NEW" in tr("menu.update.new") and "NEW" not in tr("menu.update"),
               tr("menu.update.new"))
+        from PySide6.QtWidgets import QMenu
+
+        menu = QMenu(window)
+        action = window.titlebar._add_update_action(menu)
+        triggered = []
+        action.triggered.disconnect()
+        action.triggered.connect(lambda: triggered.append(True))
+        menu.show()
+        app.processEvents()
+        label = action.defaultWidget()
+        image = label.grab().toImage()
+        red_pixels = sum(
+            image.pixelColor(x, y).red() > 140
+            and image.pixelColor(x, y).green() < 100
+            and image.pixelColor(x, y).blue() < 100
+            for y in range(image.height()) for x in range(image.width()))
+        check("R-107 NEW 使用红色文字而不是椭圆框",
+              theme.DANGER in label.text() and red_pixels > 5,
+              f"red pixels={red_pixels}")
+        QTest.mouseClick(menu, Qt.LeftButton,
+                         pos=menu.actionGeometry(action).center())
+        check("R-107 红色 NEW 菜单项鼠标点击触发一次", len(triggered) == 1)
+        menu.show()
+        menu.setActiveAction(action)
+        QTest.keyClick(menu, Qt.Key_Return)
+        check("R-107 红色 NEW 菜单项支持键盘回车", len(triggered) == 2)
+        menu.close()
+        menu.deleteLater()
         window._on_update_found({"available": False, "version": "1.1.2",
                                  "current": "1.1.2"})
         app.processEvents()
@@ -4502,10 +4530,56 @@ def main() -> int:
         newer = UpdateDialog(window, {"available": True, "version": "9.9.9",
                                       "current": "1.1.2", "notes": "n",
                                       "asset_url": "u", "url": "x"})
+        release_download = threading.Event()
+        download_started = threading.Event()
+
+        def cancellable_download(*args, cancelled, **kwargs):
+            download_started.set()
+            if not release_download.wait(3):
+                raise TimeoutError("test cancellation handshake")
+            if cancelled():
+                raise update.DownloadCancelled()
+            raise AssertionError("cancel flag missing")
+
         check("R-107 更新对话框显示新版本号并给出安装按钮",
               "9.9.9" in newer.heading.text()
               and newer.btn_install.isVisibleTo(newer)
               and newer.btn_install.isEnabled())
+        with patch.object(update, "download", side_effect=cancellable_download), \
+                patch.object(update, "stage") as stage_mock:
+            newer.btn_install.click()
+            check("R-107 下载开始后原按钮变为可点击的取消",
+                  download_started.wait(3)
+                  and newer.btn_install.text() == tr("update.cancel")
+                  and newer.btn_install.isEnabled())
+            newer.btn_install.click()
+            release_download.set()
+            newer._download_thread.join(3)
+            app.processEvents()
+            check("R-107 取消阻止暂存安装并恢复重试按钮",
+                  not stage_mock.called and not newer._working
+                  and newer.btn_install.text() == tr("update.install")
+                  and newer.btn_install.isEnabled()
+                  and newer.btn_check.isEnabled()
+                  and newer.btn_local.isEnabled()
+                  and newer.status.text() == tr("update.cancelled"))
+        with patch.object(update, "download", return_value="test.zip"), \
+            patch.object(update, "stage"), \
+            patch.object(update, "launch_installer") as installer, \
+            patch("omnicom.ui.update_dialog._confirm_restart", return_value=True), \
+            patch("omnicom.ui.update_dialog._restart_application") as restart:
+            newer.btn_install.click()
+            newer._download_thread.join(3)
+            app.processEvents()
+            newer._install_thread.join(3)
+            app.processEvents()
+            newer._install_thread.join(3)
+            app.processEvents()
+            check("R-107 取消后可以重新下载并成功暂存",
+                  not newer._working and not newer.btn_install.isEnabled()
+                  and "9.9.9" in newer.status.text())
+            check("R-108 下载更新就绪后启动独立安装器并自动重启",
+                  installer.call_count == 1 and restart.call_count == 1)
         newer.close()
         newer.deleteLater()
         latest = UpdateDialog(window, {"available": False, "current": "1.1.2"})
@@ -4515,6 +4589,90 @@ def main() -> int:
               repr(latest.detail.text()))
         latest.close()
         latest.deleteLater()
+
+        local = UpdateDialog(window)
+        with (
+            patch.object(update, "launch_installer") as installer,
+            patch("omnicom.ui.update_dialog._confirm_restart", return_value=True) as confirmation,
+            patch("omnicom.ui.update_dialog._restart_application") as restart,
+        ):
+            local.show()
+            local._on_local_staged("9.9.9", False)
+            check("R-108 准备阶段原界面保持可见且进度条持续运行",
+                  local.isVisible() and window.isVisible()
+                  and local.progress.isVisibleTo(local)
+                  and local.progress.minimum() == local.progress.maximum() == 0)
+            local.grab().save(os.path.join(ROOT, ".artifacts", "update-preparing.png"))
+            local._install_thread.join(3)
+            app.processEvents()
+            local._install_thread.join(3)
+            app.processEvents()
+            check("R-108 本地包就绪后同样启动独立安装器并自动重启",
+                  installer.call_count == 1 and restart.call_count == 1)
+            confirmation.return_value = False
+            local._on_local_staged("9.9.9", False)
+            local._install_thread.join(3)
+            app.processEvents()
+            local._install_thread.join(3)
+            app.processEvents()
+            check("R-108 选择稍后不安装不退出且保留重启入口",
+                  installer.return_value.cancel.call_count == 1
+                  and installer.return_value.confirm.call_count == 1
+                  and restart.call_count == 1 and local.isVisible()
+                  and local.btn_install.isEnabled()
+                  and local.btn_install.text() == tr("update.restart.action"))
+            local._on_local_staged("0.0.1", False)
+            local._install_thread.join(3)
+            app.processEvents()
+            local._install_thread.join(3)
+            app.processEvents()
+            check("R-121 选择旧版本明确显示降级提示并仍要求重启确认",
+                  tr("update.local.older", version="0.0.1") in local.checklog.toPlainText()
+                  and confirmation.call_args.args == (local, "0.0.1")
+                  and restart.call_count == 1 and local.isVisible())
+        with (
+            patch.object(update, "launch_installer", side_effect=OSError("test failure")),
+            patch("omnicom.ui.update_dialog._restart_application") as restart,
+        ):
+            local._on_local_staged("9.9.9", False)
+            local._install_thread.join(3)
+            app.processEvents()
+            check("R-108 安装器未就绪不退出程序并恢复重试入口",
+                  not restart.called and not local._working
+                  and local.btn_local.isEnabled() and "test failure" in local.status.text())
+        local.close()
+        local.deleteLater()
+
+        from omnicom import __version__, ui
+        from omnicom.i18n import language, set_language
+
+        original_language = language()
+        try:
+            for locale in ("zh", "en"):
+                set_language(locale)
+                with (
+                    patch.object(update, "take_result", side_effect=[
+                        {"ok": True, "version": __version__}, None]),
+                    patch("PySide6.QtWidgets.QMessageBox.information") as success,
+                    patch("PySide6.QtWidgets.QMessageBox.warning") as failure,
+                ):
+                    ui._show_update_result(window)
+                    ui._show_update_result(window)
+                    check(f"R-108 {locale} 更新成功弹窗只显示一次且包含实际版本",
+                          success.call_count == 1 and not failure.called
+                          and success.call_args.args[1] == tr("update.success.title")
+                          and success.call_args.args[2] == tr("update.success", version=__version__))
+            with (
+                patch.object(update, "take_result", return_value={"ok": True, "version": "9.9.9"}),
+                patch("PySide6.QtWidgets.QMessageBox.information") as success,
+                patch("PySide6.QtWidgets.QMessageBox.warning") as failure,
+            ):
+                ui._show_update_result(window)
+                check("R-108 实际版本不符时不报更新成功",
+                      not success.called and failure.call_count == 1
+                      and __version__ in failure.call_args.args[2])
+        finally:
+            set_language(original_language)
 
         # R-108: applying a release must not disturb the user's data.
         bundle = tempfile.mkdtemp()

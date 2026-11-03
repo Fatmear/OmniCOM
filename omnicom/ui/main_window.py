@@ -6,6 +6,7 @@ import codecs
 import contextlib
 import ctypes
 import ctypes.wintypes
+import html
 import json
 import os
 import re
@@ -52,6 +53,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from .. import __version__, control, paths, power
@@ -491,6 +493,32 @@ class TitleBar(GlassFrame):
             button.setChecked(True)
 
     # ------------------------------------------------------------------ menu
+    def _add_update_action(self, menu: QMenu):
+        window = self.window_ref
+        if not window.update_available():
+            return menu.addAction(tr("menu.update"), window.open_update)
+        action = QWidgetAction(menu)
+        action.setText(tr("menu.update.new"))
+        label = QLabel(
+            html.escape(tr("menu.update.new")).replace(
+                "NEW", f'<span style="color:{theme.DANGER}">NEW</span>'))
+        label.setTextFormat(Qt.RichText)
+        label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        action.setDefaultWidget(label)
+        action.setToolTip(tr("menu.update.tip"))
+        action.triggered.connect(window.open_update)
+
+        def highlight(active) -> None:
+            background = theme.TEAL_SOFT if active is action else "transparent"
+            label.setStyleSheet(
+                f"padding: 7px 20px; border-radius: {theme.RADIUS_CTRL}px;"
+                f"background: {background}; color: {theme.INK};")
+
+        highlight(None)
+        menu.hovered.connect(highlight)
+        menu.addAction(action)
+        return action
+
     def _show_menu(self) -> None:
         window = self.window_ref
         menu = QMenu(self)
@@ -520,10 +548,7 @@ class TitleBar(GlassFrame):
         # to wait for a timer (R-107).
         if window.update_watcher.last is None and not window.update_watcher.busy:
             window.update_watcher.start()
-        label = tr("menu.update.new") if window.update_available() else tr("menu.update")
-        update_action = menu.addAction(label, window.open_update)
-        if window.update_available():
-            update_action.setToolTip(tr("menu.update.tip"))
+        self._add_update_action(menu)
 
         menu.addSeparator()
         menu.addAction(tr("menu.exit"), window.close)

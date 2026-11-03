@@ -42,8 +42,43 @@ def _hide_own_console() -> bool:
         return False
 
 
+def _show_update_result(window, startup_error: str = "") -> None:
+    from PySide6.QtWidgets import QMessageBox
+
+    from .. import __version__, update
+    from ..i18n import tr
+
+    try:
+        result = update.take_result()
+    except (OSError, ValueError) as error:
+        result = {"ok": False, "error": str(error)}
+    if startup_error:
+        result = {"ok": False, "error": startup_error}
+    if result is None:
+        return
+    ready = str(result.get("ready") or "")
+    if ready:
+        from pathlib import Path
+
+        try:
+            path = Path(ready).resolve()
+            if path.is_relative_to(Path(update.updates_dir()).resolve()):
+                path.touch()
+        except OSError:
+            pass
+    expected = str(result.get("version") or "")
+    if result.get("ok") and expected == __version__:
+        QMessageBox.information(window, tr("update.success.title"),
+                                tr("update.success", version=__version__))
+        return
+    error = str(result.get("error") or tr("update.version.mismatch",
+                                        expected=expected, current=__version__))
+    QMessageBox.warning(window, tr("update.title"),
+                        tr("update.install.failed", err=error, version=__version__))
+
+
 def run(argv: list[str] | None = None, demo: bool = False) -> int:
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import Qt, QTimer
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
@@ -52,22 +87,6 @@ def run(argv: list[str] | None = None, demo: bool = False) -> int:
     from .theme import app_stylesheet
 
     argv = list(sys.argv if argv is None else argv)
-
-    # A release downloaded from the update dialog is unpacked but not applied
-    # while the program runs (Windows locks the files).  It is copied over the
-    # bundle *here*, before any module is imported by the window and before
-    # anything can hold a handle - and it never touches omnicom-data, so the
-    # command library, captures and settings survive the upgrade (R-108).
-    try:
-        from .. import update as update_module
-
-        applied = update_module.pending()
-        if applied is not None:
-            upgraded = str(applied.get("version") or "")
-            update_module.apply_pending()
-            print(f"[OmniCOM] update {upgraded} applied")
-    except Exception as error:            # a failed update must not block startup
-        print(f"[OmniCOM] update skipped: {error}")
 
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
@@ -91,6 +110,7 @@ def run(argv: list[str] | None = None, demo: bool = False) -> int:
     window.schedule_update_check()
     window.raise_()
     window.activateWindow()
+    QTimer.singleShot(0, lambda: _show_update_result(window))
     return app.exec()
 
 

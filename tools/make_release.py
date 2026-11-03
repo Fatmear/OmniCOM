@@ -15,7 +15,8 @@ is the single ``latest`` pointer, which must sit on the newest release because
 the in-app updater and "从升级包更新" both read ``releases/latest``.  GitHub
 derives that pointer from publish **time**, not from the version number, so
 anything that republishes a release (un-drafting, re-uploading) can steal it -
-so we always send ``make_latest: "true"`` explicitly (L-167).
+so we preserve a newer public latest release when republishing an older one
+and re-read the pointer after upload (L-167).
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from omnicom import __version__  # noqa: E402
+from omnicom.update import parse_version  # noqa: E402
 
 REPO = "Fatmear/OmniCOM"
 API = f"https://api.github.com/repos/{REPO}"
@@ -195,6 +197,17 @@ def main(argv: list[str] | None = None) -> int:
         print("\n（加 --publish 才会真正发布）")
         return 0
 
+    status, previous_latest = api("/releases/latest")
+    if status not in (200, 404):
+        print("读取 latest 失败：", status, previous_latest.get("message"))
+        return 1
+    latest_tag = tag
+    latest_id = None
+    if status == 200 and parse_version(previous_latest.get("tag_name", "")) > parse_version(tag):
+        latest_tag = previous_latest["tag_name"]
+        latest_id = previous_latest["id"]
+    make_latest = "true" if latest_tag == tag else "false"
+
     existing = find_release(tag)
     if existing is not None:
         release = existing
@@ -202,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         status, updated = api(f"/releases/{release['id']}", "PATCH",
                               {"name": title, "body": body,
                                "draft": False, "prerelease": False,
-                               "make_latest": "true"})
+                               "make_latest": make_latest})
         if status >= 400:
             print("更新说明失败：", updated.get("message"))
             return 1
@@ -210,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
         status, release = api("/releases", "POST",
                               {"tag_name": tag, "target_commitish": "main",
                                "name": title, "body": body, "draft": False,
-                               "prerelease": False, "make_latest": "true"})
+                               "prerelease": False, "make_latest": make_latest})
         if status >= 400:
             print("建 release 失败：", status, release.get("message"))
             return 1
@@ -242,12 +255,16 @@ def main(argv: list[str] | None = None) -> int:
     # away from us even though we just published.  Assert it after uploading
     # (L-167); older releases are left exactly as they are - all stay public.
     status, latest = api("/releases/latest")
-    if status == 200 and latest.get("tag_name") != tag:
-        api(f"/releases/{release['id']}", "PATCH", {"make_latest": "true"})
+    if status == 200 and latest.get("tag_name") != latest_tag:
+        restore_id = latest_id if latest_id is not None else release["id"]
+        status, restored = api(f"/releases/{restore_id}", "PATCH", {"make_latest": "true"})
+        if status >= 400:
+            print("恢复 latest 失败：", restored.get("message"))
+            return 1
         status, latest = api("/releases/latest")
     print(f"latest  : {latest.get('tag_name')}")
-    if latest.get("tag_name") != tag:
-        print("警告：latest 未指向本次发布的 tag")
+    if status != 200 or latest.get("tag_name") != latest_tag:
+        print(f"警告：latest 未指向预期的 {latest_tag}")
         return 1
     return 0
 

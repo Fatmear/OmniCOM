@@ -14,10 +14,12 @@ import traceback
 from PySide6.QtCore import QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QTextBrowser,
@@ -27,6 +29,27 @@ from PySide6.QtWidgets import (
 from .. import __version__, update
 from ..i18n import tr
 from . import theme
+
+
+def _restart_application() -> None:
+    app = QApplication.instance()
+    if isinstance(app, QApplication):
+        app.closeAllWindows()
+        if not any(widget.isVisible() for widget in app.topLevelWidgets()):
+            app.quit()
+
+
+def _confirm_restart(parent, version: str) -> bool:
+    dialog = QMessageBox(parent)
+    dialog.setWindowTitle(tr("update.restart.title"))
+    dialog.setIcon(QMessageBox.Icon.Question)
+    dialog.setText(tr("update.restart.confirm", version=version))
+    confirm = dialog.addButton(tr("update.restart.action"), QMessageBox.ButtonRole.YesRole)
+    later = dialog.addButton(tr("update.later"), QMessageBox.ButtonRole.NoRole)
+    dialog.setDefaultButton(later)
+    dialog.setEscapeButton(later)
+    dialog.exec()
+    return dialog.clickedButton() is confirm
 
 
 def _size(count: int) -> str:
@@ -56,7 +79,7 @@ class UpdateWatcher(QObject):
         self.last: dict | None = None
         #: Why the last attempt failed ("" when it succeeded).
         self.error = ""
-        #: Which route answered: ``"api"``, ``"web"`` or ``""``.
+        #: Which route answered: ``"web"`` or ``""``.
         self.source = ""
         self._muted = False
 
@@ -123,6 +146,11 @@ class UpdateDialog(QDialog):
     #: Emitted from the worker thread; Qt queues them onto the GUI thread.
     downloadProgress = Signal(int, int)
     downloadFailed = Signal(str)
+    downloadCancelled = Signal()
+    restartReady = Signal()
+    commitReady = Signal()
+    restartDeferred = Signal()
+    prepareProgress = Signal(int, int)
     staged = Signal(str)
     #: A package picked from disk: (version, is_same_version).
     localStaged = Signal(str, bool)
@@ -143,6 +171,12 @@ class UpdateDialog(QDialog):
         self._info = dict(info or {})
         self._working = False
         self._checking = False
+        self._cancel_download: threading.Event | None = None
+        self._download_thread: threading.Thread | None = None
+        self._install_thread: threading.Thread | None = None
+        self._installer = None
+        staged = update.pending()
+        self._restart_version = str(staged.get("version") or "") if staged else ""
         self._watcher = watcher
         #: Last percentage written to the download log, so it grows by ~10 %.
         self._logged_percent = -10
@@ -244,6 +278,11 @@ class UpdateDialog(QDialog):
 
         self.downloadProgress.connect(self._on_progress, Qt.QueuedConnection)
         self.downloadFailed.connect(self._on_failed, Qt.QueuedConnection)
+        self.downloadCancelled.connect(self._on_cancelled, Qt.QueuedConnection)
+        self.restartReady.connect(self._on_restart_ready, Qt.QueuedConnection)
+        self.commitReady.connect(self._on_commit_ready, Qt.QueuedConnection)
+        self.restartDeferred.connect(self._on_deferred, Qt.QueuedConnection)
+        self.prepareProgress.connect(self._on_prepare_progress, Qt.QueuedConnection)
         self.staged.connect(self._on_staged, Qt.QueuedConnection)
         self.localStaged.connect(self._on_local_staged, Qt.QueuedConnection)
         self.localFailed.connect(self._on_local_failed, Qt.QueuedConnection)
@@ -294,7 +333,8 @@ class UpdateDialog(QDialog):
         has_asset = bool(self._info.get("asset_url"))
         self.btn_check.setEnabled(not self._checking and not self._working)
         self.btn_install.setVisible(available)
-        self.btn_install.setEnabled(available and has_asset and not self._working)
+        self.btn_install.setEnabled(self._cancel_download is not None
+                        or (available and has_asset and not self._working))
         self.btn_page.setVisible(available)
         # Always offered, including when the online check says "up to date":
         # that is exactly the situation where a user wants to install a zip
@@ -303,6 +343,10 @@ class UpdateDialog(QDialog):
         self.btn_later.setText(tr("update.later") if available
                                else tr("update.close"))
         self._update_versions()
+        if self._restart_version:
+            self.btn_install.setVisible(True)
+            self.btn_install.setText(tr("update.restart.action"))
+            self.btn_install.setEnabled(not self._working)
 
     def set_status(self, text: str) -> None:
         self.status.setText(text)
@@ -363,9 +407,7 @@ class UpdateDialog(QDialog):
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
         source = str(getattr(self._watcher, "source", "") or "")
-        if source in ("api", "web"):
-            # Says which route answered - useful when the API is rate limited
-            # and the answer really came from the release page (R-143).
+        if source == "web":
             self.log_line(tr("update.check.via",
                              source=tr("update.via." + source)))
         self.render(info)
@@ -385,8 +427,16 @@ class UpdateDialog(QDialog):
         QDesktopServices.openUrl(QUrl(url))
 
     def install(self) -> None:
-        """Download + stage the release, then tell the user to restart."""
+        """Download the release, then arrange an automatic restart."""
+        if self._cancel_download is not None:
+            self._cancel_download.set()
+            self.btn_install.setEnabled(False)
+            self.set_status(tr("update.cancelling"))
+            return
         if self._working:
+            return
+        if self._restart_version:
+            self._on_staged(self._restart_version)
             return
         asset = str(self._info.get("asset_url") or "")
         if not asset:
@@ -394,8 +444,11 @@ class UpdateDialog(QDialog):
             return
         version = str(self._info.get("version") or "new")
         self._working = True
+        cancelled = threading.Event()
+        self._cancel_download = cancelled
         self.btn_check.setEnabled(False)
-        self.btn_install.setEnabled(False)
+        self.btn_local.setEnabled(False)
+        self._set_install_button(True)
         self._logged_percent = -10
         self.progress.show()
         self.progress.setRange(0, 0)              # busy until the first byte
@@ -408,17 +461,64 @@ class UpdateDialog(QDialog):
                 target = update.download(
                     asset, update.updates_dir() + f"/OmniCOM-{version}.zip",
                     progress=lambda done, total:
-                    self.downloadProgress.emit(done, total))
-                update.stage(target, version)
+                    self.downloadProgress.emit(done, total),
+                    cancelled=cancelled.is_set)
+                update.stage(target, version, cancelled=cancelled.is_set)
+            except update.DownloadCancelled:
+                self.downloadCancelled.emit()
+                return
             except Exception as error:            # offline, disk full, bad zip
+                if cancelled.is_set():
+                    self.downloadCancelled.emit()
+                    return
                 self.downloadFailed.emit(str(error))
                 return
             self.staged.emit(version)
 
-        threading.Thread(target=work, name="omnicom-update-dl", daemon=True).start()
+        self._download_thread = threading.Thread(
+            target=work, name="omnicom-update-dl", daemon=True)
+        self._download_thread.start()
+
+    def _set_install_button(self, downloading: bool) -> None:
+        self.btn_install.setText(tr("update.cancel" if downloading else "update.install"))
+        self.btn_install.setObjectName("Danger" if downloading else "Primary")
+        self.btn_install.style().unpolish(self.btn_install)
+        self.btn_install.style().polish(self.btn_install)
+        self.btn_install.setEnabled(downloading or bool(self._info.get("asset_url")))
+
+    def _finish_download(self) -> None:
+        self._working = False
+        self._cancel_download = None
+        self._set_install_button(False)
+        self.btn_check.setEnabled(True)
+        self.btn_local.setEnabled(True)
+
+    def _on_cancelled(self) -> None:
+        self._finish_download()
+        self.progress.hide()
+        self.set_status(tr("update.cancelled"))
+        self.log_line(tr("update.cancelled"))
+
+    def reject(self) -> None:
+        if self._cancel_download is not None:
+            self.install()
+            return
+        if self._working:
+            return
+        super().reject()
+
+    def closeEvent(self, event) -> None:
+        if self._cancel_download is not None:
+            self.install()
+            event.ignore()
+            return
+        if self._working:
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def install_local(self) -> None:
-        """Stage a release zip the user picked; applied on the next start."""
+        """Stage the selected package and start the same external installer."""
         if self._working:
             return
         chosen, _filter = QFileDialog.getOpenFileName(
@@ -449,6 +549,8 @@ class UpdateDialog(QDialog):
 
     # -- slots for the worker thread ---------------------------------------
     def _on_progress(self, done: int, total: int) -> None:
+        if self._cancel_download is not None and self._cancel_download.is_set():
+            return
         if total > 0:
             self.progress.setRange(0, 100)
             percent = max(0, min(100, int(done * 100 / total)))
@@ -467,21 +569,87 @@ class UpdateDialog(QDialog):
                               done=_size(done), total="?"))
 
     def _on_failed(self, message: str) -> None:
-        self._working = False
+        key = ("update.install.failed" if self._cancel_download is None
+               else "update.failed")
+        text = tr(key, err=message, version=__version__)
+        self._finish_download()
         self.progress.hide()
         self.btn_check.setEnabled(True)
-        self.log_line(tr("update.failed", err=message))
+        self.log_line(text)
         self.btn_install.setEnabled(bool(self._info.get("asset_url")))
-        self.set_status(tr("update.failed", err=message))
+        self.set_status(text)
 
     def _on_staged(self, version: str) -> None:
-        self._working = False
-        self.progress.setRange(0, 100)
-        self.progress.setValue(100)
+        if (self._cancel_download is not None
+                and self._cancel_download.is_set()):
+            update.clear_pending()
+            self._on_cancelled()
+            return
+        self._finish_download()
+        self._working = True
+        self._restart_version = version
+        self.progress.show()
+        self.progress.setRange(0, 0)
         self.set_status(tr("update.staged", version=version))
         self.log_line(tr("update.staged", version=version))
         self.btn_install.setEnabled(False)
+        self.btn_local.setEnabled(False)
+        self.btn_check.setEnabled(False)
         self.btn_later.setText(tr("update.close"))
+        center = self.frameGeometry().center()
+        progress_ui = {"title": tr("update.title"),
+                       "message": tr("update.installing"),
+                       "complete": tr("update.install.complete", version=version),
+                       "stylesheet": theme.app_stylesheet(),
+                       "center": [center.x(), center.y()]}
+
+        def work() -> None:
+            try:
+                self._installer = update.launch_installer(
+                    wait_confirmation=True,
+                    progress=lambda done, total: self.prepareProgress.emit(done, total),
+                    progress_ui=progress_ui)
+            except Exception as error:
+                self.downloadFailed.emit(str(error))
+                return
+            self.restartReady.emit()
+
+        self._install_thread = threading.Thread(
+            target=work, name="omnicom-update-install", daemon=True)
+        self._install_thread.start()
+
+    def _on_restart_ready(self) -> None:
+        confirmed = _confirm_restart(self, self._restart_version)
+
+        def work():
+            try:
+                if confirmed:
+                    self._installer.confirm()
+                    self.commitReady.emit()
+                else:
+                    self._installer.cancel()
+                    self.restartDeferred.emit()
+            except Exception as error:
+                self.downloadFailed.emit(str(error))
+
+        self._install_thread = threading.Thread(
+            target=work, name="omnicom-update-confirm", daemon=True)
+        self._install_thread.start()
+
+    def _on_prepare_progress(self, done: int, total: int) -> None:
+        if self._working:
+            self.progress.setRange(0, 0)
+            self.set_status(tr("update.preparing.progress", done=done, total=total))
+
+    def _on_deferred(self) -> None:
+        self._finish_download()
+        self.progress.hide()
+        self.set_status(tr("update.restart.deferred"))
+        self.render(self._info)
+
+    def _on_commit_ready(self) -> None:
+        self._working = False
+        _restart_application()
 
     def _on_local_failed(self, message: str) -> None:
         self._working = False
@@ -493,16 +661,8 @@ class UpdateDialog(QDialog):
         self.set_status(tr("update.local.bad", err=message))
 
     def _on_local_staged(self, version: str, same: bool) -> None:
-        self._working = False
-        self.progress.setRange(0, 100)
-        self.progress.setValue(100)
-        self.log_line(tr("update.staged", version=version or "?"))
-        self.btn_local.setEnabled(False)
-        self.btn_check.setEnabled(True)
-        self.btn_install.setEnabled(False)
-        self.btn_later.setText(tr("update.close"))
         if same:
-            # Reinstalling the version already running is allowed but must not
-            # look like a normal upgrade.
-            self.set_status(tr("update.local.same", version=version) + " "
-                            + tr("update.staged", version=version))
+            self.log_line(tr("update.local.same", version=version))
+        elif update.parse_version(version) < update.parse_version(__version__):
+            self.log_line(tr("update.local.older", version=version))
+        self._on_staged(version)

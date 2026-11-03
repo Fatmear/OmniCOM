@@ -101,13 +101,19 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
             "详细字段与示例见 `docs/CLI.md`。",
         ]),
         ("软件更新", [
-            "顶部菜单「软件更新」会在窗口空闲后安静地查一次 GitHub（失败不弹窗）；"
-            "有新版本时菜单项后面带 NEW、按钮亮红点。",
+            "顶部菜单「软件更新」会在窗口空闲后直接读取 GitHub 发布页（失败不弹窗）；"
+            "有新版本时菜单项后面带红色 NEW 文字、按钮亮红点。",
             "对话框显示当前版本和更新说明，点「下载并安装」会下载到本地，"
-            "**下次启动**在窗口出现前完成替换。",
+            "按钮随即变成「取消」，可以取消下载；下载、解压和文件准备期间**原界面保持打开并显示动态进度**。",
+            "准备完成后会提示安装需要一点时间，请你确认「重启安装」；默认「稍后」，选稍后不会安装或退出。"
+            "确认后由带 OmniCOM logo 和任务栏图标的独立进度窗接管；"
+            "文件安装和校验完成、进度结束后，先关闭进度窗，再打开目标版本。",
+            "支持结果提示的目标版本启动后只显示一次「更新成功」和实际版本；"
+            "旧版没有结果回传也可以安装。若其他窗口占用程序文件，会保留旧版并说明原因。",
             "更新只覆盖程序文件：`omnicom-data/` 里的命令库、收发记录、设置和自己的插件一律不动。",
             "没有外网也能更新：点「从升级包更新」，选一个 `OmniCOM-<版本>-win64.zip`；"
-            "版本号从包内读取（文件被改名也认），不是 OmniCOM 包的 zip 会被直接拒绝。",
+            "版本号从包内读取（文件被改名也认），支持安装旧版本和重装相同版本；"
+            "不是 OmniCOM 包的 zip 会被直接拒绝。",
         ]),
 
         ("典型工作流", [
@@ -276,10 +282,23 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
             "Field-by-field reference and examples: `docs/CLI.md`.",
         ]),
         ("Software update", [
-            "The *Software update* menu item checks GitHub once the window is idle: a new version marks the item with NEW and puts a dot on the button.",
-            "The dialog shows your current version and the release notes; *Download and install* stages the release and **the next start** replaces the program before the window appears.",
+            "The *Software update* menu item reads GitHub release pages directly once the window is idle: a new version adds red NEW text and a dot on the button.",
+            "The dialog shows your current version and the release notes; *Download and install* becomes *Cancel* during the download. The original window **stays open with animated progress** while files are extracted and prepared, for both downloads and local packages.",
+            "When preparation finishes, a confirmation explains that installation "
+            "takes a little time. *Later* is the default and does not install or "
+            "exit. Confirm *Restart to install* to hand over to a branded "
+            "progress window with the OmniCOM logo and taskbar icon. Installation "
+            "and verification finish first; the completed progress window closes "
+            "before the target version starts.",
+            "Target versions that support result dialogs show success and "
+            "their actual version once. Older versions can install without "
+            "acknowledging the new installer. If another window locks files, "
+            "the old version is kept and the failure is reported.",
             "Only program files are replaced - the command library, captures, settings and your own plugins under `omnicom-data/` are never touched.",
-            "No internet needed: press *Update from a package* and pick an `OmniCOM-<version>-win64.zip`. The version is read from inside the package (a renamed file still reports its real version), and a zip that is not an OmniCOM bundle is refused.",
+            "No internet needed: press *Update from a package* and pick an "
+            "`OmniCOM-<version>-win64.zip`. The version comes from inside "
+            "the package, even if renamed. Older versions and same-version "
+            "reinstalls are supported; non-OmniCOM ZIPs are refused.",
         ]),
         ("Typical workflows", [
             '**Capture a boot log**: open the port, press *Capture RX + TX*, reset the board, then press *Stop capturing*. The file lands in `omnicom-data/logs/` - raw bytes, unaffected by how the window renders them.',
