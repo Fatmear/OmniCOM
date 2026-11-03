@@ -51,6 +51,40 @@ WASH = "rgba(18, 26, 43, 8)"
 WASH_HOVER = "rgba(18, 26, 43, 14)"
 TEXT_DISABLED = "rgba(70, 83, 107, 110)"
 
+# The window is frameless and translucent, so it has no OS chrome at all.  A
+# 1 px dark edge is what makes it read as a window instead of a floating patch
+# of pale grey on a white desktop (R-138).
+#
+# Two tokens, not one ``rgba()`` string: ``QColor`` cannot parse the CSS
+# ``rgba(r, g, b, a)`` form at all (it returns an *invalid* colour, which Qt
+# then paints black), so the pen builds ``QColor(WINDOW_EDGE)`` and applies
+# ``WINDOW_EDGE_ALPHA`` itself - the same rule the other hairlines follow.
+WINDOW_EDGE = "#121A2B"
+WINDOW_EDGE_ALPHA = 235
+WINDOW_EDGE_PX = 1
+
+# The 1 px edge alone still looked pasted onto the desktop: a frameless
+# *translucent* window is invisible to DWM, so Windows draws no shadow for it
+# either.  The shell therefore keeps a ``WINDOW_SHADOW_PX`` transparent ring
+# inside its own geometry and paints the soft shadow into that ring (R-139).
+# The layout margins grow by the same amount, so the visual gap between the edge
+# and the title bar is unchanged.  The ring is dropped while maximised, where it
+# would cost screen space and let the desktop show along four edges.
+#
+# ``WINDOW_SHADOW_ALPHA`` is per ring, not the final value: the rings are
+# painted largest-first and compound, so the pixel right beside the edge is the
+# darkest one and the outermost ring is almost invisible (the same recipe the
+# tooltip card uses).
+WINDOW_SHADOW = "#121A2B"
+WINDOW_SHADOW_ALPHA = 11
+#: The ring is carved out of the window's own padding, so every pixel of ring
+#: costs two pixels of content height.  Measured against R-118 (the left rail
+#: must fit in 900 px with no scrollbar): 14 px pushed the rail 10 px over the
+#: edge, 10 px left it flush, 8 px keeps 4 px of slack.  8 is the largest value
+#: that still reads as a shadow *and* survives the requirement - do not raise it
+#: without re-measuring the rail (`L-162`).
+WINDOW_SHADOW_PX = 8
+
 # ------------------------------------------------------------------- metrics
 CTRL_H = 32             # every single-line control is exactly this tall
 BTN_PAD = "0 14px"

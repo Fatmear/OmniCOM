@@ -108,7 +108,7 @@ TITLES = {
     "R-059": "快捷启动右键删除与配置持久化",
     "R-060": "多窗口独立图标、精确绑定与切换",
     "R-061": "波特率可自定义（真实键盘输入）",
-    "R-062": "屏幕常亮开关（可持久化、关闭时释放）",
+    "R-062": "屏幕常亮开关（每次启动为关、关闭时释放）",
     "R-063": "快捷启动上下两区 + 窗口实例重命名 + 长名称完整显示",
     "R-064": "快捷启动上下两区支持拖拽排序并持久化",
     "R-065": "上排删除只删快捷方式、下排删除只结束该窗口",
@@ -171,6 +171,20 @@ TITLES = {
     "R-125": "同一串口的 CLI 调用串行化（端口锁）",
     "R-126": "--repeat / --interval / --ports：一次进程多个采样",
     "R-127": "新命令默认不勾选「依次发送」",
+    "R-128": "多行粘贴里 # 之后是备注，命令部分不留尾随空格",
+    "R-129": "命令字段名统一为「命令 / Command」（不再叫 AT / CMD）",
+    "R-130": "按住命令拖动可改分组与排序",
+    "R-131": "发送后输入框不清空，连续重复只记一条历史",
+    "R-132": "扩展命令列表里的字段名统一改成「命令 / Command」",
+    "R-133": "拖动时不再显示「拖到这里移出分组」等提示文字",
+    "R-134": "历史记录：框里已是上一条时按一次上键就取到更早的一条",
+    "R-135": "扩展命令的顺序重启后仍然保留（锁定 + 合并写回）",
+    "R-136": "批量操作支持单组 / 多组 / 全部命令的范围选择",
+    "R-137": "分组标题上也有垃圾桶，走与右键一致的删除流程",
+    "R-138": "窗口四边有 1 px 深色描边（看得出窗口边界）",
+    "R-139": "窗口外圈有柔和阴影（不只是黑边，像一块浮起来的板子）",
+    "R-140": "拖标题栏到屏幕顶部最大化，最大化时往下拖还原到鼠标下",
+    "R-141": "两个展开分组之间只留一段行距（不是一大块空白）",
 }
 
 
@@ -733,15 +747,21 @@ def suite_visual() -> None:
     probe = Aurora()
     probe.resize(360, 360)
     backdrop = probe.grab().toImage()
+    # -- sample the page only: the transparent ring outside it carries the
+    #    drop shadow (R-139), so the whole-widget histogram would no longer be
+    #    a single colour and the check would fail for the right reason.
+    page = probe.page_rect()
     counts: dict[str, int] = {}
-    for y in range(backdrop.height()):
-        for x in range(backdrop.width()):
+    total = 0
+    for y in range(page.top(), page.bottom() + 1):
+        for x in range(page.left(), page.right() + 1):
             name = backdrop.pixelColor(x, y).name()
             counts[name] = counts.get(name, 0) + 1
+            total += 1
     dominant = max(counts, key=counts.get)
-    share = counts[dominant] / max(1, sum(counts.values()))
+    share = counts[dominant] / max(1, total)
     add("R-020", "背景层为单一纯色", dominant == theme.BG.lower() and share >= 0.98,
-        f"{dominant} {share:.2%}")
+        f"{dominant} {share:.2%} in {page.width()}x{page.height()}")
     probe.deleteLater()
 
     # -- The grid used to be drawn with drawLine() inside the backdrop's
@@ -1091,6 +1111,94 @@ def suite_visual() -> None:
         "btn_local" in updlg_source
         and "def install_local" in updlg_source
         and "update.stage_local" in updlg_source)
+
+    # -- R-132..R-138: the GUI suite proves the behaviour; these guards stop a
+    #    silent revert of the code that makes those checks pass.
+    store_source = source_of("omnicom", "commands.py")
+    add("R-132", "命令字段名是「命令 / Command」，不再是缩写 CMD",
+        '"cmd.field": ("命令", "Command")' in i18n_source
+        and '("CMD", "CMD")' not in i18n_source
+        and '("AT", "AT")' not in i18n_source)
+
+    add("R-133", "拖动目标条不再带任何提示文字，只在拖动时画落点线",
+        "cmd.drag.out" not in i18n_source
+        and "class DropStrip" in commands_source
+        and "_set_hot" in commands_source
+        and "Drag to move here" not in commands_source)
+
+    add("R-134", "上键先去重框内已显示的那一条，再往前取历史",
+        "self.history[-1] == self._hist_draft.strip" in send_source
+        and "self._hist_pos = len(self.history) - 1" in send_source)
+
+    add("R-135", "命令库写入带锁 + 唯一临时文件 + 读改写合并",
+        "class _library_lock" in store_source
+        and "tempfile.mkstemp" in store_source
+        and "def _merge_with_disk" in store_source
+        and "_removed" in store_source
+        and "load_warning" in store_source)
+    add("R-135", "顺序变化会标记 _order_dirty，合并时本地顺序优先",
+        "self._order_dirty = True" in store_source
+        and "if not self._order_dirty:" in store_source)
+
+    add("R-136", "批量操作有独立的范围下拉（全部 / 单组 / 多组）",
+        "SCOPE_ALL" in commands_source and "SCOPE_MULTI" in commands_source
+        and "self.scope_group = Combo()" in commands_source
+        and "def _on_scope_changed" in commands_source
+        and "def _pick_all" in commands_source)
+    add("R-136", "分组标题带三态勾选框，可勾整组也能多组同时勾选",
+        "pickAll = Signal(str, bool)" in commands_source
+        and "setTristate(True)" in commands_source
+        and "def _pick_group" in commands_source
+        and "def _sync_group_picks" in commands_source)
+
+    add("R-137", "分组标题上有垃圾桶，且与右键删除共用 remove_group",
+        "self.trash_btn = GlyphButton(GlyphButton.TRASH" in commands_source
+        and 'self.trash_btn.setToolTip(tr("cmd.deletegroup"))' in commands_source
+        and "self.remove.emit(group[\"id\"])" in commands_source
+        and "header.remove.connect(self.remove_group)" in commands_source
+        and "def remove_group" in commands_source)
+
+    add("R-138", "窗口描边用主题 token，颜色写法能被 QColor 解析",
+        'WINDOW_EDGE = "#' in theme_source
+        and "WINDOW_EDGE_PX" in theme_source
+        and "def _paint_edge" in window_source
+        and 'QColor(theme.WINDOW_EDGE)' in window_source)
+
+    add("R-139", "窗口外圈有柔和阴影，用主题 token 且按环叠加（不是硬色块）",
+        'WINDOW_SHADOW = "#' in theme_source
+        and "WINDOW_SHADOW_ALPHA" in theme_source
+        and "WINDOW_SHADOW_PX" in theme_source
+        and "def _paint_shadow" in window_source
+        and "def _shadow_image" in window_source
+        and "for step in range(steps, 0, -1):" in window_source
+        and 'QColor(theme.WINDOW_SHADOW)' in window_source)
+    add("R-139", "阴影环由布局边距让出，且最大化时归零",
+        "def _apply_window_shadow" in window_source
+        and "_SHADOW_BASE_MARGINS" in window_source
+        and "def window_shadow_px" in window_source
+        and "if self.isMaximized() or self.isFullScreen():" in window_source)
+    add("R-139", "阴影厚度不超过左栏无滚动的实测上限 8 px",
+        "WINDOW_SHADOW_PX = 8" in theme_source, theme_source.count("WINDOW_SHADOW_PX ="))
+
+    add("R-140", "标题栏拖到屏幕顶部会最大化（Aero Snap）",
+        "SNAP_EDGE" in window_source
+        and "def _snap_top" in window_source
+        and "def _snap_to_max" in window_source
+        and "showMaximized()" in window_source
+        and "QGuiApplication.screenAt(cursor)" in window_source)
+    add("R-140", "最大化状态下往下拖会还原到鼠标下方",
+        "def _restore_from_max" in window_source
+        and "SNAP_RELEASE" in window_source
+        and "showNormal()" in window_source
+        and "def _title_height" in window_source
+        and "self._drag = QPoint(grab_x, grab_y)" in window_source)
+
+    add("R-141", "分组正文里不再插入拖放条（组间距恢复为一段行距）",
+        'self._group_bodies[group["id"]].layout().addWidget(strip)' not in commands_source
+        and "spacing 5 + strip 14" in commands_source)
+    add("R-141", "列表末尾仍保留唯一的拖出目标（不然拖不出分组）",
+        "tail = DropStrip(UNGROUPED)" in commands_source
+        and "class DropStrip" in commands_source)
 
     from omnicom import docs as docs_module
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from collections.abc import Callable
@@ -9,6 +10,7 @@ from collections.abc import Callable
 from PySide6.QtCore import (
     Property,
     QEasingCurve,
+    QMimeData,
     QPoint,
     QPropertyAnimation,
     QRectF,
@@ -16,8 +18,9 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QDrag, QPainter, QPen
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QDialog,
     QFileDialog,
@@ -41,6 +44,182 @@ from .widgets import Badge, Combo, GlyphButton
 from .widgets import Button as QPushButton
 
 FILE_FILTER = "OmniCOM (*.json);;All files (*)"
+
+#: Sentinel entries of the batch 「范围」 combo (R-136).  Real group ids are
+#: UUIDs and the ungrouped bucket is ``""``, so these two cannot collide.
+SCOPE_ALL = "__all__"
+SCOPE_MULTI = "__multi__"
+
+#: Private drag payload: the ids of the dragged commands, as a JSON list.
+#: A private type (not ``text/plain``) keeps a dropped *file* or a piece of
+#: selected text from being mistaken for a command drag (R-130).
+DRAG_MIME = "application/x-omnicom-command"
+
+
+def drag_ids(source) -> list[str]:
+    """Item ids carried by a drag, or ``[]`` when it is not a command drag."""
+    mime = source
+    if hasattr(source, "mimeData"):
+        mime = source.mimeData()
+    if mime is None or not mime.hasFormat(DRAG_MIME):
+        return []
+    try:
+        payload = json.loads(bytes(mime.data(DRAG_MIME)).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [str(entry) for entry in payload]
+
+
+def _drag_mime(item_ids: list[str]) -> QMimeData:
+    mime = QMimeData()
+    mime.setData(DRAG_MIME, json.dumps(item_ids).encode("utf-8"))
+    return mime
+
+
+class DropStrip(QWidget):
+    """A thin, *invisible* drop target at the end of a bucket (R-130/R-133).
+
+    Dropping *onto* a command row inserts **before** that row, so the very last
+    position of a group - the only way to undo "I dragged this one too high" -
+    had no target at all.  This strip provides it, and paints the landing line
+    while a drag is over it.
+
+    It used to paint a dashed line (and, at the bottom of the list, the hint
+    "拖到这里移出分组") even when nothing was being dragged, which made the
+    panel look permanently unfinished.  The hint is gone and the idle state is
+    fully transparent: dragging already shows a landing indicator, so the user
+    can tell where the command will go without any permanent decoration.
+    """
+
+    dropRequested = Signal(object, str)      # ids, group id
+
+    def __init__(self, group_id: str, parent=None) -> None:
+        super().__init__(parent)
+        self.group_id = group_id
+        self._hot = False
+        self.setFixedHeight(14)
+        self.setAcceptDrops(True)
+
+    def set_hot(self, hot: bool) -> None:
+        if self._hot != hot:
+            self._hot = hot
+            self.update()
+
+    def paintEvent(self, event) -> None:
+        if not self._hot:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor(theme.TEAL), 2))
+        painter.drawLine(4, self.height() // 2, self.width() - 4,
+                         self.height() // 2)
+        painter.end()
+
+    # ------------------------------------------------------------- dragging
+    def dragEnterEvent(self, event) -> None:
+        if drag_ids(event):
+            event.acceptProposedAction()
+            self.set_hot(True)
+            return
+        event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:
+        self.set_hot(False)
+
+    def dropEvent(self, event) -> None:
+        self.set_hot(False)
+        ids = drag_ids(event)
+        if not ids:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.dropRequested.emit(ids, self.group_id)
+
+
+class BucketBody(QWidget):
+    """The indented area under a group header (R-130).
+
+    Dropping anywhere in this blank area - not just on a command - means "add it
+    to this group", so a group with two commands does not require pixel-hunting
+    for the strip below them.  It also keeps the drop inside the *right* group
+    when the user aims at the empty space under a short list.
+    """
+
+    dropRequested = Signal(object, str)      # ids, group id
+
+    def __init__(self, group_id: str, parent=None) -> None:
+        super().__init__(parent)
+        self.group_id = group_id
+        self._drop_hot = False
+        self.setAcceptDrops(True)
+
+    def _set_hot(self, hot: bool) -> None:
+        if self._drop_hot != hot:
+            self._drop_hot = hot
+            self.update()
+
+    def dragEnterEvent(self, event) -> None:
+        if drag_ids(event):
+            event.acceptProposedAction()
+            self._set_hot(True)
+            return
+        event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:
+        self._set_hot(False)
+
+    def dropEvent(self, event) -> None:
+        ids = drag_ids(event)
+        self._set_hot(False)
+        if not ids:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.dropRequested.emit(ids, self.group_id)
+
+    def paintEvent(self, event) -> None:
+        if not self._drop_hot:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor(theme.TEAL), 1.5, Qt.DashLine))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(
+            QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75),
+            theme.RADIUS_CTRL, theme.RADIUS_CTRL)
+        painter.end()
+
+
+class ListHost(QWidget):
+    """Scroll content: a drop below the last command appends to the last bucket."""
+
+    dropRequested = Signal(object)           # ids
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:
+        if drag_ids(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if drag_ids(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event) -> None:
+        ids = drag_ids(event)
+        if not ids:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.dropRequested.emit(ids)
 
 
 def payload_of(item: dict) -> bytes:
@@ -93,12 +272,23 @@ class CommandRow(QWidget):
     remove = Signal(str)
     toggled = Signal(str, bool)
     moveTo = Signal(str, str)       # item id, target group id
+    dragOut = Signal(str)                       # this row asks to start a drag
+    dropped = Signal(object, object, bool)      # ids, this row, landed below
 
     def __init__(self, item: dict, groups: list[dict], parent=None) -> None:
         super().__init__(parent)
         self.item = item
         self.groups = groups
         self.setObjectName("CmdRow")
+        # Where this row sits in the panel: set by ``CommandsPanel.rebuild()``
+        # so a drop can be turned into (group, index) without searching (R-130).
+        self.bucket_group = UNGROUPED
+        self.bucket_index = -1
+        self._drop_hot = False
+        self._drop_below = False
+        self._drag_origin: QPoint | None = None
+        self._suppress_send = False
+        self.setAcceptDrops(True)
         self._selection = float(bool(item.get("enabled", False)))
         self._selection_anim = QPropertyAnimation(self, b"selection", self)
         self._selection_anim.setDuration(150)
@@ -137,9 +327,15 @@ class CommandRow(QWidget):
         details = [text, f"{item.get('delay', 0)} ms"]
         if note:
             details.append(note)
+        details.append(tr("cmd.drag.tip"))
         self.setToolTip("\n".join(details))
         self.label.setToolTip(self.toolTip())
         self.label.mouseReleaseEvent = self._on_label_release
+        # The label covers most of the row and swallows the mouse events, so it
+        # needs the press/move handlers too - otherwise "hold a command and
+        # drag it" would only work on the 3 px margins (R-130).
+        self.label.mousePressEvent = self._track_press
+        self.label.mouseMoveEvent = self._track_move
         top.addWidget(self.label, 1)
         if item.get("timer"):
             timer = QLabel(f"{item.get('interval', 1000)} ms")
@@ -188,8 +384,87 @@ class CommandRow(QWidget):
         the command - the user saw a command go out while only asking for the
         menu (L-127).
         """
+        if self._suppress_send:
+            # The press ended as a drag: sending here would transmit a command
+            # every time somebody re-ordered the list (R-130).
+            self._suppress_send = False
+            return
         if event.button() == Qt.LeftButton:
             self.send.emit(self.item)
+
+    # ---------------------------------------------------------------- dragging
+    def _track_press(self, event) -> None:
+        """Remember where a left press started; a move may promote it to a drag."""
+        if event.button() == Qt.LeftButton:
+            self._drag_origin = event.position().toPoint()
+            self._suppress_send = False
+        else:
+            self._drag_origin = None
+
+    def _track_move(self, event) -> None:
+        if self._drag_origin is None or not (event.buttons() & Qt.LeftButton):
+            return
+        moved = (event.position().toPoint() - self._drag_origin).manhattanLength()
+        if moved < QApplication.startDragDistance():
+            return
+        self._drag_origin = None
+        self._suppress_send = True
+        self.dragOut.emit(self.item["id"])
+
+    def mousePressEvent(self, event) -> None:
+        self._track_press(event)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        self._track_move(event)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag_origin = None
+        super().mouseReleaseEvent(event)
+
+    # ------------------------------------------------------------- drop target
+    def _landing_below(self, event) -> bool:
+        return event.position().y() > self.height() / 2
+
+    def _accepts(self, event) -> bool:
+        ids = drag_ids(event)
+        return bool(ids) and self.item["id"] not in ids
+
+    def dragEnterEvent(self, event) -> None:
+        if self._accepts(event):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if not self._accepts(event):
+            event.ignore()
+            return
+        below = self._landing_below(event)
+        if not self._drop_hot or self._drop_below != below:
+            self._drop_hot = True
+            self._drop_below = below
+            self.update()
+        event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event) -> None:
+        self.clear_drop_hint()
+
+    def dropEvent(self, event) -> None:
+        ids = drag_ids(event)
+        below = self._landing_below(event)
+        self.clear_drop_hint()
+        if not ids:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.dropped.emit(ids, self, below)
+
+    def clear_drop_hint(self) -> None:
+        if self._drop_hot:
+            self._drop_hot = False
+            self.update()
 
     def _align_note(self) -> None:
         """Start the note exactly under the command text (R-079).
@@ -245,6 +520,14 @@ class CommandRow(QWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(accent)
         painter.drawRoundedRect(QRectF(1, 8, 3, self.height() - 16), 1.5, 1.5)
+        if self._drop_hot:
+            # The landing position: a 2 px teal line on the half of the row the
+            # pointer is over, so "before" and "after" are never a guess (R-130).
+            marker = QColor(theme.TEAL)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(marker)
+            y = self.height() - 2 if self._drop_below else 0
+            painter.drawRoundedRect(QRectF(2, y, self.width() - 4, 2), 1, 1)
 
     def contextMenuEvent(self, event) -> None:
         menu = QMenu(self)
@@ -278,13 +561,29 @@ class GroupHeader(QWidget):
     exportGroup = Signal(str)
     remove = Signal(str)
     addCommand = Signal(str)
+    dropped = Signal(object, str)          # ids, target group id
+    pickAll = Signal(str, bool)            # group id, select its commands
 
     def __init__(self, group: dict, count: int, parent=None) -> None:
         super().__init__(parent)
         self.group = group
+        self._drop_hot = False
+        self.setAcceptDrops(True)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(2, 5, 2, 1)
         layout.setSpacing(5)
+
+        # Batch mode gives every group its own pick box (R-136).  Ticking one
+        # group selects exactly its commands, and ticking several of them is
+        # the "multiple groups" case - the old bar only knew "everything or
+        # nothing", so picking one group meant unticking 30 rows by hand.
+        self.pick = QCheckBox()
+        self.pick.setTristate(True)
+        self.pick.setCheckState(Qt.Unchecked)
+        self.pick.setToolTip(tr("cmd.batch.pickgroup"))
+        self.pick.stateChanged.connect(self._on_pick_state)
+        self.pick.hide()
+        layout.addWidget(self.pick)
 
         self.chevron = GlyphButton(
             GlyphButton.CHEVRON_RIGHT if group.get("collapsed") else GlyphButton.CHEVRON_DOWN,
@@ -318,10 +617,45 @@ class GroupHeader(QWidget):
         self.edit_btn.clicked.connect(lambda: self.rename.emit(group["id"]))
         layout.addWidget(self.edit_btn)
 
+        # Group-level delete (R-137): the same gesture a command row already
+        # offers.  It emits the very same ``remove`` signal the context menu
+        # uses, so both paths end up in ``CommandsPanel.remove_group()`` and ask
+        # the same "keep the commands or drop them too?" question.
+        self.trash_btn = GlyphButton(GlyphButton.TRASH, self, size=20)
+        self.trash_btn.setToolTip(tr("cmd.deletegroup"))
+        self.trash_btn.clicked.connect(lambda: self.remove.emit(group["id"]))
+        layout.addWidget(self.trash_btn)
+
     def _on_label_release(self, event) -> None:
         """Only a left click collapses the group; the right one opens the menu."""
         if event.button() == Qt.LeftButton:
             self.toggled.emit(self.group["id"])
+
+    def set_batch_mode(self, active: bool) -> None:
+        """Show the group pick box while picking commands in bulk (R-136)."""
+        self.pick.setVisible(active)
+        if not active:
+            self.set_pick_state(Qt.Unchecked)
+
+    def set_pick_state(self, state) -> None:
+        """Sync the tri-state box without emitting ``pickAll`` back."""
+        self.pick.blockSignals(True)
+        self.pick.setCheckState(state)
+        self.pick.blockSignals(False)
+
+    def _on_pick_state(self, state) -> None:
+        # ``stateChanged`` hands over a plain ``int`` (2), not a
+        # ``Qt.CheckState``, and PySide6 compares those by identity:
+        # ``2 == Qt.Checked`` is **False**.  Comparing the raw value therefore
+        # reported every tick as "unchecked", so ticking a group did nothing at
+        # all (R-136).  Convert first, then compare enums.
+        value = Qt.CheckState(state)
+        if value == Qt.PartiallyChecked:
+            # The half state is a *report*, never an instruction: clicking it
+            # arrives as Unchecked/Checked anyway, so ignoring this branch just
+            # stops a feedback loop when the panel re-syncs the box.
+            return
+        self.pickAll.emit(self.group["id"], value == Qt.Checked)
 
     def contextMenuEvent(self, event) -> None:
         menu = QMenu(self)
@@ -331,8 +665,51 @@ class GroupHeader(QWidget):
                        lambda: self.exportGroup.emit(self.group["id"]))
         menu.addAction(tr("cmd.edit"), lambda: self.rename.emit(self.group["id"]))
         menu.addSeparator()
-        menu.addAction(tr("cmd.delete"), lambda: self.remove.emit(self.group["id"]))
+        menu.addAction(tr("cmd.deletegroup"),
+                       lambda: self.remove.emit(self.group["id"]))
         menu.exec(event.globalPos())
+
+    # ------------------------------------------------------------- drop target
+    # Dropping a command on the *header* means "put it in this group", which is
+    # the file-explorer gesture of dragging a file onto a folder (R-130).
+    def dragEnterEvent(self, event) -> None:
+        ids = drag_ids(event)
+        if ids:
+            event.acceptProposedAction()
+            self._set_hot(True)
+            return
+        event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:
+        self._set_hot(False)
+
+    def dropEvent(self, event) -> None:
+        ids = drag_ids(event)
+        self._set_hot(False)
+        if not ids:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.dropped.emit(ids, self.group["id"])
+
+    def _set_hot(self, hot: bool) -> None:
+        if self._drop_hot != hot:
+            self._drop_hot = hot
+            self.update()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self._drop_hot:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(theme.TEAL), 1.5, Qt.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(QColor(theme.TEAL_SOFT))
+        painter.drawRoundedRect(
+            QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75),
+            theme.RADIUS_CTRL, theme.RADIUS_CTRL)
+        painter.end()
 
 
 # --------------------------------------------------------------------------- #
@@ -356,7 +733,12 @@ class CommandDialog(QDialog):
         self.text = QPlainTextEdit()
         self.text.setPlainText(self.item.get("text", ""))
         self.text.setFixedHeight(84)
-        layout.addWidget(self._field("AT", self.text))
+        # The caption is 「命令」/ Command, never AT (R-129): a command may be an
+        # AT line, a bare console command (``net sta enable``) or a fragment of
+        # either, and the old caption implied the library only holds AT.  It is
+        # no longer the abbreviation CMD either - the user asked for the plain
+        # word (R-132).
+        layout.addWidget(self._field(tr("cmd.field"), self.text))
 
         self.note = QLineEdit(self.item.get("note", ""))
         self.note.setPlaceholderText(tr("cmd.note"))
@@ -377,13 +759,13 @@ class CommandDialog(QDialog):
             self.line_end.addItem(label, key)
         self.line_end.setCurrentIndex(
             max(0, self.line_end.findData(self.item.get("line_end", "crlf"))))
-        options.addWidget(self._field("Line end", self.line_end))
+        options.addWidget(self._field(tr("cmd.lineend"), self.line_end))
 
         self.delay = QSpinBox()
         self.delay.setRange(0, 60000)
         self.delay.setSingleStep(50)
         self.delay.setValue(int(self.item.get("delay", 120)))
-        options.addWidget(self._field("Delay (ms)", self.delay))
+        options.addWidget(self._field(tr("cmd.delay"), self.delay))
         layout.addLayout(options)
 
         flags = QHBoxLayout()
@@ -592,6 +974,12 @@ class CommandsPanel(QWidget):
         self.timers: dict[str, QTimer] = {}
         self._collapsed = False
         self._batch = False
+        #: Groups that "select all" applies to.  ``None`` means every command;
+        #: a set may hold several group ids (and ``UNGROUPED``), which is what
+        #: makes "only the commands inside this group" possible (R-136).
+        self._scope: set[str] | None = None
+        self._scope_key: tuple | None = None
+        self._group_headers: dict[str, GroupHeader] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -616,11 +1004,12 @@ class CommandsPanel(QWidget):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.list_host = QWidget()
+        self.list_host = ListHost()
         self.list_layout = QVBoxLayout(self.list_host)
         self.list_layout.setContentsMargins(0, 0, 0, 0)
         self.list_layout.setSpacing(5)
         self.list_layout.addStretch(1)
+        self.list_host.dropRequested.connect(self._drop_at_end)
         self.scroll.setWidget(self.list_host)
         body_layout.addWidget(self.scroll, 1)
 
@@ -634,6 +1023,14 @@ class CommandsPanel(QWidget):
 
         self.store.changed.connect(self.rebuild)
         self.rebuild()
+        # A library that could not be read is *not* reported by replacing it
+        # with the defaults in silence - that looked exactly like "my order was
+        # reset again" (R-135/L-157).  The message is deferred so it lands after
+        # the window is on screen, where a toast can actually be seen.
+        if self.store.load_warning:
+            message = self.store.load_warning
+            self.store.load_warning = ""
+            QTimer.singleShot(0, lambda: self.notify(message, "warn"))
 
     # ------------------------------------------------------------------ header
     def _build_header(self) -> QWidget:
@@ -743,7 +1140,19 @@ class CommandsPanel(QWidget):
         return drawer
 
     def _build_batch_bar(self) -> QWidget:
-        """Selection tools: pick many, move them together, delete them together."""
+        """Selection tools: pick many, move them together, delete them together.
+
+        Selecting used to be all-or-nothing, which is useless as soon as the
+        library has groups: "delete the four commands in this group" meant
+        unticking everything else by hand.  The bar therefore works on a
+        **scope** (R-136):
+
+        * ``scope_group`` picks which groups the 全选 button acts on -
+          「全部命令」, one group, or several groups (ticked through the group
+          headers, shown as 「已选 N 个分组」);
+        * 全不选 always clears *everything*, because a button that says "none"
+          and leaves half a selection behind is worse than no button.
+        """
         bar = QWidget()
         bar.setObjectName("BatchBar")
         bar.setStyleSheet(
@@ -761,9 +1170,11 @@ class CommandsPanel(QWidget):
         head.addWidget(self.batch_count, 1)
         self.btn_pick_all = QPushButton(tr("cmd.batch.all"))
         self.btn_pick_all.setObjectName("Ghost")
+        self.btn_pick_all.setToolTip(tr("cmd.batch.all.tip"))
         self.btn_pick_all.clicked.connect(lambda: self._pick_all(True))
         self.btn_pick_none = QPushButton(tr("cmd.batch.none"))
         self.btn_pick_none.setObjectName("Ghost")
+        self.btn_pick_none.setToolTip(tr("cmd.batch.none.tip"))
         self.btn_pick_none.clicked.connect(lambda: self._pick_all(False))
         self.btn_batch_exit = QPushButton(tr("cmd.batch.exit"))
         self.btn_batch_exit.setObjectName("Ghost")
@@ -772,6 +1183,17 @@ class CommandsPanel(QWidget):
             button.setCursor(Qt.PointingHandCursor)
             head.addWidget(button)
         layout.addLayout(head)
+
+        scope = QHBoxLayout()
+        scope.setSpacing(6)
+        self.scope_label = QLabel(tr("cmd.batch.scope"))
+        self.scope_label.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
+        scope.addWidget(self.scope_label)
+        self.scope_group = Combo()
+        self.scope_group.setToolTip(tr("cmd.batch.scope.tip"))
+        self.scope_group.currentIndexChanged.connect(self._on_scope_changed)
+        scope.addWidget(self.scope_group, 1)
+        layout.addLayout(scope)
 
         tools = QHBoxLayout()
         tools.setSpacing(6)
@@ -803,9 +1225,15 @@ class CommandsPanel(QWidget):
                                  else GlyphButton.SELECT)
         if self._batch:
             self.hide_drawer()
+            self._scope = None
             self._refresh_batch_groups()
+            self._sync_scope_combo(force=True)
+        else:
+            self._scope = None
         for row in self.rows():
             row.set_batch_mode(self._batch)
+        for header in getattr(self, "_group_headers", {}).values():
+            header.set_batch_mode(self._batch)
         self._sync_batch_count()
 
     def toggle_batch(self) -> None:
@@ -838,11 +1266,115 @@ class CommandsPanel(QWidget):
         self.batch_count.setText(tr("cmd.batch.count", n=chosen))
         for button in (self.btn_batch_move, self.btn_batch_delete):
             button.setEnabled(chosen > 0)
+        self._sync_group_picks()
+
+    # --------------------------------------------------------------- selection
+    def _bucket_of(self, row: CommandRow) -> str:
+        return row.item.get("group") or UNGROUPED
+
+    def _in_scope(self, row: CommandRow) -> bool:
+        """Is this row inside the current 范围 (all / one group / several)?"""
+        if self._scope is None:
+            return True
+        return self._bucket_of(row) in self._scope
 
     def _pick_all(self, value: bool) -> None:
+        """全选 uses the current scope; 全不选 always clears everything.
+
+        Restricting 全不选 to the scope looked broken: the button says "none"
+        and the user expects an empty selection, not "empty inside one group"
+        (R-136).
+        """
         for row in self.rows():
-            if self.row_reachable(row):
-                row.pick.setChecked(value)
+            if not self.row_reachable(row):
+                continue
+            if value and not self._in_scope(row):
+                continue
+            row.pick.setChecked(value)
+        self._sync_batch_count()
+
+    def _pick_group(self, group_id: str, value: bool) -> None:
+        """A group header's tick box: select exactly the commands it holds.
+
+        Ticking one header is the "select this group" gesture; ticking a second
+        one adds it to the scope, which is what makes *multiple* groups work
+        (R-136).
+        """
+        bucket = group_id or UNGROUPED
+        for row in self.rows():
+            if self._bucket_of(row) != bucket or not self.row_reachable(row):
+                continue
+            row.pick.setChecked(value)
+        if value:
+            self._scope = (set(self._scope) if self._scope else set()) | {bucket}
+        elif self._scope:
+            remaining = set(self._scope) - {bucket}
+            self._scope = remaining or None
+        self._sync_scope_combo()
+        self._sync_batch_count()
+
+    def _sync_group_picks(self) -> None:
+        """Mirror the row selection onto every group header's tri-state box."""
+        headers = getattr(self, "_group_headers", {})
+        if not headers:
+            return
+        picked: dict[str, int] = {}
+        total: dict[str, int] = {}
+        for row in self.rows():
+            bucket = self._bucket_of(row)
+            if bucket not in headers or not self.row_reachable(row):
+                continue
+            total[bucket] = total.get(bucket, 0) + 1
+            if row.is_picked():
+                picked[bucket] = picked.get(bucket, 0) + 1
+        for group_id, header in headers.items():
+            have = picked.get(group_id, 0)
+            if have == 0:
+                header.set_pick_state(Qt.Unchecked)
+            elif have >= total.get(group_id, 0):
+                header.set_pick_state(Qt.Checked)
+            else:
+                header.set_pick_state(Qt.PartiallyChecked)
+
+    def _sync_scope_combo(self, force: bool = False) -> None:
+        """Rebuild the 范围 list, adding a "several groups" entry when needed."""
+        key = (None if self._scope is None else tuple(sorted(self._scope)),
+               tuple(group["id"] for group in self.store.groups))
+        if not force and key == self._scope_key:
+            return
+        self._scope_key = key
+        scope = self._scope
+        self.scope_group.blockSignals(True)
+        self.scope_group.clear()
+        self.scope_group.addItem(tr("cmd.batch.scope.all"), SCOPE_ALL)
+        if scope is not None and len(scope) > 1:
+            self.scope_group.addItem(tr("cmd.batch.scope.multi", n=len(scope)),
+                                     SCOPE_MULTI)
+        for group in self.store.groups:
+            self.scope_group.addItem(group.get("name") or group["id"], group["id"])
+        if any((item.get("group") or UNGROUPED) == UNGROUPED
+               for item in self.store.items):
+            self.scope_group.addItem("— " + tr("cmd.ungrouped"), UNGROUPED)
+        if scope is None:
+            index = 0
+        elif len(scope) > 1:
+            index = 1
+        else:
+            index = self.scope_group.findData(next(iter(scope)))
+            index = index if index >= 0 else 0
+        self.scope_group.setCurrentIndex(index)
+        self.scope_group.blockSignals(False)
+
+    def _on_scope_changed(self, _index: int) -> None:
+        data = self.scope_group.currentData()
+        if data == SCOPE_ALL:
+            self._scope = None
+        elif data == SCOPE_MULTI:
+            # The set is already what the group headers report; the entry is a
+            # read-out, not a choice.
+            return
+        else:
+            self._scope = {data if data is not None else UNGROUPED}
         self._sync_batch_count()
 
     def _refresh_batch_groups(self) -> None:
@@ -898,17 +1430,17 @@ class CommandsPanel(QWidget):
         self.drawer.hide()
 
     def _on_paste(self, text: str) -> None:
-        if len(self.store.split_lines(text)) > 1:
+        if len(self.store.split_entries(text)) > 1:
             self.paste_box.clear()
             self.import_text(text, self.paste_group.currentData() or "")
 
     def import_text(self, raw: str, group_id: str = "") -> None:
-        lines = self.store.split_lines(raw)
-        if not lines:
+        entries = self.store.split_entries(raw)
+        if not entries:
             return
-        self.store.add(lines, {"group": group_id} if group_id else None)
+        self.store.add_entries(entries, {"group": group_id} if group_id else None)
         self.hide_drawer()
-        self.notify(tr("cmd.imported", n=len(lines)), "ok")
+        self.notify(tr("cmd.imported", n=len(entries)), "ok")
 
     # ------------------------------------------------------------------- rows
     def rebuild(self) -> None:
@@ -935,35 +1467,64 @@ class CommandsPanel(QWidget):
                 header.exportGroup.connect(self.export_dialog)
                 header.remove.connect(self.remove_group)
                 header.addCommand.connect(self.add_to_group)
+                header.dropped.connect(self._drop_in_group)
+                header.pickAll.connect(self._pick_group)
                 self.list_layout.insertWidget(self.list_layout.count() - 1, header)
                 self._group_rows[group["id"]] = []
                 self._group_headers[group["id"]] = header
-                holder = QWidget()
+                holder = BucketBody(group["id"])
                 holder_layout = QVBoxLayout(holder)
                 holder_layout.setContentsMargins(18, 0, 0, 0)
                 holder_layout.setSpacing(5)
+                holder.dropRequested.connect(
+                    lambda ids, gid=group["id"]: self._drop_in_group(ids, gid))
                 self.list_layout.insertWidget(self.list_layout.count() - 1, holder)
                 holder.setVisible(not group.get("collapsed"))
                 self._group_bodies[group["id"]] = holder
-            for entry in items:
+            bucket_group = UNGROUPED if group is None else group["id"]
+            for index, entry in enumerate(items):
                 row = CommandRow(entry, self.store.groups)
+                row.bucket_group = bucket_group
+                row.bucket_index = index
                 row.send.connect(self.send_item)
                 row.edit.connect(self.open_editor)
                 row.remove.connect(self.remove_item)
                 row.toggled.connect(self.set_enabled)
                 row.moveTo.connect(self.move_item)
                 row.pick.toggled.connect(self._sync_batch_count)
+                row.dragOut.connect(self._start_drag)
+                row.dropped.connect(self._drop_on_row)
                 if group is None:
                     self.list_layout.insertWidget(self.list_layout.count() - 1, row)
                     continue
                 self._group_bodies[group["id"]].layout().addWidget(row)
                 self._group_rows[group["id"]].append(row)
+            # NOTE: no strip is added at the end of a bucket (R-141).  Dropping
+            # on the *lower* half of the last row already inserts after it,
+            # which is the group's end, so the append target was redundant - and
+            # a fixed-height widget there pushed the next group's header 19 px
+            # further down (spacing 5 + strip 14), which the user read as "the
+            # gap between two expanded groups is far too big".  The tail strip
+            # below the last group stays: that one is the only way *out* of a
+            # group (R-133).
+
+        # The root bucket gets its own strip too: without it a command could be
+        # dragged *into* a group by dropping on the group's header, but never
+        # back out again unless an ungrouped command happened to exist to aim
+        # at (R-130).  It carries no hint text - the idle panel stays clean and
+        # the landing line only appears while dragging (R-133).
+        tail = DropStrip(UNGROUPED)
+        tail.dropRequested.connect(self._drop_in_group)
+        self.list_layout.insertWidget(self.list_layout.count() - 1, tail)
 
         if self._batch:
             # A rebuild creates new rows, which start un-picked and show the
             # enable switch; the mode has to be re-applied to them (R-092).
             for row in self.rows():
                 row.set_batch_mode(True)
+            for header in self._group_headers.values():
+                header.set_batch_mode(True)
+            self._sync_scope_combo()
             self._sync_batch_count()
 
         count = len(self.store.items)
@@ -988,6 +1549,83 @@ class CommandsPanel(QWidget):
     def add_to_group(self, group_id: str) -> None:
         """Create a command that lands directly inside ``group_id`` (R-042)."""
         self.open_editor(None, group_id)
+
+    # --------------------------------------------------------------- dragging
+    def _bucket_ids(self, group_id: str) -> list[str]:
+        """Ids of one bucket in display order.
+
+        The bucket order inside a group is exactly the order of ``store.items``
+        filtered by group (``groups_with_items()`` walks the flat list), so the
+        panel can translate "dropped on row X" into a list index without
+        keeping a second copy of the ordering.
+        """
+        target = group_id or UNGROUPED
+        return [item["id"] for item in self.store.items
+                if (item.get("group") or UNGROUPED) == target]
+
+    def _start_drag(self, item_id: str) -> None:
+        """Begin a command drag, carrying the whole batch when one is picked."""
+        ids = [item_id]
+        if self._batch:
+            picked = self.picked_ids()
+            if item_id in picked:
+                ids = picked
+        row = next((entry for entry in self.rows()
+                    if entry.item["id"] == item_id), None)
+        drag = QDrag(self)
+        drag.setMimeData(_drag_mime(ids))
+        if row is not None:
+            drag.setPixmap(row.grab())
+        # ``exec()`` runs a nested event loop and the drop handler is called
+        # from inside it.  Rebuilding the list there would reparent - and soon
+        # delete - the very widget that owns this drag, so the actual reorder
+        # is queued until the loop has unwound (R-130).
+        self._in_drag = True
+        try:
+            drag.exec(Qt.MoveAction)
+        finally:
+            self._in_drag = False
+        self.clear_drop_hints()
+
+    def clear_drop_hints(self) -> None:
+        for row in self.rows():
+            row.clear_drop_hint()
+
+    def _apply_drop(self, ids, group_id: str, index: int) -> None:
+        self.clear_drop_hints()
+        if getattr(self, "_in_drag", False):
+            QTimer.singleShot(0, lambda: self._apply_drop(ids, group_id, index))
+            return
+        moved = self.store.reorder(ids, group_id, index)
+        if not moved:
+            return
+        group = self.store.group_by_id(group_id)
+        name = (group or {}).get("name") or tr("cmd.ungrouped")
+        self.notify(tr("cmd.drag.moved", n=moved, name=name), "ok")
+
+    def _drop_on_row(self, ids, row, below: bool) -> None:
+        """Insert before/after the row that received the drop (R-130)."""
+        kept = [item_id for item_id in self._bucket_ids(row.bucket_group)
+                if item_id not in ids]
+        if row.item["id"] not in kept:
+            # Dropped on itself: nothing to do, and re-inserting it would look
+            # like the list jumped for no reason.
+            return
+        index = kept.index(row.item["id"]) + (1 if below else 0)
+        self._apply_drop(ids, row.bucket_group, index)
+
+    def _drop_in_group(self, ids, group_id: str) -> None:
+        """Dropped on a header or in a group's blank area: append to that group."""
+        self._apply_drop(ids, group_id, -1)
+
+    def _drop_at_end(self, ids) -> None:
+        """Dropped in the blank space below the list: take it out of its group.
+
+        The bottom strip is the root bucket, so "drop in the empty area" is the
+        unambiguous way back to 未分组 - the same move as dragging a file out of
+        a folder onto the folder's parent (R-130).
+        """
+        self._apply_drop(ids, UNGROUPED, -1)
 
     def move_item(self, item_id: str, group_id: str) -> None:
         self.store.move_to_group(item_id, group_id)
@@ -1171,8 +1809,14 @@ class CommandsPanel(QWidget):
         self.btn_export.setToolTip(tr("cmd.export"))
         self.btn_batch.setToolTip(tr("cmd.batch"))
         self.btn_pick_all.setText(tr("cmd.batch.all"))
+        self.btn_pick_all.setToolTip(tr("cmd.batch.all.tip"))
         self.btn_pick_none.setText(tr("cmd.batch.none"))
+        self.btn_pick_none.setToolTip(tr("cmd.batch.none.tip"))
         self.btn_batch_exit.setText(tr("cmd.batch.exit"))
+        self.scope_label.setText(tr("cmd.batch.scope"))
+        self.scope_group.setToolTip(tr("cmd.batch.scope.tip"))
+        self._scope_key = None
+        self._sync_scope_combo(force=True)
         self.btn_batch_move.setText(tr("cmd.batch.move"))
         self.btn_batch_delete.setText(tr("cmd.batch.delete"))
         self.batch_group.setToolTip(tr("cmd.paste.group.tip"))

@@ -22,7 +22,8 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
         ("串口日志页", [
             "每一行的格式是 `[时:分:秒.毫秒]收←◇内容` 或 `发→◇内容`。",
             "「自动滚动到最新」打开时永远跟着最新一行；关掉后可以自由翻阅历史，底部会浮出「回到最新」气泡。",
-            "「保持屏幕常亮」打开后系统不会因空闲息屏或睡眠，适合长时间盯串口；关闭应用会自动恢复。",
+            "「保持屏幕常亮」打开后系统不会因空闲息屏或睡眠，适合长时间盯串口；关闭应用会自动恢复。"
+            "开关每次都从「关」开始，不记忆上次的选择。",
             "「显示 \\r \\n 等控制字符」对收和发同时生效，能看到真实发出的换行。",
             "「HEX 显示」按 16 字节一行显示偏移 + 十六进制 + ASCII。",
             "「保存视图」把当前日志写到文件；「收发记录」在后台把收发两个方向的原始字节写进同一个文件，"
@@ -52,13 +53,19 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
         ]),
         ("扩展命令", [
             "右侧栏的命令可以点一下直接发送，也可以勾选多条后「依次发送」（每条按自己的延时）。",
+            "按住一条命令就能拖动，像在资源管理器里拖文件：拖到别的分组标题或空白处即换组，"
+            "拖到某条命令的上/下半区则插到它之前/之后，拖到列表末尾的空条则移出所有分组；"
+            "批量模式下拖动其中一条会带走全部勾选项。",
             "「分组」用来归类：点文件夹图标新建分组，可以给分组写备注；分组可折叠。创建和改名不允许与已有分组同名，首尾空格不计。",
             "每条命令与发送、编辑、删除按钮排在同一主行，色条区分选中状态；备注在命令下方以小字显示，"
             "与命令文字左对齐，悬停可查看完整内容和延时。",
             "每条命令支持备注、行尾、延时、周期定时发送、HEX。",
             "右键一条命令可以移动分组；顶部导出按钮统一选择要导出的命令或分组。",
             "导出的 JSON 在另一台电脑上「导入」即可使用，分组会自动合并。",
-            "粘贴多行命令会自动拆分成多条。",
+            "命令里用 `命令` 表示这条内容本身，它不一定是 AT 指令：`net sta enable` 这种控制台命令一样可以存。",
+            "粘贴多行会拆成多条命令，`#` 之后的内容自动成为该条命令的备注，行尾多打的空格会被去掉；"
+            "整行只有注释（`# ...`）时不会生成命令，所以可以一边贴命令一边写说明。"
+            "命令本身确实含 `#` 时写成 `\\#`。",
         ]),
         ("关键字搜索", [
             "输入关键字回车，会搜索**整个日志（含此前的历史）**，结果按「行号 + 内容」列出。",
@@ -111,6 +118,7 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
         ("快捷键一览", [
             '`Ctrl+Enter` 发送（回车发送关闭时，回车只换行，`Shift+Enter` 也是换行）。',
             '`↑` / `↓` 在输入框第一行翻发送历史；历史默认 50 条，首选项可调到 5 ~ 300 条并一键清空。',
+            "发送后输入框不会清空，方便连着发同一条命令；连续发同一内容时历史只记一条，中间插了别的内容则照常各记一条。",
             '`Ctrl+C` 复制日志选中内容（终端页是 `Ctrl+Shift+C`，因为 `Ctrl+C` 要当 0x03 发出去）。',
             '`Ctrl+滚轮` 在日志上缩放日志字号，不影响界面其它字号，缩放值会被记住。',
             '日志里右键：复制 / 复制全部 / 保存 / 查找 / 跳到最新。',
@@ -168,7 +176,8 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
             "*Auto-scroll to latest* always follows the newest line. Turn it off and a "
             "*back to latest* bubble appears while you read history.",
             "*Keep screen awake* stops Windows from blanking or sleeping on idle - handy during a "
-            "long capture. It is released automatically when OmniCOM closes.",
+            "long capture. It is released automatically when OmniCOM closes, and always starts "
+            "off: the switch is deliberately not remembered.",
             "*Show \\r \\n and other control chars* applies to both directions, so you can see the "
             "line ending that was really sent.",
             "*HEX view* prints 16 bytes per line: offset, hex, ASCII.",
@@ -211,7 +220,17 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
             "Right-click a command to move groups. Use the export button at the top to select "
             "commands or a group to export.",
             "The exported JSON can be imported on another machine - groups merge automatically.",
-            "Pasting several lines creates several commands.",
+            "The field is called Command, not AT: an entry may be an AT line, a bare console "
+            "command such as `net sta enable`, or a fragment of either.",
+            "Hold a command to drag it, just like dragging a file in Explorer: drop it on "
+            "another group's header or blank area to move it there, on the top or bottom half "
+            "of a row to insert before or after it, or on the empty strip at the end of the "
+            "list to take it out of every group. In batch mode dragging one row takes all "
+            "picked commands with it.",
+            "Pasting several lines creates several commands. Text after `#` becomes that "
+            "command's note and the padding before `#` is dropped; a line that holds only a "
+            "comment creates nothing, so a paste can carry explanations. Write `\\#` when a "
+            "command really contains a hash.",
         ]),
         ("Search", [
             "Type a keyword and press Enter: it searches **the whole log, history included**, and "
@@ -270,6 +289,8 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
         ("Keyboard shortcuts", [
             '`Ctrl+Enter` sends (with Enter-to-send off, Enter just inserts a newline, as does `Shift+Enter`).',
             '`↑` / `↓` walk the send history while the cursor is on the first line; the history keeps 50 entries by default (5-300 in Preferences, clearable).',
+            "Sending does not clear the box - handy for repeating one command. An immediate repeat is "
+            "recorded in the history once; sending something else in between records both.",
             '`Ctrl+C` copies the selected log text (on the terminal page it is `Ctrl+Shift+C`, because `Ctrl+C` must send 0x03).',
             '`Ctrl+wheel` over the log zooms the *log* font only; the rest of the UI keeps its size and the value is remembered.',
             'Right-click in the log: copy / copy all / save / find / jump to newest.',

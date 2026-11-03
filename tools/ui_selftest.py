@@ -350,6 +350,64 @@ def main() -> int:
               "delay" in item and "interval" in item and "timer" in item)
         next_()
 
+    def step_paste_notes(next_):
+        """R-128: a ``#`` tail in a pasted line becomes that command's note."""
+        store = window.command_store
+        before = len(store.items)
+        paste = (
+            "net sta enable            # ① 必须先起 supplicant（关键，原来漏了这步）\r\n"
+            "   net sta set ssid cpdd   # ②\r\n"
+            "net sta set psk 12341234  # ③\r\n"
+            "# 下面这条不能生成命令\r\n"
+            "\r\n"
+            "net sta connect           # ④\r\n"
+            "net sta state             # ⑤ 查看状态，1=connected\r\n"
+        )
+        window.commands_panel.import_text(paste)
+        added = store.items[before:]
+        check("R-128 带 # 备注的多行粘贴只生成真正有命令的行", len(added) == 5,
+              f"{before} -> {len(store.items)}")
+        check("R-128 # 之前的无用空格被去掉",
+              [entry["text"] for entry in added] == [
+                  "net sta enable", "net sta set ssid cpdd", "net sta set psk 12341234",
+                  "net sta connect", "net sta state"],
+              [entry["text"] for entry in added])
+        check("R-128 # 之后的内容成为该条命令的备注",
+              [entry["note"] for entry in added] == [
+                  "① 必须先起 supplicant（关键，原来漏了这步）", "②", "③", "④",
+                  "⑤ 查看状态，1=connected"],
+              [entry["note"] for entry in added])
+        check("R-128 新导入的命令仍然默认不勾选",
+              not any(entry["enabled"] for entry in added),
+              str([entry["enabled"] for entry in added]))
+
+        plain = store.split_entries("AT+CGMR\r\nATI\r\n")
+        check("R-128 没有 # 的行备注为空", plain == [("AT+CGMR", ""), ("ATI", "")],
+              str(plain))
+        escaped = store.split_entries("echo a\\#b   # 转义的井号")
+        check("R-128 命令本身含 # 时用 \\# 转义", escaped == [("echo a#b", "转义的井号")],
+              str(escaped))
+        check("R-128 整行注释不生成命令", store.split_entries("# 只有注释\n") == [],
+              str(store.split_entries("# 只有注释\n")))
+
+        from omnicom.i18n import language, tr
+        # R-129 kept the caption away from "AT"; R-132 replaced the abbreviation
+        # CMD with the plain word (命令 / Command), so the expectation follows
+        # the active language instead of hard-coding one of them.
+        expected = "命令" if language() == "zh" else "Command"
+        check("R-129 命令编辑对话框的字段名是「命令 / Command」（不是 AT，也不再是 CMD）",
+              tr("cmd.field") == expected, tr("cmd.field"))
+        from omnicom.ui.commands_panel import CommandDialog
+        dialog = CommandDialog(window, groups=store.groups)
+        captions = [child.text() for child in dialog.findChildren(QLabel)
+                    if child.text() in ("AT", "CMD", "命令", "Command")]
+        dialog.deleteLater()
+        check("R-129 对话框里只出现一个「命令」字段名", captions == [expected],
+              str(captions))
+        # Leave the library as it was: later steps index ``items[-1]``.
+        store.remove_many([entry["id"] for entry in added])
+        next_()
+
     def step_send_command(next_):
         state["tx_cmd"] = window.bridge.manager.tx_bytes
         window.commands_panel.send_item(window.command_store.items[0])
@@ -979,7 +1037,7 @@ def main() -> int:
         next_()
 
     def step_send_history(next_):
-        """R-090/R-094: ↑ walks the history; Enter sends when the toggle is on."""
+        """R-090/R-094/R-131: history recall, Enter-to-send, kept draft."""
         panel = window.send_panel
         box = panel.input
         baseline = list(panel.history_entries())
@@ -989,6 +1047,9 @@ def main() -> int:
             panel.emit_current()
             app.processEvents()
 
+        def times(text: str) -> int:
+            return list(panel.history_entries()).count(text)
+
         try:
             send("HIST-OLD")
             send("HIST-NEW")
@@ -996,7 +1057,25 @@ def main() -> int:
                   panel.history_entries()[-2:] == ["HIST-OLD", "HIST-NEW"],
                   str(panel.history_entries()[-3:]))
 
-            # draft in the box, then walk back
+            # ---- R-131: sending must not wipe the box.
+            send("HIST-KEEP")
+            check("R-131 发送后输入框内容保留",
+                  box.toPlainText() == "HIST-KEEP", repr(box.toPlainText()))
+            box.setPlainText("HIST-KEEP")
+            panel.emit_current()
+            app.processEvents()
+            panel.emit_current()
+            app.processEvents()
+            check("R-131 连续发送同一内容历史只记一条",
+                  times("HIST-KEEP") == 1, f"{times('HIST-KEEP')} 条")
+            send("HIST-MID")
+            send("HIST-KEEP")
+            check("R-131 非连续重复仍各记一条",
+                  times("HIST-KEEP") == 2, f"{times('HIST-KEEP')} 条")
+            check("R-131 连续发送后内容仍可原样再发",
+                  box.toPlainText() == "HIST-KEEP", repr(box.toPlainText()))
+
+            # draft in the box, then walk back past the kept entries
             box.setPlainText("DRAFT")
             cursor = box.textCursor()
             cursor.movePosition(QTextCursor.End)
@@ -1009,7 +1088,8 @@ def main() -> int:
             app.processEvents()
             second = box.toPlainText()
             check("R-090 「上键到顶」依次回退到上一条、上上一条",
-                  first == "HIST-NEW" and second == "HIST-OLD", f"{first!r}, {second!r}")
+                  first == "HIST-KEEP" and second == "HIST-MID",
+                  f"{first!r}, {second!r}")
             QTest.keyClick(box, Qt.Key_Down)
             app.processEvents()
             QTest.keyClick(box, Qt.Key_Down)
@@ -1017,7 +1097,39 @@ def main() -> int:
             check("R-090 继续按下键回到正在输入的草稿",
                   box.toPlainText() == "DRAFT", repr(box.toPlainText()))
 
+            # ---- R-134: the box keeps what was sent, so the first ↑ must skip
+            #      the entry that is already on screen (333 -> 222, one press).
+            entries = list(panel.history_entries())
+            box.setPlainText(entries[-1])
+            cursor = box.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            box.setTextCursor(cursor)
+            app.processEvents()
+            QTest.keyClick(box, Qt.Key_Up)
+            app.processEvents()
+            check("R-134 框里已是上一条时，按一次上键就取到更早的一条",
+                  box.toPlainText() == entries[-2],
+                  f"{box.toPlainText()!r} != {entries[-2]!r}")
+            QTest.keyClick(box, Qt.Key_Up)
+            app.processEvents()
+            check("R-134 再按一次上键继续往前（不重复同一条）",
+                  box.toPlainText() == entries[-3],
+                  f"{box.toPlainText()!r} != {entries[-3]!r}")
+            QTest.keyClick(box, Qt.Key_Down)
+            app.processEvents()
+            QTest.keyClick(box, Qt.Key_Down)
+            app.processEvents()
+            check("R-134 下键原路回到框里原来的内容",
+                  box.toPlainText() == entries[-1], repr(box.toPlainText()))
+
             # multi-line: the first ↑ must move the cursor, not jump into history
+            # Leave any half-finished browse first: the R-134 block above stops
+            # one entry short of the bottom (two ↓ from two ↑ land on the newest
+            # entry, not past it), and a stale position would make the next ↑
+            # continue from there instead of starting at the newest entry.  With
+            # no browse in progress this ↓ is plain cursor motion.
+            QTest.keyClick(box, Qt.Key_Down)
+            app.processEvents()
             box.setPlainText("LINE-1\nLINE-2")
             cursor = box.textCursor()
             cursor.movePosition(QTextCursor.End)
@@ -1031,8 +1143,12 @@ def main() -> int:
                   f"block={inside} text={box.toPlainText()!r}")
             QTest.keyClick(box, Qt.Key_Up)
             app.processEvents()
+            # State-relative, not a literal: the draft (the two lines) is not in
+            # the history, so the first browse shows the newest entry - whatever
+            # the earlier steps in this function left there.
             check("R-090 光标在首行后再按上键才取历史",
-                  box.toPlainText() == "HIST-NEW", repr(box.toPlainText()))
+                  box.toPlainText() == entries[-1],
+                  f"{box.toPlainText()!r} != {entries[-1]!r}")
 
             # ---- Enter-to-send (R-094)
             sent: list[bytes] = []
@@ -1053,10 +1169,12 @@ def main() -> int:
                 app.processEvents()
                 check("R-094 开关打开时回车即发送",
                       sent and sent[-1].startswith(b"ENTER-ON"), str(sent[-1:]))
+                check("R-131 回车发送后内容仍留在框内",
+                      box.toPlainText() == "ENTER-ON", repr(box.toPlainText()))
                 QTest.keyClick(box, Qt.Key_Return, Qt.KeyboardModifier.ShiftModifier)
                 app.processEvents()
                 check("R-094 开关打开时 Shift+回车插入换行",
-                      box.toPlainText() == "\n", repr(box.toPlainText()))
+                      box.toPlainText() == "ENTER-ON\n", repr(box.toPlainText()))
 
                 panel.set_enter_sends(False)
                 box.setPlainText("ENTER-OFF")
@@ -1226,6 +1344,446 @@ def main() -> int:
             panel.set_batch_mode(False)
             store.remove_group(group["id"], drop_commands=True)
             panel.rebuild()
+        next_()
+
+    def step_batch_scope(next_):
+        """R-136: 批量勾选按分组作用域工作（单组 / 多组 / 全部）。"""
+        from omnicom.ui.commands_panel import SCOPE_ALL, SCOPE_MULTI
+
+        panel = window.commands_panel
+        store = window.command_store
+        first = store.add_group("ScopeA", "")
+        second = store.add_group("ScopeB", "")
+        try:
+            store.add(["SA-1", "SA-2"], {"group": first["id"]})
+            store.add(["SB-1", "SB-2", "SB-3"], {"group": second["id"]})
+            store.add(["SU-1"], {})
+            panel.rebuild()
+            app.processEvents()
+            panel.set_batch_mode(True)
+            app.processEvents()
+
+            def ids_in(group_id: str) -> set[str]:
+                return {row.item["id"] for row in panel.rows()
+                        if (row.item.get("group") or "") == group_id}
+
+            def picked() -> set[str]:
+                return set(panel.picked_ids())
+
+            head_a = panel._group_headers[first["id"]]
+            head_b = panel._group_headers[second["id"]]
+            check("R-136 批量模式下每个分组标题都有勾选框",
+                  head_a.pick.isVisible() and head_b.pick.isVisible()
+                  and not head_a.pick.isChecked(),
+                  f"{head_a.pick.isChecked()} / {head_b.pick.isChecked()}")
+
+            head_a.pick.setCheckState(Qt.Checked)
+            app.processEvents()
+            check("R-136 勾选一个分组只选中该组内的命令",
+                  picked() == ids_in(first["id"]) and bool(ids_in(first["id"])),
+                  f"已选 {len(picked())} 条 / 组内 {len(ids_in(first['id']))} 条")
+
+            head_b.pick.setCheckState(Qt.Checked)
+            app.processEvents()
+            both = ids_in(first["id"]) | ids_in(second["id"])
+            check("R-136 再勾一个分组即多组同时选中",
+                  picked() == both, f"{len(picked())} / {len(both)}")
+            check("R-136 多选分组时范围里给出「已选 2 个分组」",
+                  panel.scope_group.findData(SCOPE_MULTI) >= 0
+                  and panel.scope_group.currentData() == SCOPE_MULTI,
+                  panel.scope_group.currentText())
+
+            head_a.pick.setCheckState(Qt.Unchecked)
+            app.processEvents()
+            check("R-136 取消一个分组只取消这一组，另一组保留",
+                  picked() == ids_in(second["id"]),
+                  f"已选 {len(picked())} 条 / 期望 {len(ids_in(second['id']))} 条")
+
+            head_a.pick.setCheckState(Qt.Checked)
+            app.processEvents()
+            index = panel.scope_group.findData(first["id"])
+            panel.scope_group.setCurrentIndex(index)
+            app.processEvents()
+            panel._pick_all(False)
+            panel._pick_all(True)
+            app.processEvents()
+            check("R-136 范围限定到一个分组时「全选」只选这一组",
+                  picked() == ids_in(first["id"]),
+                  f"已选 {len(picked())} 条 / 组内 {len(ids_in(first['id']))} 条")
+
+            panel.scope_group.setCurrentIndex(
+                panel.scope_group.findData(SCOPE_ALL))
+            app.processEvents()
+            panel._pick_all(False)
+            panel._pick_all(True)
+            app.processEvents()
+            everyone = {row.item["id"] for row in panel.rows() if panel.row_reachable(row)}
+            check("R-136 范围是全部命令时「全选」选中所有可见命令",
+                  picked() == everyone, f"{len(picked())} / {len(everyone)}")
+
+            panel.toggle_group(first["id"])
+            app.processEvents()
+            panel._pick_all(False)
+            panel._pick_all(True)
+            app.processEvents()
+            check("R-136 折叠的分组不会被「全选」扫进去",
+                  not (picked() & ids_in(first["id"])),
+                  f"已选 {len(picked())} 条")
+            panel.toggle_group(first["id"])
+            app.processEvents()
+
+            panel._pick_all(False)
+            app.processEvents()
+            check("R-136 「全不选」清空整个选择（不只清当前范围）",
+                  picked() == set(), f"{len(picked())} 条")
+        finally:
+            panel.set_batch_mode(False)
+            store.remove_group(first["id"], drop_commands=True)
+            store.remove_group(second["id"], drop_commands=True)
+            panel.rebuild()
+            app.processEvents()
+        next_()
+
+    def step_group_trash(next_):
+        """R-137: 分组标题上的垃圾桶，与右键「删除分组」是同一条路径。"""
+        import inspect
+
+        from omnicom.i18n import tr
+        from omnicom.ui.commands_panel import CommandsPanel, GroupHeader
+
+        probe = {"id": "g-trash-probe", "name": "TrashProbe", "note": "",
+                 "collapsed": False}
+        header = GroupHeader(probe, 0)
+        fired: list[str] = []
+        header.remove.connect(fired.append)
+        check("R-137 分组标题上有删除按钮，提示为「删除分组」",
+              hasattr(header, "trash_btn")
+              and header.trash_btn.toolTip() == tr("cmd.deletegroup"),
+              getattr(getattr(header, "trash_btn", None), "toolTip", lambda: "-")())
+        header.trash_btn.click()
+        app.processEvents()
+        check("R-137 点垃圾桶发出该分组的删除请求",
+              fired == [probe["id"]], str(fired))
+        header.deleteLater()
+
+        panel = window.commands_panel
+        store = window.command_store
+        group = store.add_group("TrashWired", "")
+        try:
+            panel.rebuild()
+            app.processEvents()
+            live = panel._group_headers[group["id"]]
+            try:
+                # Qt raises when nothing is connected, so this *is* the proof
+                # that the button reaches the panel and not a fresh handler
+                # (same trick as R-046 / L-052).
+                live.remove.disconnect(panel.remove_group)
+                wired = True
+            except (RuntimeError, TypeError):
+                wired = False
+            check("R-137 分组删除信号接到 remove_group（与右键同一个入口）", wired)
+            if wired:
+                live.remove.connect(panel.remove_group)
+
+            source = inspect.getsource(CommandsPanel.remove_group)
+            check("R-137 删除分组前会问「保留命令」还是「连命令一起删」",
+                  "cmd.group.keep" in source and "cmd.group.drop" in source,
+                  f"{len(source)} 字符")
+        finally:
+            store.remove_group(group["id"], drop_commands=True)
+            panel.rebuild()
+            app.processEvents()
+        next_()
+
+    def step_window_edge(next_):
+        """R-138/R-139: 深色描边 + 外侧柔和阴影，才看得出窗口是一块板子。"""
+        check("R-138 描边颜色能被 Qt 解析（不能写成 CSS 的 rgba 字符串）",
+              QColor(theme.WINDOW_EDGE).isValid(), theme.WINDOW_EDGE)
+        check("R-138 描边至少有 1 px 宽", theme.WINDOW_EDGE_PX >= 1,
+              str(theme.WINDOW_EDGE_PX))
+
+        # ---- R-139: the shadow ring that sits outside the outline
+        check("R-139 阴影颜色能被 Qt 解析（不能写成 CSS 的 rgba 字符串）",
+              QColor(theme.WINDOW_SHADOW).isValid(), theme.WINDOW_SHADOW)
+        check("R-139 阴影环有正厚度", theme.WINDOW_SHADOW_PX > 0,
+              str(theme.WINDOW_SHADOW_PX))
+
+        backdrop = Aurora()
+        backdrop.resize(320, 240)
+        app.processEvents()
+        image = backdrop.grab().toImage()
+        inset = theme.WINDOW_SHADOW_PX
+        # The outline now sits on the *page* border, ``inset`` px inside the
+        # widget, because the ring outside it belongs to the shadow (L-161).
+        top = image.pixelColor(image.width() // 2, inset)
+        bottom = image.pixelColor(image.width() // 2, image.height() - 1 - inset)
+        left = image.pixelColor(inset, image.height() // 2)
+        right = image.pixelColor(image.width() - 1 - inset, image.height() // 2)
+        check("R-138 四边都有一条深色描边",
+              all(edge.lightness() < 90 for edge in (top, bottom, left, right)),
+              f"{top.name()} {bottom.name()} {left.name()} {right.name()}")
+        inside = image.pixelColor(image.width() // 2, image.height() // 2)
+        check("R-138 描边只占边缘，页面内部仍是浅色底",
+              inside.lightness() > 180, inside.name())
+
+        # ---- R-139: the ring itself
+        ring = image.pixelColor(inset // 2, image.height() // 2)
+        outer = image.pixelColor(0, image.height() // 2)
+        check("R-139 描边外侧有一圈阴影（比页面底色深）",
+              ring.lightness() < inside.lightness() - 5,
+              f"ring={ring.name()} inside={inside.name()}")
+        check("R-139 阴影从窗口边缘向描边方向逐渐加深（不是一块硬色块）",
+              outer.lightness() >= ring.lightness(),
+              f"outer={outer.name()} ring={ring.name()}")
+
+        # ---- R-139: a maximized window must not keep the ring
+        probe = window
+        was_max = probe.isMaximized()
+        check("R-139 普通状态下窗口会计入阴影环",
+              probe.window_shadow_px() == theme.WINDOW_SHADOW_PX,
+              str(probe.window_shadow_px()))
+        probe.showMaximized()
+        app.processEvents()
+        check("R-139 最大化时不留阴影环（否则屏幕四边会透出桌面）",
+              probe.window_shadow_px() == 0, str(probe.window_shadow_px()))
+        if not was_max:
+            probe.showNormal()
+            app.processEvents()
+        backdrop.deleteLater()
+        next_()
+
+    def step_group_gap(next_):
+        """R-141: 两个展开的分组之间不能多出一块空白。"""
+        from omnicom.ui.commands_panel import DropStrip
+
+        panel = window.commands_panel
+        store = window.command_store
+        first = store.add_group("GapTop", "")
+        second = store.add_group("GapBottom", "")
+        try:
+            store.add(["G-1", "G-2"], {"group": first["id"]})
+            store.add(["G-3"], {"group": second["id"]})
+            panel.rebuild()
+            app.processEvents()
+
+            # ---- no append target inside a bucket any more
+            for group_id, body in panel._group_bodies.items():
+                strips = body.findChildren(DropStrip)
+                check(f"R-141 分组正文里不再有额外的拖放条（{group_id[:6]}）",
+                      not strips, f"{len(strips)} strip(s)")
+
+            # ---- the tail strip must still exist, or "drag out of a group"
+            #      has nowhere to land (R-133).
+            tails = [child for child in panel.list_host.findChildren(DropStrip)
+                     if child.parent() is not None]
+            check("R-141 列表末尾仍保留唯一的拖出目标", len(tails) >= 1,
+                  str(len(tails)))
+
+            # ---- measure the real gap between the two expanded bodies
+            top = panel._group_bodies.get(first["id"])
+            header = panel._group_headers.get(second["id"])
+            if top is not None and header is not None:
+                gap = header.geometry().top() - top.geometry().bottom()
+                # spacing 5 (list) + nothing else: the old in-bucket strip added
+                # 14 px + 5 px, i.e. 19 px, which is what the user saw.
+                check("R-141 两个展开分组之间的空隙恢复为一段行距",
+                      0 <= gap <= 12, f"gap={gap}px")
+            # ---- a body's left indent must stay (R-042)
+            if top is not None:
+                check("R-042 分组正文仍缩进（不会被拉平到分组标题）",
+                      top.layout().contentsMargins().left() >= 12,
+                      str(top.layout().contentsMargins().left()))
+        finally:
+            store.remove_group(first["id"])
+            store.remove_group(second["id"])
+            panel.rebuild()
+            app.processEvents()
+        next_()
+
+    def step_aero_snap(next_):
+        """R-140: 顶部吸附最大化，最大化状态下往下拖还原到鼠标下。"""
+        from PySide6.QtCore import QPoint
+
+        titlebar = window.titlebar
+        check("R-140 标题栏有顶部吸附阈值", titlebar.SNAP_EDGE > 0,
+              str(titlebar.SNAP_EDGE))
+        check("R-140 还原需要离开顶部一段距离（否则刚吸附就自己还原）",
+              titlebar.SNAP_RELEASE > titlebar.SNAP_EDGE,
+              f"{titlebar.SNAP_RELEASE} vs {titlebar.SNAP_EDGE}")
+
+        screen = window.screen()
+        area = screen.availableGeometry()
+        top = titlebar._snap_top(QPoint(area.center().x(), area.top() + 1))
+        check("R-140 能算出屏幕可用的顶部线（不压住任务栏）", top == area.top(),
+              f"{top} vs {area.top()}")
+
+        if window.isMaximized():
+            window.showNormal()
+            app.processEvents()
+        window.move(area.left() + 80, area.top() + 120)
+        app.processEvents()
+        before = window.geometry()
+
+        # ---- drag up to the top edge: maximize
+        window.titlebar._drag = QPoint(400, 20)
+        cursor = QPoint(area.center().x(), area.top())
+        titlebar._snap_to_max(cursor)
+        app.processEvents()
+        check("R-140 拖到屏幕顶部会最大化", window.isMaximized(),
+              f"maximized={window.isMaximized()}")
+        check("R-140 最大化时不留阴影环", window.window_shadow_px() == 0,
+              str(window.window_shadow_px()))
+        check("R-140 最大化后拖动锚点仍在标题栏内",
+              titlebar._drag is not None
+              and 0 <= titlebar._drag.y() <= titlebar._title_height()
+              and 0 <= titlebar._drag.x() <= window.width(),
+              str(titlebar._drag))
+
+        # ---- drag down: restore under the pointer
+        cursor = QPoint(area.center().x(), area.top() + 200)
+        titlebar._restore_from_max(cursor)
+        app.processEvents()
+        check("R-140 最大化状态下往下拖会还原", not window.isMaximized(),
+              f"maximized={window.isMaximized()}")
+        check("R-140 还原后窗口出现在鼠标下方（不会跳到角落）",
+              before.height() > 0 and window.height() > 0
+              and window.geometry().top() <= cursor.y()
+              and window.geometry().top() >= cursor.y() - titlebar.height(),
+              f"top={window.geometry().top()} cursor_y={cursor.y()}")
+        check("R-140 还原后阴影环回来了", window.window_shadow_px() > 0,
+              str(window.window_shadow_px()))
+        check("R-140 还原后能继续拖动（锚点已重设）",
+              titlebar._drag is not None and titlebar._drag.x() > 0,
+              str(titlebar._drag))
+
+        # ---- the guard: a just-restored window must not re-snap from the same
+        #      pointer position, which is still inside the top band.
+        titlebar.mouseMoveEvent  # noqa: B018 - shape check only
+        check("R-140 顶部阈值小于还原距离（两者不能互相打架）",
+              titlebar.SNAP_EDGE < titlebar.SNAP_RELEASE,
+              f"{titlebar.SNAP_EDGE} < {titlebar.SNAP_RELEASE}")
+
+        # Restore the window for the following steps.
+        if window.isMaximized():
+            window.showNormal()
+        window.setGeometry(before)
+        titlebar._drag = None
+        app.processEvents()
+        next_()
+
+    def step_drag_reorder(next_):
+        """R-130: drag a command into another group *and* into another position."""
+        from PySide6.QtCore import QMimeData
+
+        from omnicom.commands import CommandStore
+        from omnicom.ui.commands_panel import _drag_mime, drag_ids
+
+        panel = window.commands_panel
+        store = window.command_store
+        root_group = store.add_group("DragRoot", "")
+        target = store.add_group("DragTarget", "")
+        try:
+            store.add(["D-A", "D-B", "D-C"], {"group": root_group["id"]})
+            store.add(["D-X", "D-Y"], {"group": target["id"]})
+            panel.rebuild()
+            app.processEvents()
+
+            def in_group(group_id):
+                return [item["text"] for item in store.items
+                        if (item.get("group") or "") == group_id]
+
+            def row_of(text):
+                return next(row for row in panel.rows()
+                            if row.item["text"] == text)
+
+            # ---- same group reorder: C dropped on the top half of A
+            panel._drop_on_row([row_of("D-C").item["id"]], row_of("D-A"), False)
+            app.processEvents()
+            check("R-130 组内拖动能改变顺序（拖到行上半区即插到它前面）",
+                  in_group(root_group["id"]) == ["D-C", "D-A", "D-B"],
+                  str(in_group(root_group["id"])))
+
+            # ---- cross group insert at an exact position
+            panel._drop_on_row([row_of("D-A").item["id"]], row_of("D-Y"), False)
+            app.processEvents()
+            check("R-130 拖到别的分组能插到指定位置",
+                  in_group(target["id"]) == ["D-X", "D-A", "D-Y"]
+                  and "D-A" not in in_group(root_group["id"]),
+                  f"root={in_group(root_group['id'])} target={in_group(target['id'])}")
+
+            # ---- bottom half means "after that row"
+            panel._drop_on_row([row_of("D-C").item["id"]], row_of("D-X"), True)
+            app.processEvents()
+            check("R-130 落在行下半区即插到它后面",
+                  in_group(target["id"]) == ["D-X", "D-C", "D-A", "D-Y"],
+                  str(in_group(target["id"])))
+
+            # ---- dropping on the group header appends to that group
+            panel._drop_in_group([row_of("D-Y").item["id"]], root_group["id"])
+            app.processEvents()
+            check("R-130 拖到分组标题就整条收进该分组末尾",
+                  in_group(root_group["id"]) == ["D-B", "D-Y"],
+                  str(in_group(root_group["id"])))
+
+            # ---- dropping the tail strip takes it back out of every group
+            panel._drop_in_group([row_of("D-X").item["id"]], "")
+            app.processEvents()
+            loose = [item["text"] for item in store.items
+                     if (item.get("group") or "") == ""]
+            check("R-130 拖到列表末尾的空条移出分组",
+                  "D-X" in loose and in_group(target["id"]) == ["D-C", "D-A"],
+                  f"target={in_group(target['id'])} loose={loose}")
+
+            # ---- a drop onto the dragged row itself changes nothing
+            before = [item["id"] for item in store.items]
+            panel._drop_on_row([row_of("D-C").item["id"]], row_of("D-C"), True)
+            app.processEvents()
+            check("R-130 拖回自己身上不产生任何改动",
+                  [item["id"] for item in store.items] == before)
+
+            # ---- the drag payload is private: a file/text drop is not a command
+            mime = _drag_mime(["aa", "bb"])
+            check("R-130 拖动载荷能正确还原被拖的命令",
+                  drag_ids(mime) == ["aa", "bb"], str(drag_ids(mime)))
+            check("R-130 非命令拖动（如文件、选中文字）不会被当成拖命令",
+                  drag_ids(QMimeData()) == [])
+            plain = QMimeData()
+            plain.setText("some text")
+            check("R-130 纯文本拖动同样被忽略", drag_ids(plain) == [],
+                  str(drag_ids(plain)))
+
+            # ---- the new order is the one the file keeps
+            expected = [item["id"] for item in store.items]
+            reloaded = CommandStore(store.path)
+            check("R-130 拖动后的顺序与分组都会保存到文件",
+                  [item["id"] for item in reloaded.items] == expected,
+                  f"{len(expected)} 条")
+
+            # ---- dragging must not also fire the command (R-095 keeps working)
+            fired = []
+            firing = row_of("D-C")
+
+            def collector(payload, _text) -> None:
+                fired.append(payload)
+
+            panel.sendRequested.connect(collector)
+            try:
+                event = type("Ev", (), {"button": lambda self: Qt.LeftButton})()
+                firing._suppress_send = True
+                firing._on_label_release(event)
+                app.processEvents()
+                check("R-130 拖动过的行松手不会把命令发出去", not fired, str(fired))
+                firing._on_label_release(event)
+                app.processEvents()
+                check("R-130 普通左键点击仍能发送（拖动只抑制那一次）",
+                      len(fired) == 1, str(fired))
+            finally:
+                panel.sendRequested.disconnect(collector)
+        finally:
+            store.remove_group(root_group["id"], drop_commands=True)
+            store.remove_group(target["id"], drop_commands=True)
+            panel.rebuild()
+            app.processEvents()
         next_()
 
     def step_combo(next_):
@@ -2023,8 +2581,13 @@ def main() -> int:
 
     def step_shell(next_):
         """R-037..R-040: square window, draggable columns, readable flow labels."""
-        corner = window.centralWidget().grab().toImage()
-        bottom = corner.pixelColor(2, corner.height() - 3)
+        central = window.centralWidget()
+        corner = central.grab().toImage()
+        # Sample the page corner, not the widget corner: the outermost pixels are
+        # now the transparent shadow ring (R-139), which says nothing about the
+        # shape of the plate (L-161).
+        page = central.page_rect() if hasattr(central, "page_rect") else central.rect()
+        bottom = corner.pixelColor(page.left() + 2, page.bottom() - 2)
         check("R-037 窗口外框四角都是直角", bottom.alpha() > 200,
               f"alpha={bottom.alpha()}")
         check("R-038 左右侧栏可通过分隔条拖动", window.body_split.count() == 3
@@ -2564,23 +3127,26 @@ def main() -> int:
         next_()
 
     def step_keep_awake(next_):
+        """R-062: keep-awake is per-session - never restored, never remembered."""
         from omnicom import power
 
-        original = window.settings.value("display/awake", "0")
         calls = []
+        check("R-062 常亮开关默认关闭",
+              window.row_awake.isChecked() is False,
+              str(window.row_awake.isChecked()))
         with patch.object(power, "set_keep_awake",
                           side_effect=lambda value: calls.append(value) or True):
             window.row_awake.setChecked(True)
             app.processEvents()
             check("R-062 打开开关会请求系统保持常亮", bool(calls) and calls[-1] is True, str(calls))
-            check("R-062 常亮状态写入设置",
-                  window.settings.value("display/awake") == "1",
+            check("R-062 常亮状态不写入设置",
+                  window.settings.value("display/awake") is None,
                   str(window.settings.value("display/awake")))
             window.row_awake.setChecked(False)
             app.processEvents()
             check("R-062 关闭开关会撤销常亮请求", bool(calls) and calls[-1] is False, str(calls))
-            check("R-062 关闭后设置同步为关",
-                  window.settings.value("display/awake") == "0",
+            check("R-062 关闭后设置里同样没有残留",
+                  window.settings.value("display/awake") is None,
                   str(window.settings.value("display/awake")))
         on_flags = power.flags_for(True)
         check("R-062 常亮同时要求屏幕与系统，取消只保留连续标记",
@@ -2590,18 +3156,27 @@ def main() -> int:
               and power.flags_for(False) == power.ES_CONTINUOUS,
               f"{on_flags:#010x} / {power.flags_for(False):#010x}")
 
-        # Closing the app must hand the machine back its sleep timer.
-        extra = OmniWindow(demo=False,
+        # A stale ``display/awake=1`` written by an older build must not re-arm
+        # the switch - that is exactly the bug R-062 now forbids.
+        stale = OmniWindow(demo=False,
                            command_path=os.path.join(tempfile.mkdtemp(
                                prefix="omnicom-awake-"), "commands.json"))
-        extra.row_awake.setChecked(True)
+        stale.settings.setValue("display/awake", "1")
+        stale._restore_settings()
+        app.processEvents()
+        check("R-062 旧的「已开启」记录不会在启动时自动生效",
+              stale.row_awake.isChecked() is False
+              and stale.settings.value("display/awake") is None,
+              f"checked={stale.row_awake.isChecked()} "
+              f"stored={stale.settings.value('display/awake')}")
+
+        # Closing the app must hand the machine back its sleep timer.
+        stale.row_awake.setChecked(True)
         with patch.object(power, "release") as release:
-            extra.close()
+            stale.close()
             app.processEvents()
             check("R-062 关闭应用时释放常亮请求", release.call_count == 1,
                   str(release.call_count))
-        if original != "1":
-            window.settings.setValue("display/awake", original)
         next_()
 
     def step_launcher_sections(next_):
@@ -4268,6 +4843,7 @@ def main() -> int:
     runner.add("search_check", step_search_check)
     runner.add("search_all", step_search_all)
     runner.add("import", step_import)
+    runner.add("R-128 paste_notes", step_paste_notes)
     runner.add("send_command", step_send_command)
     runner.add("send_command_check", step_send_command_check)
     runner.add("timer_check", step_timer_check)
@@ -4335,6 +4911,12 @@ def main() -> int:
     runner.add("R-090 send_history", step_send_history)
     runner.add("R-091 terminal_menu", step_terminal_menu)
     runner.add("R-092 batch_tools", step_batch_tools)
+    runner.add("R-136 batch_scope", step_batch_scope)
+    runner.add("R-137 group_trash", step_group_trash)
+    runner.add("R-138 window_edge", step_window_edge)
+    runner.add("R-141 group_gap", step_group_gap)
+    runner.add("R-140 aero_snap", step_aero_snap)
+    runner.add("R-130 drag_reorder", step_drag_reorder)
     runner.add("R-095 left_click", step_left_click_only)
     runner.add("R-100 brand", step_brand_centred)
     runner.add("R-102 rail_log_buttons", step_rail_log_buttons)

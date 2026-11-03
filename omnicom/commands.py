@@ -13,8 +13,10 @@ included in exports.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import tempfile
 import time
 import uuid
 from collections.abc import Iterable
@@ -122,6 +124,175 @@ def payload_for(item: dict) -> bytes:
     return body + LINE_ENDS.get(str(item.get("line_end") or "crlf"), b"\r\n")
 
 
+def split_comment(line: str) -> tuple[str, str]:
+    """Split one pasted line into ``(command, note)`` (R-128).
+
+    ``#`` starts the note: ``net sta enable   # 起 supplicant`` yields the
+    command ``net sta enable`` (the padding before ``#`` is dropped with
+    ``rstrip``, and indentation is trimmed like it always was) and the note
+    ``起 supplicant``.  ``\\#`` is an escaped hash and stays in the command, so a
+    payload that really contains ``#`` is never silently cut in half.
+    """
+    search = 0
+    while True:
+        cut = line.find("#", search)
+        if cut < 0:
+            return line.strip().replace("\\#", "#"), ""
+        if cut and line[cut - 1] == "\\":
+            search = cut + 1
+            continue
+        command = line[:cut].strip().replace("\\#", "#")
+        return command, line[cut + 1:].strip()
+
+
+# ---------------------------------------------------------------- storage io
+def _signature(path: str) -> tuple | None:
+    """``(mtime_ns, size)`` of the library file, or None when it is missing."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return (info.st_mtime_ns, info.st_size)
+
+
+def _read_library(path: str) -> tuple[list[dict] | None, list[dict], str]:
+    """Read one library file.
+
+    Returns ``(items, groups, error)``.  ``items is None`` (with no error) means
+    "there is no file yet", which is the only case that may fall back to the
+    factory seed; anything else that fails comes back as ``error`` so the caller
+    can keep the damaged file instead of erasing it (R-135).
+    """
+    if not os.path.exists(path):
+        return None, [], ""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except json.JSONDecodeError as err:
+        return [], [], f"{type(err).__name__}: {err}"
+    except OSError as err:
+        return [], [], f"{type(err).__name__}: {err}"
+
+    if isinstance(raw, list):
+        entries, raw_groups = raw, []
+    elif isinstance(raw, dict):
+        entries = raw.get("items") or []
+        raw_groups = raw.get("groups") or []
+    else:
+        return [], [], f"unexpected JSON root: {type(raw).__name__}"
+
+    items = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        merged = _defaults()
+        merged.update(entry)
+        merged["id"] = entry.get("id") or merged["id"]
+        merged["group"] = entry.get("group") or UNGROUPED
+        merged["note"] = entry.get("note") or ""
+        items.append(merged)
+
+    groups = []
+    for entry in raw_groups:
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        groups.append({
+            "id": entry["id"],
+            "name": entry.get("name") or "",
+            "note": entry.get("note") or "",
+            "collapsed": bool(entry.get("collapsed")),
+        })
+
+    known = {group["id"] for group in groups}
+    for item in items:
+        if item["group"] and item["group"] not in known:
+            item["group"] = UNGROUPED
+    return items, groups, ""
+
+
+class _library_lock:
+    """Best-effort exclusive lock around a read-modify-write of the library.
+
+    Same primitive as the CLI's ``PortLock`` (``msvcrt.locking`` on Windows,
+    ``flock`` elsewhere) but on a sidecar ``.lock`` file, so the atomic
+    ``os.replace`` stays inside the critical section.  When locking is not
+    available the library simply behaves as before - a portable build on an
+    exotic filesystem must not lose the ability to save.
+    """
+
+    def __init__(self, path: str, timeout: float = 3.0) -> None:
+        self.path = f"{path}.lock"
+        self.timeout = timeout
+        self._handle = None
+
+    def __enter__(self):
+        try:
+            # Held open on purpose: the lock lives on the handle, so it has to
+            # stay open until ``__exit__`` closes it.
+            handle = open(self.path, "a+")
+        except OSError:
+            return self
+        deadline = time.monotonic() + self.timeout
+        while True:
+            if _try_lock(handle):
+                self._handle = handle
+                return self
+            if time.monotonic() >= deadline:
+                handle.close()
+                return self
+            time.sleep(0.02)
+
+    def __exit__(self, *_exc) -> None:
+        handle, self._handle = self._handle, None
+        if handle is None:
+            return
+        with contextlib.suppress(Exception):
+            _unlock(handle)
+        with contextlib.suppress(Exception):
+            handle.close()
+
+
+def _try_lock(handle) -> bool:
+    try:
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        return True
+    except ImportError:
+        pass
+    except OSError:
+        return False
+    try:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except ImportError:
+        return True              # no primitive available: stay functional
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(handle) -> None:
+    try:
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    except ImportError:
+        pass
+    except OSError:
+        return
+    try:
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except (ImportError, OSError):
+        pass
+
+
 class CommandStore(QObject):
     changed = Signal()
 
@@ -130,58 +301,55 @@ class CommandStore(QObject):
         self.path = path or os.path.join(paths.data_dir(), "commands.json")
         self.items: list[dict] = []
         self.groups: list[dict] = []
+        #: Set by any call that changed **which order** the commands are in, so
+        #: the merge in ``save()`` knows whose order is the newer intent.
+        self._order_dirty = False
+        #: ``(mtime_ns, size)`` of the file as this instance last saw it; a
+        #: different value means another window wrote in the meantime.
+        self._seen: tuple | None = None
+        #: Ids this instance deleted, so the merge below never resurrects them
+        #: from the copy another window still has.
+        self._removed: set[str] = set()
+        self._dirty = False
+        #: Human-readable note when the file had to be recovered (shown as a
+        #: toast by the panel, never swallowed - R-135).
+        self.load_warning = ""
         self._load()
 
     # -------------------------------------------------------------- storage
     def _load(self) -> None:
         """Read either the legacy bare list or the newer envelope."""
-        try:
-            with open(self.path, encoding="utf-8") as handle:
-                raw = json.load(handle)
-        except (OSError, json.JSONDecodeError):
+        items, groups, error = _read_library(self.path)
+        if error:
+            self._recover(error)
+            return
+        if items is None:
+            # No file yet: this really is the first run.
             self._seed()
             return
-
-        if isinstance(raw, list):
-            entries, raw_groups = raw, []
-        elif isinstance(raw, dict):
-            entries = raw.get("items") or []
-            raw_groups = raw.get("groups") or []
-        else:
-            self._seed()
-            return
-
-        items = []
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            merged = _defaults()
-            merged.update(entry)
-            merged["id"] = entry.get("id") or merged["id"]
-            merged["group"] = entry.get("group") or UNGROUPED
-            merged["note"] = entry.get("note") or ""
-            items.append(merged)
-
-        groups = []
-        for entry in raw_groups:
-            if not isinstance(entry, dict) or not entry.get("id"):
-                continue
-            groups.append({
-                "id": entry["id"],
-                "name": entry.get("name") or "",
-                "note": entry.get("note") or "",
-                "collapsed": bool(entry.get("collapsed")),
-            })
-
-        known = {group["id"] for group in groups}
-        for item in items:
-            if item["group"] and item["group"] not in known:
-                item["group"] = UNGROUPED
-
         self.items = items
         self.groups = groups
-        if not self.items:
-            self._seed()
+        self._seen = _signature(self.path)
+
+    def _recover(self, error: str) -> None:
+        """Keep a damaged library instead of quietly restoring the defaults.
+
+        ``_load()`` used to fall back to ``_seed()`` on *any* read error, so a
+        truncated or half-written ``commands.json`` came back as the three
+        factory commands in their factory order - indistinguishable from
+        "my ordering was forgotten again" (R-135).
+        """
+        backup = ""
+        with contextlib.suppress(OSError):
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            backup = f"{self.path}.bad-{stamp}"
+            os.replace(self.path, backup)
+        self.load_warning = tr("cmd.load.broken",
+                               name=os.path.basename(self.path),
+                               backup=os.path.basename(backup) or "—",
+                               err=error)
+        self._seed()
+        self._seen = _signature(self.path)
 
     def _seed(self) -> None:
         group = new_group("常用 AT", "开机自检与基本信息")
@@ -196,15 +364,71 @@ class CommandStore(QObject):
             self.items.append(item)
 
     def save(self) -> None:
-        try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            tmp = f"{self.path}.tmp"
-            with open(tmp, "w", encoding="utf-8") as handle:
-                json.dump({"version": EXPORT_VERSION, "groups": self.groups,
-                           "items": self.items}, handle, ensure_ascii=False, indent=2)
-            os.replace(tmp, self.path)
-        except OSError:
-            pass
+        """Write the library, merging anything another window wrote meanwhile.
+
+        Two windows (or a window and the CLI) share one ``commands.json``.  This
+        used to serialise the whole in-memory list, so the window that loaded
+        the file first silently restored its own stale copy and undid the other
+        window's work - a dropped re-order reappeared after a restart exactly
+        this way (R-135).  The write is now a locked read-modify-write, and a
+        merge decides whose order wins.
+        """
+        with contextlib.suppress(OSError):
+            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        with _library_lock(self.path):
+            if _signature(self.path) != self._seen:
+                self._merge_with_disk()
+            payload = {"version": EXPORT_VERSION, "groups": self.groups,
+                       "items": self.items}
+            # A unique temp name per write: the fixed ``.tmp`` suffix let two
+            # processes write the same temp file and publish a half-written
+            # library (the other half of the "order forgotten" symptom).
+            handle, tmp = tempfile.mkstemp(prefix=".commands-", suffix=".tmp",
+                                           dir=os.path.dirname(self.path) or ".")
+            try:
+                with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                    json.dump(payload, stream, ensure_ascii=False, indent=2)
+                os.replace(tmp, self.path)
+            except OSError:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
+            self._seen = _signature(self.path)
+        self._order_dirty = False
+        self._removed.clear()
+
+    def _merge_with_disk(self) -> None:
+        """Fold changes another instance made into our snapshot before writing."""
+        disk_items, disk_groups, error = _read_library(self.path)
+        if error or disk_items is None:
+            return
+        known = {group["id"] for group in self.groups}
+        for group in disk_groups:
+            if group["id"] not in known:
+                self.groups.append(group)
+                known.add(group["id"])
+        ours = {item["id"] for item in self.items}
+        # Commands the other window added must survive, right after the
+        # neighbour they follow on disk.  Commands *we* deleted must not come
+        # back, which is what the tombstones are for.
+        for position, item in enumerate(disk_items):
+            if item["id"] in ours or item["id"] in self._removed:
+                continue
+            self.items.insert(self._neighbour_index(disk_items, position), item)
+            ours.add(item["id"])
+        if not self._order_dirty:
+            # Nobody re-ordered here, so the newest order on disk is the truth;
+            # this is what keeps a re-order from the other window alive.
+            rank = {item["id"]: index for index, item in enumerate(disk_items)}
+            self.items.sort(key=lambda item: rank.get(item["id"], len(rank)))
+
+    def _neighbour_index(self, disk_items: list[dict], position: int) -> int:
+        """Index in ``self.items`` that puts a disk-only command back in place."""
+        for offset in range(position - 1, -1, -1):
+            anchor = disk_items[offset]["id"]
+            for index, item in enumerate(self.items):
+                if item["id"] == anchor:
+                    return index + 1
+        return len(self.items)
 
     # ------------------------------------------------------------------ CRUD
     def add(self, texts: Iterable[str], patch: dict | None = None) -> list[dict]:
@@ -233,6 +457,9 @@ class CommandStore(QObject):
                 return
 
     def remove(self, item_id: str) -> None:
+        # Tombstone first: another window still holds this command in its own
+        # snapshot and would otherwise re-add it on the next merge (R-135).
+        self._removed.add(item_id)
         self.items = [item for item in self.items if item["id"] != item_id]
         self._commit()
 
@@ -303,11 +530,14 @@ class CommandStore(QObject):
     def remove_group(self, group_id: str, drop_commands: bool = False) -> None:
         self.groups = [group for group in self.groups if group["id"] != group_id]
         if drop_commands:
+            self._removed |= {item["id"] for item in self.items
+                              if item.get("group") == group_id}
             self.items = [item for item in self.items if item.get("group") != group_id]
         else:
             for item in self.items:
                 if item.get("group") == group_id:
                     item["group"] = UNGROUPED
+        self._order_dirty = True
         self._commit()
 
     def move_to_group(self, item_id: str, group_id: str) -> None:
@@ -336,10 +566,60 @@ class CommandStore(QObject):
             self._commit()
         return moved
 
+    def reorder(self, item_ids, group_id: str, index: int = -1) -> int:
+        """Move commands into ``group_id`` at position ``index`` (R-130).
+
+        A drag-and-drop is a re-group **and** a re-order at the same time, which
+        ``move_many()`` cannot express: it only rewrites ``group`` and leaves the
+        item where it was in ``items``.  Calling it and then shuffling the list
+        would write the library twice and leave a moment where the dropped
+        command sits at its old place inside the new group.
+
+        ``index`` counts the commands already in the target bucket (without the
+        dragged ones); a negative or too-large index appends.  Display order
+        between groups comes from ``self.groups``, so only the order *inside*
+        the target bucket has to be right here.
+        """
+        wanted = {str(item_id) for item_id in item_ids}
+        moving = [item for item in self.items if item["id"] in wanted]
+        if not moving:
+            return 0
+        target = group_id or UNGROUPED
+        rest = [item for item in self.items if item["id"] not in wanted]
+        bucket = [item["id"] for item in rest
+                  if (item.get("group") or UNGROUPED) == target]
+        # Insert before the anchor command, or after the last one when the drop
+        # landed past the end (or the bucket is empty).
+        if bucket and 0 <= index < len(bucket):
+            anchor = bucket[index]
+            position = next(pos for pos, item in enumerate(rest)
+                            if item["id"] == anchor)
+        elif bucket:
+            anchor = bucket[-1]
+            position = next(pos for pos, item in enumerate(rest)
+                            if item["id"] == anchor) + 1
+        else:
+            position = len(rest)
+        regrouped = any((item.get("group") or UNGROUPED) != target
+                        for item in moving)
+        for item in moving:
+            item["group"] = target
+        rest[position:position] = moving
+        order_changed = [item["id"] for item in self.items] != [
+            item["id"] for item in rest]
+        self.items = rest
+        if regrouped or order_changed:
+            # This instance is the one that decided the order, so its snapshot
+            # must win over the copy on disk (R-135 / R-130).
+            self._order_dirty = True
+            self._commit()
+        return len(moving)
+
     def remove_many(self, item_ids) -> int:
         """Delete several commands at once (R-092)."""
         wanted = set(item_ids)
         before = len(self.items)
+        self._removed |= wanted
         self.items = [item for item in self.items if item["id"] not in wanted]
         removed = before - len(self.items)
         if removed:
@@ -429,9 +709,42 @@ class CommandStore(QObject):
         return [item for item in self.items if item.get("enabled", False)]
 
     def split_lines(self, raw: str) -> list[str]:
-        out = []
+        """Command texts of a pasted block, one per line (comments stripped)."""
+        return [text for text, _note in self.split_entries(raw)]
+
+    def split_entries(self, raw: str) -> list[tuple[str, str]]:
+        """``[(command, note)]`` for a pasted block (R-128).
+
+        A line whose text after the cut-off is empty - a pure ``# comment`` -
+        creates nothing, so a paste can carry explanations between commands.
+        """
+        out: list[tuple[str, str]] = []
         for line in raw.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-            stripped = line.strip()
-            if stripped and not stripped.startswith("#"):
-                out.append(stripped)
+            text, note = split_comment(line)
+            if text:
+                out.append((text, note))
         return out
+
+    def add_entries(self, entries: Iterable[tuple[str, str]],
+                    patch: dict | None = None) -> list[dict]:
+        """Add ``(text, note)`` pairs, one note per command (R-128).
+
+        ``add()`` applies a single shared patch, so it cannot express "this
+        line's tail is this command's note".  Everything else - the group patch
+        and the unticked default - behaves exactly like ``add()``.
+        """
+        added: list[dict] = []
+        for text, note in entries:
+            if not text:
+                continue
+            item = _defaults()
+            item["text"] = text
+            if note:
+                item["note"] = note
+            if patch:
+                item.update(patch)
+            self.items.append(item)
+            added.append(item)
+        if added:
+            self._commit()
+        return added

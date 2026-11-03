@@ -25,7 +25,17 @@ from PySide6.QtCore import (
     Qt,
     QTimer,
 )
-from PySide6.QtGui import QBrush, QColor, QIcon, QIntValidator, QLinearGradient, QPainter, QPen
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QGuiApplication,
+    QIcon,
+    QImage,
+    QIntValidator,
+    QLinearGradient,
+    QPainter,
+    QPen,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -167,13 +177,92 @@ class Aurora(QWidget):
     title bar and a rounded bottom, which looked unfinished (R-044).  When the
     user picks a wallpaper it is scaled to cover and then veiled, so captions
     that sit straight on the page stay readable (R-070).
+
+    The page also paints the window's own 1 px dark edge (R-138) and the soft
+    drop shadow just inside it (R-139).  The window is frameless and translucent,
+    so without them the pale backdrop simply faded into a white desktop and the
+    shape of the window was impossible to read.
     """
 
+    def page_rect(self) -> QRect:
+        """The pale plate: the widget minus the shadow ring (R-139)."""
+        inset = int(getattr(self, "shadow_px", theme.WINDOW_SHADOW_PX))
+        if inset <= 0:
+            return self.rect()
+        page = self.rect().adjusted(inset, inset, -inset, -inset)
+        return page if page.isValid() else self.rect()
+
     def paintEvent(self, event) -> None:
+        # ``end()`` in a ``finally`` is not cosmetic: if anything below raises
+        # while the painter is still active, Qt destroys the QPaintDevice with
+        # a live painter attached and the process dies with
+        # ``QPaintDevice: Cannot destroy paint device that is being painted``
+        # instead of showing a traceback (L-163).
         painter = QPainter(self)
-        painter.setPen(Qt.NoPen)
-        target = self.rect()
-        painter.fillRect(target, QColor(theme.BG))
+        try:
+            painter.setPen(Qt.NoPen)
+            page = self.page_rect()
+            if not page.contains(self.rect().center()):
+                page = self.rect()
+            if page != self.rect():
+                self._paint_shadow(painter, page)
+            painter.fillRect(page, QColor(theme.BG))
+            self._paint_wallpaper(painter, page)
+            self._paint_edge(painter, page)
+        finally:
+            painter.end()
+
+    def _paint_shadow(self, painter: QPainter, page) -> None:
+        """Soft drop shadow under the whole shell (R-139).
+
+        Painted, not a ``QGraphicsDropShadowEffect``: an effect on the central
+        widget of a translucent top-level window is not composited, and a real
+        DWM shadow is unavailable because the window carries
+        ``WA_TranslucentBackground``.  Filled rounded rects are stacked from the
+        outside in, so a pixel's darkness is proportional to how many rings
+        reach it - that reads as a blur instead of a hard band, and it is the
+        same trick the tooltip card uses.
+        """
+        steps = theme.WINDOW_SHADOW_PX
+        ink = QColor(theme.WINDOW_SHADOW)
+        if steps <= 0 or not ink.isValid():
+            return
+        image = self._shadow_image(page)
+        if image is not None:
+            painter.drawImage(0, 0, image)
+
+    def _shadow_image(self, page):
+        """Cache the ring bitmap: a window repaint must not re-blend 14 rings."""
+        key = (self.width(), self.height(), page.left(), page.top(),
+               theme.WINDOW_SHADOW_PX, theme.WINDOW_SHADOW_ALPHA,
+               theme.WINDOW_SHADOW)
+        cached = getattr(self, "_shadow_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        steps = theme.WINDOW_SHADOW_PX
+        ink = QColor(theme.WINDOW_SHADOW)
+        image = QImage(max(1, self.width()), max(1, self.height()),
+                       QImage.Format_ARGB32_Premultiplied)
+        image.fill(Qt.transparent)
+        painter = QPainter(image)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(Qt.NoPen)
+            # No vertical offset: ``_apply_window_shadow`` reserves exactly
+            # ``WINDOW_SHADOW_PX`` on every side, so a downward-biased ring would
+            # be clipped at the bottom and leave a transparent band at the top.
+            base = QRectF(page)
+            for step in range(steps, 0, -1):
+                ink.setAlpha(theme.WINDOW_SHADOW_ALPHA)
+                painter.setBrush(QBrush(ink))
+                painter.drawRoundedRect(base.adjusted(-step, -step, step, step),
+                                        step, step)
+        finally:
+            painter.end()
+        self._shadow_cache = (key, image)
+        return image
+
+    def _paint_wallpaper(self, painter: QPainter, target) -> None:
         pixmap = theme.wallpaper_pixmap()
         if pixmap is None or pixmap.isNull():
             return
@@ -187,6 +276,32 @@ class Aurora(QWidget):
         # frosted glass on top of it; the text that sits straight on the page
         # (the status strip) additionally gets its own plate (R-077).
         painter.fillRect(target, QColor(255, 255, 255, theme.PAGE_VEIL))
+
+    def _paint_edge(self, painter: QPainter, target) -> None:
+        """Draw the window outline *inside* the page, one pixel wide.
+
+        Painted instead of styled: ``QWidget#Root`` carries no border of its own,
+        and a QSS border would eat into the layout margins the content relies
+        on.  Half-pixel offsets keep the line crisp on a 1 px pen.
+
+        The rect is built from ``target.topLeft()``, not from (0, 0): with the
+        shadow ring the page no longer starts at the widget origin, and an
+        absolute rect drew the outline *outside* the page - right on top of the
+        shadow (L-161).
+        """
+        width = theme.WINDOW_EDGE_PX
+        if width <= 0:
+            return
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        ink = QColor(theme.WINDOW_EDGE)
+        ink.setAlpha(theme.WINDOW_EDGE_ALPHA)
+        pen = QPen(ink, width)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        inset = width / 2.0
+        painter.drawRect(QRectF(target.left() + inset, target.top() + inset,
+                                target.width() - width,
+                                target.height() - width))
 
 
 class BrandMark(QWidget):
@@ -466,17 +581,40 @@ class TitleBar(GlassFrame):
         self.sync_max_button()
 
     # -- window drag -------------------------------------------------------
+    #: How close to the top of the screen the pointer must be for the window to
+    #: snap to maximized - the same few pixels Windows uses (R-140).
+    SNAP_EDGE = 2
+    #: Distance the pointer must be below the top of the screen before a
+    #: maximized window may be restored.  Without it the snap that just happened
+    #: would undo itself on the very next mouse move.
+    SNAP_RELEASE = 40
+
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             self._drag = (event.globalPosition().toPoint()
                           - self.window_ref.frameGeometry().topLeft())
 
     def mouseMoveEvent(self, event) -> None:
-        if self._drag is not None and event.buttons() & Qt.LeftButton:
-            if self.window_ref.isMaximized():
-                self.window_ref.showNormal()
-                self._drag = QPoint(self.window_ref.width() // 2, 30)
-            self.window_ref.move(event.globalPosition().toPoint() - self._drag)
+        if self._drag is None or not (event.buttons() & Qt.LeftButton):
+            return
+        window = self.window_ref
+        cursor = event.globalPosition().toPoint()
+        top = self._snap_top(cursor)
+        # "Far enough from the top edge that a restore/snap is unambiguous."
+        released = top is None or cursor.y() > top + self.SNAP_RELEASE
+
+        if window.isMaximized() or window.isFullScreen():
+            # Maximized: there is nothing to move.  The gesture only becomes a
+            # restore once the pointer has travelled down out of the top band,
+            # which is exactly how Windows behaves and also stops the snap we
+            # just performed from immediately undoing itself (R-140).
+            if released:
+                self._restore_from_max(cursor)
+            return
+        if top is not None and cursor.y() <= top + self.SNAP_EDGE:
+            self._snap_to_max(cursor)
+            return
+        window.move(cursor - self._drag)
 
     def mouseReleaseEvent(self, event) -> None:
         self._drag = None
@@ -485,6 +623,61 @@ class TitleBar(GlassFrame):
     def mouseDoubleClickEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             self.window_ref.toggle_maximize()
+
+    # -- snap helpers ------------------------------------------------------
+    def _snap_top(self, cursor: QPoint) -> int | None:
+        """Top edge of the available area of the screen under the pointer.
+
+        The *available* rect, not ``geometry()``: the taskbar may sit at the top,
+        and maximizing must not put the title bar underneath it.
+        """
+        screen = QGuiApplication.screenAt(cursor) or self.window_ref.screen()
+        if screen is None:
+            return None
+        return screen.availableGeometry().top()
+
+    def _snap_to_max(self, cursor: QPoint) -> None:
+        """Pointer reached the top of the screen: maximize (Aero Snap, R-140)."""
+        window = self.window_ref
+        # ``showMaximized`` is the same call ``toggle_maximize`` makes, so
+        # ``changeEvent`` still syncs the button glyph and the shadow ring.
+        window.showMaximized()
+        # Keep the grab point inside the title bar, so dragging back down picks
+        # the window up where the user is holding it.
+        grab_y = self._drag.y() if self._drag is not None else 20
+        self._drag = QPoint(window.width() // 2,
+                            max(6, min(grab_y, self._title_height())))
+
+    def _restore_from_max(self, cursor: QPoint) -> None:
+        """Restore a maximized window *under the pointer* (R-140).
+
+        The horizontal position is kept as a ratio of the screen, so the title
+        bar lands where the user is already holding it instead of the window
+        teleporting to a corner - the old code jumped to a hard-coded 50 % /
+        30 px grab point, which read as "the window lost my mouse".
+        """
+        window = self.window_ref
+        grab_y = self._drag.y() if self._drag is not None else 20
+        screen = QGuiApplication.screenAt(cursor) or window.screen()
+        ratio = 0.5
+        if screen is not None:
+            area = screen.availableGeometry()
+            if area.width() > 0:
+                ratio = (cursor.x() - area.x()) / float(area.width())
+        ratio = max(0.0, min(1.0, ratio))
+        window.showNormal()
+        width = max(1, window.width())
+        grab_x = int(width * ratio)
+        grab_y = max(6, min(grab_y, self._title_height()))
+        window.move(cursor.x() - grab_x, cursor.y() - grab_y)
+        self._drag = QPoint(grab_x, grab_y)
+
+    def _title_height(self) -> int:
+        """Height of the bar being dragged, so the grab point stays on it."""
+        # ``self`` *is* the title bar - reaching for ``window_ref.titlebar``
+        # would work too, but reading the own geometry cannot go stale when the
+        # window is rebuilt (L-161).
+        return max(12, self.height() - 6)
 
 
 class OmniWindow(QMainWindow):
@@ -591,7 +784,8 @@ class OmniWindow(QMainWindow):
         central.setObjectName("Root")
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(10, 8, 10, 8)
+        self._root_layout = root
+        self._apply_window_shadow()
         root.setSpacing(10)
 
         self.titlebar = TitleBar(self)
@@ -1155,7 +1349,8 @@ class OmniWindow(QMainWindow):
 
     def _on_keep_awake(self, enabled: bool) -> None:
         accepted = self._apply_keep_awake(enabled)
-        self._save_settings()
+        # No ``_save_settings()`` here: the switch is not remembered (R-062), so
+        # writing the whole INI just to store nothing was pure disk churn.
         if enabled and not accepted:
             # Never pretend it worked: a silent no-op would look like a bug.
             self.notify(tr("rail.awake.failed"), "warn")
@@ -1204,7 +1399,14 @@ class OmniWindow(QMainWindow):
         self.row_ctrl.setChecked(s.value("display/ctrl", "0") == "1")
         self.row_echo.setChecked(s.value("display/echo", "1") == "1")
         self.row_scroll.setChecked(s.value("display/scroll", "1") == "1")
-        self.row_awake.setChecked(s.value("display/awake", "0") == "1")
+        # 保持屏幕常亮 is **never** restored (R-062, revised 2026-10-30): it is
+        # applied for the current session only.  Remembering it meant a machine
+        # that once had it on never slept again after a restart, with the switch
+        # hidden behind a collapsed rail.
+        self.row_awake.setChecked(False)
+        if s.contains("display/awake"):
+            # Purge the value old builds wrote, or downgrading would resurrect it.
+            s.remove("display/awake")
         self.log.show_ts = self.row_ts.isChecked()
         self.log.autoscroll = self.row_scroll.isChecked()
         # Enter inserts a line break unless the user turned 回车发送 on
@@ -1236,7 +1438,9 @@ class OmniWindow(QMainWindow):
         s.setValue("display/ctrl", "1" if self.row_ctrl.isChecked() else "0")
         s.setValue("display/echo", "1" if self.row_echo.isChecked() else "0")
         s.setValue("display/scroll", "1" if self.row_scroll.isChecked() else "0")
-        s.setValue("display/awake", "1" if self.row_awake.isChecked() else "0")
+        # ``display/awake`` is deliberately absent: R-062 says the switch starts
+        # off in every session, so there is nothing to save.
+        s.remove("display/awake")
         s.setValue("display/enter_send", "1" if self.send_panel.enter_sends() else "0")
         # A JSON string, not a QStringList: the INI writer would otherwise store
         # a comma-joined value that cannot carry a comma inside a command.
@@ -2777,12 +2981,45 @@ class OmniWindow(QMainWindow):
         return {"ok": True}
 
     # -------------------------------------------------------------- window
+    def window_shadow_px(self) -> int:
+        """Shadow ring thickness for the current window state (R-139).
+
+        Zero while maximised: the ring would waste screen space *and* let the
+        desktop show through a transparent band along all four edges, because a
+        maximized window covers the whole screen.
+        """
+        if self.isMaximized() or self.isFullScreen():
+            return 0
+        return max(0, int(theme.WINDOW_SHADOW_PX))
+
+    def _apply_window_shadow(self) -> None:
+        """Size the page margins so the visible padding is unchanged (R-139).
+
+        The ring is carved *out of* the existing margins instead of being added
+        to them - otherwise the title bar would move 14 px away from every window
+        edge, which reads as "the window grew a fat bezel".
+        """
+        layout = getattr(self, "_root_layout", None)
+        central = self.centralWidget()
+        if layout is not None:
+            base = self._SHADOW_BASE_MARGINS
+            ring = self.window_shadow_px()
+            layout.setContentsMargins(base[0] + ring, base[1] + ring,
+                                      base[2] + ring, base[3] + ring)
+        if isinstance(central, Aurora):
+            central.shadow_px = self.window_shadow_px()
+            central.update()
+
+    #: Visible padding of the page, *before* the shadow ring is added.
+    _SHADOW_BASE_MARGINS = (10, 8, 10, 8)
+
     def toggle_maximize(self) -> None:
         if self.isMaximized():
             self.showNormal()
         else:
             self.showMaximized()
         self.titlebar.sync_max_button()
+        self._apply_window_shadow()
 
     # ------------------------------------------------------- window motion
     #: A translucent frameless window gets no DWM minimize animation, so the
@@ -2969,6 +3206,11 @@ class OmniWindow(QMainWindow):
             return
         if hasattr(self, "titlebar"):
             self.titlebar.sync_max_button()
+        # Maximising must drop the shadow ring and restoring must bring it back
+        # (R-139).  Done here, not only in ``toggle_maximize``, because Win+Up,
+        # Aero Snap and double-click all change the state behind our back.
+        if hasattr(self, "_root_layout"):
+            self._apply_window_shadow()
         if self.windowState() & Qt.WindowMinimized:
             self._was_minimized = True
             return

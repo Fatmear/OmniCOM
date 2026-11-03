@@ -1,16 +1,21 @@
 # Current handoff
-Updated: 2026-10-30 (v1.1.4: CLI contract, UTF-8, port lock, batch primitives)
+Updated: 2026-10-31 (v1.1.4 third batch: window drop shadow, Aero Snap on the
+title bar, group gap restored)
 
-Current objective: v1.1.4 hardens the **CLI as an agent-facing interface**.  Every call
-now writes exactly one JSON document (a failed `--expect` used to print the result *and*
-an error document, so `json.loads(stdout)` failed with `Extra data: line 2`), `ok` and
-the exit code carry the same verdict, stdout/stderr are forced to UTF-8, concurrent
-calls on one port queue on a system file lock, and `--settle` / `--ok-if-silent` /
-`--repeat` / `--ports` close the "no marker to wait for" and "0.5 Hz polling is all
-startup cost" gaps.  `CommandStore` now starts every new command **unticked** (R-127),
-so 依次发送 only fires what the user ticked.  Still true from 1.1.3: self-update,
+Current objective: v1.1.4 第三批（三条反馈，全部落地并验证）。① **描边外侧再加一圈柔和阴影**
+（R-139）：8 px 渐变环，由外向内叠加圆角矩形构成，最大化/全屏时自动收掉。② **标题栏支持系统
+吸附手势**（R-140）：拖到显示器顶部即最大化，最大化状态下往下拖（40 px 迟滞）解除最大并落到
+鼠标下方，多屏按鼠标所在屏计算。③ **两个展开分组之间空隙太大**（R-141）：删掉上一批塞进分组
+正文末尾的冗余拖放条，实测组间距回到 6 px；列表末尾那条拖出目标的空投条**必须保留**。
+第二批的成果仍然有效：命令字段名「命令 / Command」、拖动不显示提示文字、
+按一次 ↑ 回到上一条、命令顺序记忆（文件锁 + 唯一临时文件 + 读改写合并）、
+按范围批量选择（全部 / 单组 / 多组）、分组标题上的垃圾桶、窗口四边 1 px 深色描边。
+第一批的成果仍然有效：CLI 一次调用只写一个 JSON 文档、UTF-8 流、端口锁、
+`--settle`/`--repeat`/`--ports`、新命令默认不勾选、`#` 备注粘贴、
+**按住命令拖动改分组与排序**、屏幕常亮启动即为关、发送后输入框不清空。
+Still true from 1.1.3: self-update,
 offline local package, instant restore, one-button file send (R-107..R-121).
-send panel.  A window that is idle asks the GitHub release API once, in the
+A window that is idle asks the GitHub release API once, in the
 background; a newer release lights a red dot on the menu button, can be downloaded
 and staged, and the swap runs **before Qt starts** on the next launch without ever
 touching `omnicom-data/` (commands, captures, settings, plugins) - R-107/R-108.
@@ -20,17 +25,16 @@ text-only caption row, own tooltip, no-exe packaging, live search, launcher, kee
 (asset `OmniCOM-1.1.3-win64.zip`, 41 MB). 1.1.4 is source-complete and verified but
 **not released yet** - publish it with `python tools/make_dist.py --check --zip`
 then `python tools/make_release.py --publish --hide-old v1.1.3`.
-(asset `OmniCOM-1.1.3-win64.zip`, 41 MB). The 1.1.2 release was turned into a
-**draft**, so the release page shows only 1.1.3 - and that zip is the very file
-the in-app updater downloads and the 从升级包更新 button accepts. Publish the
-next one with `python tools/make_release.py --publish --hide-old v1.1.3`.
-Version **1.1.4**; **124 requirements / 584 checks** pass automated verification.
+The 1.1.2 release was turned into a **draft**, so the release page shows only 1.1.3 -
+and that zip is the very file the in-app updater downloads and the 从升级包更新 button
+accepts.
+Version **1.1.4**; **138 requirements / 671 checks** pass automated verification.
 Real hardware remains untested - never infer driver timings from DEMO runs.
 
 Source run: `start.cmd`, `python run.py`, `python run.py --demo` (虚拟串口).
 CLI: `python -m omnicom.cli …` (never spawned automatically).
-Package: `python tools/make_dist.py --check --zip` → `dist/OmniCOM/` +
-`dist/OmniCOM-1.1.3-win64.zip` (~99 MB folder / 41 MB zip, no installs needed).
+Package: `python tools/make_dist.py --check --zip` -> `dist/OmniCOM/` +
+`dist/OmniCOM-1.1.4-win64.zip` (~99 MB folder / 41 MB zip, no installs needed).
 Screenshots: `python tools/make_screenshots.py` -> `docs/images/*.png`.
 Manual: `omnicom/docs.py` (18 chapters) -> `python tools/make_readme.py`.
 
@@ -39,7 +43,7 @@ Constraint IDs to check before acting: R-019 (no self-built exe), R-017 (no sile
 R-012 (auto-scroll), R-024 (log line shape), R-033 (bilingual), R-035 (responsive),
 R-041 (instant collapse), R-049 (primary line + visible notes), R-054 (UI performance),
 R-055 (nonblocking lifecycle), R-063 (launcher two areas), R-066 (capture RX+TX),
-R-068 (equal side columns), R-069 (version 1.1.3), R-070 (capture folder),
+R-068 (equal side columns), R-069 (version 1.1.4), R-070 (capture folder),
 R-071 (accent + wallpaper), R-072 (live search append), R-076 (no extra console),
 R-077 (glass panes), R-078 (records folder), R-079 (note alignment), R-080 (1 s tooltip),
 R-081 (size budget + loss count), R-082 (text-only caption row), R-083 (self-contained
@@ -59,23 +63,66 @@ default, 300 max, clearable in Preferences), R-117 (port list shows 端口号 + 
 R-118 (rail 窗口 heading), R-119 (CLI binds to the window that owns the port; several
 windows / ports side by side; a closed port ends the CLI binding), R-120 (DTR/RTS off
 by default so opening a port never resets a board), R-121 (offline update from a local
-release zip).
+release zip), R-122..R-126 (one JSON document per call, UTF-8 streams, settle,
+port lock, batch sampling), R-127 (new commands start unticked), R-128 (paste
+`#` notes), R-129 (never write AT as the field name), R-130 (drag a command to change
+its group and its position), R-131 (the send box keeps its text; consecutive repeats
+are recorded once), R-132 (the field reads 命令 / Command), R-133 (no drag hint text),
+R-134 (one ↑ reaches the previous entry), R-135 (the order survives a restart),
+R-136 (batch scope: all commands / one group / several groups), R-137 (a trash button
+on the group header, same flow as the context menu), R-138 (1 px dark window border),
+R-139 (a soft drop shadow outside that border), R-140 (drag the title bar to the screen
+top to maximise, drag down while maximised to restore), R-141 (only one line of
+spacing between two expanded groups).
 Full list: `REQUIREMENTS.md`.
 
-Verified in repository (2026-10-30):
-- `python tools/acceptance_test.py` → **584 checks, 0 failures, 0 uncovered,
-  124 requirements, ALL REQUIREMENTS VERIFIED**.
-- GUI suite: **444/444**, including the update flow, instant restore, the one-button
-  file send, the long-line wrap and the unticked-by-default command row.
+Verified in repository (2026-10-31):
+- `python tools/acceptance_test.py` -> **671 checks, 0 failures, 0 uncovered,
+  138 requirements, ALL REQUIREMENTS VERIFIED**.
+- GUI suite: **515/515**, including the window-edge and shadow pixel sampling (10),
+  the Aero-Snap state machine (11), the group-gap measurement (6), the batch-range
+  matrix, the group trash wiring, the `#`-note paste, the whole drag/drop matrix,
+  the send-history revisions and the DEMO port.
+- `python -m ruff check .` → All checks passed; `tools/protocol_selftest.py` → 23/23;
+  `tools/contrast_audit.py` → 15/15 ≥ 4.5:1; READMEs regenerated from `docs.py`.
 - CLI contract probes: one document even on failure, exit code == `ok`, UTF-8
   stdout, `--settle 0.2` returning in 0.29 s instead of 3 s, a held lock failing
   after its timeout, and 5 samples in 0.86 s versus 2.22 s for 5 separate calls.
-- `python -m ruff check .` → All checks passed; `tools/protocol_selftest.py` → 23/23;
-  `tools/contrast_audit.py` → 15/15 ≥ 4.5:1; READMEs regenerated from `docs.py`.
 - `python tools/make_dist.py --check --zip` → packaged `--selftest` OK with the bundled
   runtime (`-E -s`), and a real windowed launch from the bundle stays up.
 
-## 本轮 (1.1.4) 内容
+## 本轮 (1.1.4 第三批) 内容
+
+| 反馈 | 根因 | 现在 |
+| --- | --- | --- |
+| 不仅要有黑边，还要有阴影 | 无边框 + `WA_TranslucentBackground` 的窗口，DWM 不画阴影；`QGraphicsDropShadowEffect` 在半透明顶层窗口上不合成 | `Aurora` 在自己的边距里抠出 8 px 环，由外向内叠 8 圈圆角矩形（越靠外越淡），位图按窗口尺寸缓存（R-139 / L-162 / L-163） |
+| 阴影一加，描边画到了阴影最外圈 | `_paint_edge()` 用绝对坐标 `(0,0)` 起算，页面被内缩后就不再是原点 | 改成从 `page_rect().topLeft()` 起算，描边回到页面边界上（L-161） |
+| 阴影取多厚？14 px 左栏就出滚动条 | 环是从窗口边距里让出来的，每 1 px 吃掉 2 px 内容高度 | 按真实样式表实测：14 → 滚 10、12 → 6、10 → 2、8 → 0，取 8 px 并把 alpha 提到 11（R-118 不回归 / L-162） |
+| 拖标题栏到屏幕顶部要最大，最大化时往下拖要还原 | 无边框窗口没有系统标题栏，Aero Snap 天然不生效 | `TitleBar` 自己做：`_snap_top()` 取鼠标所在屏可用区顶边，`_snap_to_max()` / `_restore_from_max()` 按鼠标横向比例重算抓取点，`SNAP_RELEASE=40` 迟滞（R-140） |
+| 两个展开分组之间空隙太大 | 上一批给分组正文末尾加了 `DropStrip`，多出 5 + 14 px | 移除组内那条（落在最后一行下半区即可插到组尾），保留列表末尾的拖出目标；实测 6 px（R-141 / L-166） |
+
+## 上一轮 (1.1.4 第二批：命名 / 拖动 / 历史 / 顺序 / 批量 / 垃圾桶 / 黑边) 内容
+
+| 反馈 | 根因 | 现在 |
+| --- | --- | --- |
+| 命令字段名 CMD 改成「命令」 | 缩写不像人话，中英混排检查也覆盖不到纯英文缩写 | `cmd.field` = `("命令", "Command")`，对话框与列表都用它（R-132） |
+| 别显示「拖到这里移出分组」 | 拖动目标条上写了常驻提示文字，挡视线 | `DropStrip` 平时无文字、无高度占位，只在悬停时画一条落地线（R-133） |
+| 框里是 333 时按一次 ↑ 就该是 222 | 输入框保留刚发出的内容（R-131），首次进入浏览正好落在同一条上 | `_browse()` 首次进入浏览时若 `history[-1]` 等于框内草稿，起点直接取 `len-1`（R-134） |
+| 顺序重启后要记住 | 固定名 `.tmp` + 各进程整份写回 + 读失败静默 `_seed()` | 文件锁 + `mkstemp` 唯一临时文件 + 读改写合并 + 墓碑 + 坏档改名并提示（R-135 / L-157） |
+| 批量选择要能只选组内 | 全选只认"所有行"，没有范围概念 | 新增「范围」下拉（全部 / 单组 / 已选 N 组）+ 分组三态勾选框，全不选永远清空（R-136 / L-158） |
+| 分组上也要有垃圾桶 | 分组标题只有编辑与展开 | `GroupHeader.trash_btn` 接到已有的 `remove_group()`，与右键完全等价（R-137） |
+| 软件边界要加黑边 | 无边框 + 半透明窗口在白色桌面上没有边界 | `Aurora._paint_edge()` 画 1 px 深色描边；token 必须是 `#RRGGBB`（`QColor` 不认 CSS `rgba()`）（R-138 / L-159） |
+
+## 更早 (1.1.4 第一批：拖动 / 常亮 / 发送框) 内容
+
+| 反馈 | 根因 | 现在 |
+| --- | --- | --- |
+| 想按住命令拖动来换分组、换顺序（像资源管理器拖文件） | 命令列表完全没有拖动：`QDrag` 全项目一次没用过；`CommandStore` 只有 `move_many()`，它只改 `group` 字段、不动 `items` 里的位置，「换组 + 落到某个位置」表达不出来；先删后加会写两次盘并让命令闪一下 | `CommandStore.reorder(ids, group, index)` 一次算好目标下标再单次提交（R-130）；UI 补齐完整链路：私有 MIME `DRAG_MIME`、行上半/下半 = 插到前/后、组标题 = 追加进该组、虚线空投条 = 移出分组、空白区 = 移出全部；`_in_drag` + `QTimer.singleShot(0, …)` 把重排推迟到 `QDrag.exec()` 的嵌套事件循环退出之后，否则 `rebuild()` 会把拖动源自己 `deleteLater()` |
+| 拖完松手不要顺手发一条命令 | `mouseReleaseEvent` 只要不是按下就发，拖动结束同样会补一次 | `_suppress_send` 只吃掉紧接的那一次松手，之后正常左键点击照常发送（R-095 不受影响） |
+| 上次开着「保持屏幕常亮」，重开又自己开了 | `_restore_settings()` 读 `display/awake`、`_save_settings()` 写回，等于永久记忆；开关藏在右栏，用户找不到原因 | 每次启动一律 `setChecked(False)`，不写该键，并 `s.remove("display/awake")` 清掉旧值（降级不会复活）；勾开关不再重写整个 INI（R-062 / L-156） |
+| 发送完输入框被清空，改一个字重发都得重新敲 | `emit_current()` 末尾 `self.input.clear()` | 不再清空；历史本来就会丢弃「与上一条相同」的重复，于是连续发送只记一条、A-B-A 正常记两条（R-131） |
+
+## 更早 (1.1.4 第零批：CLI 契约 / 命令库粘贴) 内容
 
 | 反馈 | 根因 | 现在 |
 | --- | --- | --- |
@@ -87,15 +134,17 @@ Verified in repository (2026-10-30):
 | 同一端口并发调用互相抢占 | 每次调用都是新进程、各开各的口 | `PortLock` 在 `<data>/locks/<port>.lock` 上做系统文件锁，`--lock-timeout` 控制排队（L-149 / R-125） |
 | 0.5 Hz 轮询开销远大于数据 | 每次 = 启动 Python + 开串口 | `--repeat N --interval T` 同进程只开一次口、每采样一行 JSON；`--ports A,B` 覆盖多口（实测 5 次 0.86 s vs 2.22 s，L-151 / R-126） |
 | 新建命令自动参与依次发送 | `_defaults()["enabled"]` 是 True | 默认 False，行上勾选框同步，`send_all()` 空集提示改为「还没有勾选任何命令」（R-127） |
+| 多行粘进带 `#` 注释的命令清单，注释也被当成命令正文 | 旧 `split_lines()` 只按行切，既不认注释也吃不掉 `#` 前那串对齐空格，于是每条命令尾巴都挂着 `# …` | `commands.split_comment()` 在**第一个未转义**的 `#` 处切开、两半各自 `strip()`，尾段写入该条的 `note`；整行注释不生成命令，正文真要 `#` 就写 `\#`（L-152 / R-128） |
+| 命令字段名写着「AT」 | 字面量 `"AT"` 直接写死在 `CommandDialog` 里，没有 i18n 键，而且暗示这个库只能放 AT | 改用 `tr("cmd.field")`，中英都是 **CMD**；`net sta enable` 这类控制台命令、AT 行、片段都算命令，AT 只是其中一种（R-129） |
 
-## 本轮 (1.1.2) 内容
+## 更早 (1.1.2) 内容
 
 | 反馈 | 根因 | 现在 |
 | --- | --- | --- |
 | 打包要能直接跑，不装依赖 | 只发 `OmniCOM.pyz`，目标机得自己装 Python/PySide6 | 包内自带 CPython embeddable 运行时 + 裁剪后的 PySide6/shiboken6/pyserial，`_pth` 钉死搜索路径 |
 | 工程里要有干净的 1.1.2 | 版本号写在 `__init__.py` | 版本、README、需求表、测试断言全部同步到 1.1.2 |
 
-## 本轮 (UI round, 2026-10-28)
+## 更早 (UI round, 2026-10-28) 内容
 
 | 反馈 | 根因 | 现在 |
 | --- | --- | --- |
@@ -166,3 +215,36 @@ Before: `.artifacts/ui-perf-before.json`; final: `.artifacts/ui-perf.json`.
 - 发送框的 ↑ 历史只在光标位于首行时触发，多行命令必须先能在框内移动光标（R-090）。
 - 测试套件必须用自己的数据目录（`OMNICOM_DATA_DIR` → `.artifacts/test-data/…`），
   绝不允许写进仓库的 `omnicom-data/`；否则真实命令库会被污染、套件也不再可重复（L-116）。
+- **`QCheckBox.stateChanged` 交出来的是纯 `int`，不是 `Qt.CheckState`**：`2 == Qt.Checked` 是
+  **False**，`int(Qt.Checked)` 还会抛 `TypeError`。凡自己接 `stateChanged`（而不是 `toggled`）
+  的地方必须先 `value = Qt.CheckState(state)` 再比较枚举，否则症状是「勾了没反应」且毫无报错（L-158）。
+- **`QColor` 不解析 CSS 的 `rgba(r, g, b, a)`**：它返回 `isValid() == False` 的无效颜色，Qt 于是
+  按纯黑画。QSS 里写 `rgba()` 合法，但交给 `QColor` 的令牌必须是 `#RRGGBB` + `setAlpha()`（L-159）。
+- 命令库落盘必须走 `_library_lock` + `tempfile.mkstemp` + `_merge_with_disk()`：固定名 `.tmp` 会在
+  两个窗口/进程同时保存时互相覆盖，整份写回会把别人排好的顺序压掉（L-157）。
+- 读失败不能静默 `_seed()` 重建：坏文件改名 `*.bad-<stamp>` 并设 `load_warning`，界面要提示一次。
+- 批量选择的范围是 `_scope`（`None` = 全部命令），"全不选"永远清空全部；判断行是否可见仍走
+  `row_reachable()`（折叠组里 `isHidden()` 为假，L-124）。分组垃圾桶必须接已有的
+  `remove_group()`，不要另做一个确认框（用户明确要求与右键一致，R-137）。
+- GUI 自测里同一控件连续多段断言时，**必须显式复位上一段留下的模式状态**（历史浏览位置、
+  拖动标记、批量模式），否则新功能会以「旧检查失败」的形式出现（L-160）。
+- 窗口阴影只能**画进窗口自己让出的边距环**里（`theme.WINDOW_SHADOW_PX` 由
+  `_apply_window_shadow()` 加进根布局边距）：半透明无边框顶层窗口既拿不到 DWM 阴影，
+  `QGraphicsDropShadowEffect` 也不会被合成（R-139）。**`WINDOW_SHADOW_PX` 不许再调大**——
+  每 1 px 吃掉 2 px 内容高度，超过 8 px 左栏就要出滚动条（R-118 / L-162）。
+- 最大化/全屏必须让阴影归零并在 `changeEvent` 里重新应用 `_apply_window_shadow()`，
+  否则屏幕边缘会留一条灰边。
+- 画布一旦被内缩过，所有"从原点到边"的绝对坐标都要重算：`_paint_edge()` 用绝对 `(0,0)`
+  时描边跑到了阴影最外层（L-161）。
+- `paintEvent` / 位图构建里的 `QPainter` 必须 `try: ... finally: painter.end()`：中途抛异常会
+  让进程以 `QPaintDevice: Cannot destroy paint device that is being painted` 直接死掉，
+  **连 traceback 都没有**，验收只会看到一句"整体未通过"（L-163）。
+- 无边框窗口没有系统标题栏，Aero Snap 得自己做：`TitleBar._snap_top()` 取**鼠标所在屏**的
+  `availableGeometry()`，往下拖要留 `SNAP_RELEASE`（40 px）迟滞，否则刚吸附就被解除（R-140）。
+- 不要再往分组正文末尾塞 `DropStrip`：落在最后一行下半区即可插到组尾，多出来的那条会把下一个
+  分组标题往下推 19 px（R-141）；列表末尾那条 `tail = DropStrip(UNGROUPED)` **必须保留**，
+  那是唯一的"拖出所有分组"落点（R-133）。
+- 任何"全域像素"断言在画布变动后都要重新确认采样范围（阴影把 R-020 的纯色占比打到 90.25%，
+  实际页面仍是 100% 纯色 —— 断言对象错了，不是产品坏了，L-165）。
+- 量布局尺寸的探针**必须复刻 `main()` 的字体 + Fusion 样式 + `app_stylesheet()`**，否则量的是
+  另一个程序的布局（无样式表的探针给出"任何厚度都不滚"的错误结论，L-164）。

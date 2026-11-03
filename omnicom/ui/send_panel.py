@@ -116,6 +116,12 @@ class SendInput(QPlainTextEdit):
                 return False
             self._hist_draft = self.toPlainText()
             self._hist_pos = len(self.history)
+            # The box deliberately keeps what was sent (R-131), so it very often
+            # already shows history[-1].  Re-showing that same text on the first
+            # ↑ looked like the key did nothing ("I am on 333, one ↑ must give me
+            # 222, it takes two"), so start one entry further back (R-134).
+            if self.history and self.history[-1] == self._hist_draft.strip("\r\n"):
+                self._hist_pos = len(self.history) - 1
         position = max(0, self._hist_pos + delta)
         if position >= len(self.history):
             # Read the draft *before* resetting: _reset_history() clears it, and
@@ -435,8 +441,11 @@ class SendPanel(GlassFrame):
         # command that can be edited and sent again.
         self.input.push_history(self.input.toPlainText())
         self.sendRequested.emit(payload, description)
-        if not self._timed.isActive():
-            self.input.clear()
+        # The box is **not** cleared (R-131): a serial console is used to poke
+        # the same command again and again, and having to retype it - or press
+        # ↑ - after every single send was the annoyance.  History still records
+        # it, but ``push_history()`` drops an immediate repeat, so hammering
+        # 发送 does not flood the list with 20 identical entries.
 
     # ------------------------------------------------------------ enter/send
     def set_enter_sends(self, enabled: bool) -> None:

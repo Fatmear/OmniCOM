@@ -239,7 +239,7 @@ defects in `project-context/LEDGER.md`.
 
 * Each line reads `[hh:mm:ss.mmm]RX←◇payload` (received) or `TX→◇payload` (sent). Switch the language and the two direction markers change with it.
 * *Auto-scroll to latest* always follows the newest line. Turn it off and a *back to latest* bubble appears while you read history.
-* *Keep screen awake* stops Windows from blanking or sleeping on idle - handy during a long capture. It is released automatically when OmniCOM closes.
+* *Keep screen awake* stops Windows from blanking or sleeping on idle - handy during a long capture. It is released automatically when OmniCOM closes, and always starts off: the switch is deliberately not remembered.
 * *Show \r \n and other control chars* applies to both directions, so you can see the line ending that was really sent.
 * *HEX view* prints 16 bytes per line: offset, hex, ASCII.
 * Clearing the log also resets the RX/TX counters in the title bar.
@@ -277,7 +277,9 @@ the bytes are printed as normal send lines and a progress bar tracks the transfe
 * Every command supports a note, line ending, delay, timed repeat and HEX.
 * Right-click a command to move groups. Use the export button at the top to select commands or a group to export.
 * The exported JSON can be imported on another machine - groups merge automatically.
-* Pasting several lines creates several commands.
+* The field is called Command, not AT: an entry may be an AT line, a bare console command such as `net sta enable`, or a fragment of either.
+* Hold a command to drag it, just like dragging a file in Explorer: drop it on another group's header or blank area to move it there, on the top or bottom half of a row to insert before or after it, or on the empty strip at the end of the list to take it out of every group. In batch mode dragging one row takes all picked commands with it.
+* Pasting several lines creates several commands. Text after `#` becomes that command's note and the padding before `#` is dropped; a line that holds only a comment creates nothing, so a paste can carry explanations. Write `\#` when a command really contains a hash.
 
 ### 7. Search
 
@@ -330,6 +332,7 @@ the bytes are printed as normal send lines and a progress bar tracks the transfe
 
 * `Ctrl+Enter` sends (with Enter-to-send off, Enter just inserts a newline, as does `Shift+Enter`).
 * `↑` / `↓` walk the send history while the cursor is on the first line; the history keeps 50 entries by default (5-300 in Preferences, clearable).
+* Sending does not clear the box - handy for repeating one command. An immediate repeat is recorded in the history once; sending something else in between records both.
 * `Ctrl+C` copies the selected log text (on the terminal page it is `Ctrl+Shift+C`, because `Ctrl+C` must send 0x03).
 * `Ctrl+wheel` over the log zooms the *log* font only; the rest of the UI keeps its size and the value is remembered.
 * Right-click in the log: copy / copy all / save / find / jump to newest.

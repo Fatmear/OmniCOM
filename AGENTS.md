@@ -178,3 +178,61 @@ Rules
   `LineHeightTypes` value, a custom `QPlainTextDocumentLayout` does nothing, and the only
   working trick (a document font larger than the stylesheet font) scales the glyphs too.
   Do not add a spacing preference without switching the widget to `QTextEdit` first.
+
+- **Reordering a command is one `CommandStore.reorder(ids, group, index)` call** (R-130),
+  never `move_many()` + a manual list shuffle: `move_many` only rewrites the `group`
+  field, so position and grouping would disagree halfway. `index` counts positions in the
+  **target bucket excluding the dragged items**; `-1` / out of range appends.
+- Command drag/drop uses the private MIME `DRAG_MIME` (`application/x-omnicom-command`),
+  never `text/plain` - a dropped `.txt` or dragged selection must not become a command move.
+- `QDrag.exec()` runs a **nested event loop**, and the drop handler is called inside it.
+  Committing there fires `changed` -> `rebuild()` -> `deleteLater()` on the rows, including
+  the drag source. Keep the `_in_drag` flag + `QTimer.singleShot(0, ...)` re-dispatch in
+  `CommandsPanel._apply_drop()`; without it the panel can be destroyed mid-drag.
+- The dropped-on **upper half inserts before, lower half inserts after** (`_landing_below`).
+  Leaving a group needs a target outside every bucket: the tail `DropStrip(UNGROUPED)` and
+  the `ListHost` blank area. Do not remove either, or "drag out of a group" has nowhere
+  to land.
+- A finished drag must not also **send** the command. `CommandRow._suppress_send` eats
+  exactly one release and is checked **before** the `Qt.LeftButton` guard (R-095/L-127
+  stay intact); the next real left click must still send.
+- 保持屏幕常亮 is **never restored** (R-062, revised 2026-10-30): `_restore_settings()` forces
+  `setChecked(False)` and `s.remove("display/awake")`, `_save_settings()` removes the key
+  instead of writing it. Do not reintroduce the read - a previously saved `1` silently
+  re-arms the switch, and it lives in a collapsed rail so nobody finds it (L-156).
+- `SendPanel.emit_current()` must **not** clear the input box (R-131). The consecutive
+  dedup lives in `SendInput.push_history()` (`history[-1] == entry` -> return), so an
+  immediate repeat records once while A-B-A records twice. Any test that asserted the box
+  is empty after sending (the old `"\n"` check) has to be re-based, not deleted.
+- The window shadow is **painted into a ring carved out of the window's own margins**
+  (R-139): `_apply_window_shadow()` adds `theme.WINDOW_SHADOW_PX` to every root-layout
+  margin, `Aurora.page_rect()` insets the page by the same amount, and
+  `_shadow_image()` stacks rounded rects outside-in. Never use
+  `QGraphicsDropShadowEffect` (not composited on a `WA_TranslucentBackground` top-level
+  window) and never expect a DWM shadow - the shell is frameless and translucent.
+  `window_shadow_px()` returns 0 while maximised/full screen so no grey ring is left at
+  the screen edge; `changeEvent` must re-apply it (`toggle_maximize()` alone is not enough,
+  the OS can maximise from a taskbar click).
+- **`WINDOW_SHADOW_PX` may not be raised without re-measuring the left rail** (L-162).
+  Every ring pixel costs two content pixels, and at 14 px the rail needed a scrollbar
+  (R-118). 8 px is the largest value with slack. Any probe that measures this must
+  replicate `main()`'s font loading + `setStyle("Fusion")` + `app_stylesheet()`, or it
+  measures a different layout (L-164).
+- `_paint_edge()` anchors on `page_rect()`, never on `(0, 0)`: once the page is inset by
+  the shadow ring, an absolute rect draws the outline on top of the shadow (L-161).
+  Every `QPainter` in a `paintEvent` or bitmap builder needs
+  `try: ... finally: painter.end()`, or one exception kills the process with
+  `QPaintDevice: Cannot destroy paint device that is being painted` and no traceback
+  (L-163).
+- Aero Snap is implemented by hand in `TitleBar` (R-140): `SNAP_EDGE` snaps to
+  `showMaximized()` when the cursor reaches the top of **the screen under the cursor**,
+  and `SNAP_RELEASE` (40 px) is the hysteresis before a maximised window is restored under
+  the cursor. Do not reduce `SNAP_RELEASE` or the window snaps back and forth.
+- Never append a `DropStrip` inside a group bucket (R-141): dropping on the lower half of
+  the last row already inserts at the group's end, and the extra 19 px pushed the next
+  group's header down. The trailing `tail = DropStrip(UNGROUPED)` in `list_layout` stays -
+  it is the only drop target that takes a command *out* of every group.
+- A whole-canvas pixel assertion has to be re-scoped whenever the canvas changes: the
+  R-020 "single flat colour" check now samples `page_rect()` only, because the ring outside
+  it is the shadow (L-165).
+
