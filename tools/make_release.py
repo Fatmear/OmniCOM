@@ -41,6 +41,9 @@ REPO = "Fatmear/OmniCOM"
 API = f"https://api.github.com/repos/{REPO}"
 UPLOADS = f"https://uploads.github.com/repos/{REPO}"
 UA = "OmniCOM-release-tool"
+#: Socket timeout for the asset upload.  A 182 MB zip over a slow uplink easily
+#: exceeds two minutes, and the socket deadline applies to every ``sendall()``.
+UPLOAD_TIMEOUT = 1800
 
 
 # ------------------------------------------------------------------ helpers
@@ -127,7 +130,15 @@ def find_release(tag: str) -> dict | None:
 
 def api(path: str, method: str = "GET", payload: dict | None = None,
         base: str = API, raw: bytes | None = None,
-        content_type: str = "application/json") -> tuple[int, dict]:
+        content_type: str = "application/json",
+        timeout: float = 120) -> tuple[int, dict]:
+    """One GitHub request.
+
+    ``timeout`` is a **socket-level** limit, so it also bounds how long a single
+    ``sendall()`` may block.  The 182 MB portable zip needs minutes on a slow
+    uplink and used to die with ``TimeoutError: The write operation timed out``
+    (L-247); uploads therefore pass a much larger value.
+    """
     url = f"{base}{path}"
     body = raw
     if payload is not None:
@@ -140,7 +151,7 @@ def api(path: str, method: str = "GET", payload: dict | None = None,
     if body is not None:
         request.add_header("Content-Type", content_type)
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             text = response.read().decode("utf-8", "replace")
             return response.status, (json.loads(text) if text.strip() else {})
     except urllib.error.HTTPError as error:
@@ -233,8 +244,9 @@ def main(argv: list[str] | None = None) -> int:
              f"{os.path.basename(asset)}"
     with open(asset, "rb") as handle:
         payload = handle.read()
+    print(f"上传 {len(payload) / 1048576:.0f} MB，慢速链路上需要几分钟…", flush=True)
     status, result = api("", "POST", payload=None, base=upload, raw=payload,
-                         content_type="application/zip")
+                         content_type="application/zip", timeout=UPLOAD_TIMEOUT)
     if status >= 400:
         if status == 422:
             print("同名资产已存在，删除后重传")
@@ -243,7 +255,8 @@ def main(argv: list[str] | None = None) -> int:
                 if item.get("name") == os.path.basename(asset):
                     api(f"/releases/assets/{item['id']}", "DELETE")
             status, result = api("", "POST", payload=None, base=upload,
-                                 raw=payload, content_type="application/zip")
+                                 raw=payload, content_type="application/zip",
+                                 timeout=UPLOAD_TIMEOUT)
         if status >= 400:
             print("上传失败：", status, result.get("message"))
             return 1

@@ -1,12 +1,19 @@
 # Current handoff
 
-Updated: 2026-11-06（1.1.5 发版收尾：R-181 插件商店空白小窗、R-182 看板控件读数测试、
-R-183 快捷启动插件首个测试、插件说明文档与实机图。全部闸门已过，待提交 / 打标签 / 发布）
+Updated: 2026-11-06（1.1.5 已提交 / 打标签 / 发布 / 插件商店资产已上线；
+发布工具超时修复与 `tools/publish_plugin_store.py` 待随收尾提交）
 
 ## Latest State
 
-- 版本 **1.1.5**（`omnicom/__init__.py`），本轮改动**全部未提交**，工作区即发布状态。
-- 本轮共 5 件事，全部闭环：
+- 版本 **1.1.5**（`omnicom/__init__.py`），发版已完成：
+  - 提交 `9f7d826`（58 文件，+11828 / -1244）已推送到 `origin/main`。
+  - 标签 `v1.1.5` 已从 `8d947ae` 重指到 `9f7d826` 并推送。
+  - Release **#436341099**：`draft=false`、`prerelease=false`，附件
+    `OmniCOM-1.1.5-win64.zip` 190 682 634 B，`state=uploaded`，`latest` = `v1.1.5`。
+  - 插件商店资产桶 **#436347358**（tag `plugin-store`，`make_latest=false`）：
+    `chart-1.1.2.zip` / `chart-1.1.0.zip` / `launcher-1.0.0.zip` / `catalog.json`
+    全部 `uploaded`，三个下载地址 `Range: bytes=0-3` 均返回 206。
+- 本轮共 8 件事，全部闭环（前 6 件已随 `9f7d826` 发布，后 2 件是发布侧修复与资产桶）：
 
 ### R-181 插件商店「检查更新」闪一个空白小窗（FIXED）
 
@@ -67,6 +74,23 @@ R-183 快捷启动插件首个测试、插件说明文档与实机图。全部�
   再把仓库里的 chart 打成 zip、用 `PluginStore().install()` 装进临时数据目录后才断言；
   卸载前写的 `plugin-data` 文件卸载后必须还在（用户数据不能被卸载删掉）。→ L-246。
 
+### 发布工具超时（L-247，`tools/make_release.py`）
+
+- `--publish` 上传 182 MB 时 `TimeoutError: The write operation timed out`，而 release 已建好。
+- 根因：`urlopen(..., timeout=120)` 是**套接字级**截止时间，每次 `sendall()` 都受它约束；
+  182 MB 在慢速上行里根本写不完 120 s。
+- 修法：`api()` 增加 `timeout` 形参，上传走 `UPLOAD_TIMEOUT = 1800`，并加一行 flush 的进度提示
+  （stdout 重定向到文件时是全缓冲，否则看起来像卡死）。重跑复用已有 release 并上传成功。
+
+### 插件商店资产桶（L-248，`tools/publish_plugin_store.py`）
+
+- `plugins/catalog.json` 里每个包的下载地址都指向 `releases/download/plugin-store/…`，
+  但那个 tag 根本没有 release ⇒ 用户点安装只会拿到 404。缺的是**资产**，不是代码。
+- 新工具 `tools/publish_plugin_store.py`：上传前逐个核对本地 zip 的 size/sha256 与目录声明，
+  有出入就拒绝上传；release 用 find-or-create 并始终 PATCH `make_latest=false`；
+  已存在且一致的资产直接跳过（幂等）；上传后逐个地址 `Range: bytes=0-3` 回读，
+  并断言 `latest` 没有被挪到资产桶（L-167）。`--check` 只核对不上传。
+
 ## Verification
 
 全部闸门绿（本轮顺序跑完，日志在 `.artifacts/`）：
@@ -95,14 +119,18 @@ python tools/make_dist.py --check --zip   # DIST=0；packaged selftest OK / PLUG
 - `tools/make_readme.py` / `make_pyz.py` — 插件章节、包内图片链接改写。
 - `docs/PLUGINS.md`（新）、`docs/images/plugin-*.png`（新）。
 - `CHANGELOG.md` — v1.1.5 段补上插件文档条目并更新验证数字（1082 / 174）。
-- `project-context/` — REQUIREMENTS R-182 / R-183、LEDGER L-245 / L-246。
+- `tools/make_release.py` — 上传超时（L-247）：`api(timeout=...)` + `UPLOAD_TIMEOUT = 1800`。
+- `tools/publish_plugin_store.py`（新）— 插件商店资产桶的幂等发布 + 自校验（L-248）。
+- `project-context/` — LEDGER 补 L-247 / L-248，L-188 由 OPEN 改为 FIXED-verified。
 
 ## Known open
 
-- **L-188 仍 OPEN**：公共插件仓库还没发布，默认 `plugins/catalog.json` 指向
-  `releases/download/plugin-store/` 这个 tag，但这批资产尚未上传。
-  `dist/plugin-store/chart-1.1.0.zip` **要留** —— 它是降级目标，上传资产时别漏。
-- `dist/` 里并存 1.1.3 / 1.1.4 历史 zip，仅供回溯；发出去的必须是本轮重打的 1.1.5。
+- 无阻塞项。`plugin-store` 资产桶已上线，后续**新版本插件**必须同步：
+  改 `plugins/catalog.json` → `python tools/make_plugins.py` 产出 `dist/plugin-store/*.zip`
+  → `python tools/publish_plugin_store.py`（会核对哈希再上传）。
+  **永远不要** `make_latest=true`、`--hide-old`，或把旧版本资产下架 ——
+  `chart-1.1.0.zip` 是降级目标，必须一直在。
+- `dist/` 里并存 1.1.3 / 1.1.4 历史 zip，仅供回溯；发出去的必须是 1.1.5。
 - **`docs/PLUGINS.md` 不要加进 R-142 的随包版本扫描**：它里面的 `"version": "1.1.2"` /
   `"1.1.0"` 是**插件版本**，不是应用版本，加进去必然误报。
 
@@ -122,10 +150,12 @@ python tools/make_dist.py --check --zip   # DIST=0；packaged selftest OK / PLUG
 
 ## Next up
 
-1. 富文本提交信息（背景/根因 + 核心改动 + 验证结果），`git add -A` → commit → push。
-2. `git tag -f v1.1.5`（本地旧标签指向 `8d947ae`，未推送、无对应 Release，可安全重指）
-   → `git push origin v1.1.5`。
-3. `python tools/make_release.py --check` → `--publish`；**绝不 `--hide-old`**；
-   发布后重读 `/releases/latest`，漂移就 `PATCH /releases/<id> {"make_latest":"true"}`（L-167）。
-4. 上传插件商店资产：`catalog.json`（chart 1.1.2 / 1.1.0、launcher 1.0.0）+ 三个 zip 到
-   `plugin-store` tag；**不要动** `dist/plugin-store/chart-1.1.0.zip`。
+1. 把本轮收尾改动（`tools/make_release.py` 超时、`tools/publish_plugin_store.py`、CHANGELOG 措辞、
+   `project-context/`）用富文本提交信息提交并推送。**不要再重指 `v1.1.5`** —— 它已经指向
+   已发布的 `9f7d826`，这次只是工具与台账改动。
+2. 下次发版顺序（本次已跑通，可直接照抄）：闸门全绿 → 版本号 + CHANGELOG →
+   `make_dist.py --check --zip` → 提交 → `git tag -f vX.Y.Z` → push 标签 →
+   `make_release.py --check` → `--publish` → 回读 `/releases/latest`；插件有变化再跑
+   `publish_plugin_store.py`。
+3. 每次发版后**重读** `/releases/latest`：GitHub 的 latest 是时间序不是语义序，
+   任何重发布 / 重传都会让它漂移，只能用 `PATCH /releases/<id> {"make_latest":"true"}` 拉回（L-167）。
