@@ -194,6 +194,25 @@ class PortSession:
     def stats(self) -> dict:
         return self.manager.stats()
 
+    # -- control lines (R-156) ----------------------------------------------
+    def lines(self) -> dict:
+        """Current DTR/RTS/CTS/DSR state of this session's port."""
+        return self.manager.control_lines()
+
+    def set_lines(self, patch: dict) -> dict:
+        """Raise/lower DTR/RTS live; returns what was applied and the new state."""
+        return self.manager.set_control_lines(patch)
+
+    def live_opts(self) -> dict:
+        """Options **currently applied to the port**, not the ones we opened with.
+
+        ``self.opts`` is the Open-time request and never changes, so reporting it
+        next to ``lines`` made ``opts.dtr`` disagree with ``lines.dtr`` right
+        after ``--line-dtr on`` - two facts about the same pin, one of them
+        stale (R-156).
+        """
+        return dict(self.manager.status().get("opts") or {})
+
     def take(self) -> bytes:
         data = bytes(self.buffer)
         self.buffer.clear()
@@ -250,6 +269,12 @@ class _WindowManager:
     def update_opts(self, patch: dict) -> dict:
         reply = self._session.request("opts", opts=dict(patch or {}))
         return reply.get("opts") or {}
+
+    def lines(self) -> dict:
+        return self._session.lines()
+
+    def set_lines(self, patch: dict) -> dict:
+        return self._session.set_lines(patch)
 
     def stats(self) -> dict:
         return self._session.stats()
@@ -359,6 +384,21 @@ class WindowSession:
 
     def stats(self) -> dict:
         return dict(self.request("stats").get("stats") or {})
+
+    # -- control lines (R-156) ----------------------------------------------
+    def lines(self) -> dict:
+        reply = self.request("lines")
+        return dict(reply.get("lines") or {})
+
+    def set_lines(self, patch: dict) -> dict:
+        reply = self.request("lines", set=dict(patch))
+        return {"applied": dict(reply.get("applied") or {}),
+                "lines": dict(reply.get("lines") or {}),
+                "error": str(reply.get("error") or "")}
+
+    def live_opts(self) -> dict:
+        """Options currently applied by the window (see ``PortSession.live_opts``)."""
+        return dict(self.state().get("opts") or {})
 
     def take(self) -> bytes:
         data = bytes(self.buffer)
@@ -514,6 +554,17 @@ def session_via(session) -> dict:
 
 
 def serial_opts(args) -> dict:
+    """Every serial setting the CLI can express, as one opts dict.
+
+    ``dsrdtr`` has been part of ``DEFAULT_OPTS`` / ``_normalise`` / ``_open_now``
+    all along but was never emitted here, so ``state`` reported a DSR/DTR
+    handshake the caller could not actually control (L-205).  A half-wired
+    option is worse than a missing one: the JSON says it is set.
+    """
+    dtr = bool(getattr(args, "dtr", False)) and not getattr(args, "no_dtr", False)
+    rts = bool(getattr(args, "rts", False)) and not getattr(args, "no_rts", False)
+    dsrdtr = bool(getattr(args, "dsrdtr", False)) \
+        and not getattr(args, "no_dsrdtr", False)
     return {
         "baudrate": int(args.baud),
         "bytesize": int(args.bytesize),
@@ -521,12 +572,38 @@ def serial_opts(args) -> dict:
         "parity": str(args.parity).upper()[:1],
         "rtscts": args.flow == "rtscts",
         "xonxoff": args.flow == "xonxoff",
-        "dtr": bool(getattr(args, "dtr", False))
-        and not getattr(args, "no_dtr", False),
-        "rts": bool(getattr(args, "rts", False))
-        and not getattr(args, "no_rts", False),
+        "dsrdtr": dsrdtr,
+        "dtr": dtr,
+        "rts": rts,
         "autoReconnect": not args.no_auto_reconnect,
     }
+
+
+#: ``--dtr on|off`` and friends.  ``store_true`` flags cannot express "turn it
+#: off on an already-open port", which is the whole point of live line control.
+LINE_CHOICES = ("on", "off", "1", "0", "true", "false", "high", "low")
+
+
+def line_value(text: str | None) -> bool | None:
+    """Parse an ``on/off``-style control-line argument (``None`` = leave alone)."""
+    if text is None:
+        return None
+    word = str(text).strip().lower()
+    if word in ("on", "1", "true", "high", "yes"):
+        return True
+    if word in ("off", "0", "false", "low", "no"):
+        return False
+    raise ValueError(f"控制线取值不合法：{text!r}（用 on / off）")
+
+
+def line_patch(args) -> dict:
+    """Collect the control-line changes requested on the command line."""
+    patch: dict = {}
+    for key in ("dtr", "rts"):
+        value = line_value(getattr(args, f"line_{key}", None))
+        if value is not None:
+            patch[key] = value
+    return patch
 
 
 def payload_from_args(data: str | None, hex_data: str | None,
@@ -1020,7 +1097,7 @@ def cmd_session(args) -> int:
         return fail("缺少 --port（或脚本里的 port）")
     opts = serial_opts(args)
     for key in ("baudrate", "bytesize", "stopbits", "parity", "dtr", "rts",
-                "rtscts", "xonxoff"):
+                "rtscts", "xonxoff", "dsrdtr"):
         if key in script:
             opts[key] = script[key]
 
@@ -1095,6 +1172,59 @@ def _run_step(session: PortSession, step: dict, args) -> dict:
         patch = dict(step["set"])
         session.manager.update_opts(patch)
         return {"step": "set", "ok": True, "applied": patch}
+
+    if "line" in step and isinstance(step["line"], dict):
+        # Explicit control-line verb (R-156): ``set`` reconfigures the port and
+        # may reopen it for framing changes, while ``line`` only moves DTR/RTS -
+        # the operation a reset sequence repeats, so it must stay cheap.
+        spec = step["line"]
+        unknown = sorted(key for key in spec if key not in ("dtr", "rts"))
+        if unknown:
+            # Filtering unknown keys silently made ``{"line": {"cts": true}}``
+            # report ok with an empty patch - a typo looked like a reset.
+            return {"step": "line", "ok": False,
+                    "error": f"控制线只能是 dtr / rts，收到：{', '.join(unknown)}"}
+        try:
+            patch = {key: line_value(value) for key, value in spec.items()}
+        except ValueError as exc:
+            return {"step": "line", "ok": False, "error": str(exc)}
+        patch = {key: value for key, value in patch.items() if value is not None}
+        if not patch:
+            return {"step": "line", "ok": False,
+                    "error": "line 步骤缺少 dtr / rts"}
+        result = session.set_lines(patch)
+        outcome = {"step": "line", "ok": not result.get("error"),
+                   "applied": result.get("applied") or {},
+                   "lines": result.get("lines") or {}}
+        if result.get("error"):
+            outcome["error"] = result["error"]
+        return outcome
+
+    if "lines" in step:
+        # Read-only: report what the device says about CTS/DSR right now.
+        return {"step": "lines", "ok": True, "lines": session.lines()}
+
+    if "pulse" in step and isinstance(step["pulse"], dict):
+        # A reset pulse is the reason this exists: DTR low -> wait -> high,
+        # answering the state after every edge so a failing edge is visible.
+        spec = step["pulse"]
+        key = str(spec.get("line") or "dtr").lower()
+        if key not in ("dtr", "rts"):
+            return {"step": "pulse", "ok": False,
+                    "error": f"不支持的控制线：{key}（用 dtr / rts）"}
+        low_ms = max(0.0, float(spec.get("low_ms", 120)))
+        edges: list[dict] = []
+        for level, wait_ms in ((False, low_ms), (True, 0.0)):
+            result = session.set_lines({key: level})
+            edges.append({"level": level, "lines": result.get("lines") or {}})
+            if result.get("error"):
+                return {"step": "pulse", "ok": False,
+                        "error": result["error"], "edges": edges}
+            if wait_ms:
+                time.sleep(wait_ms / 1000.0)
+        return {"step": "pulse", "ok": True, "line": key,
+                "low_ms": low_ms, "edges": edges,
+                "lines": edges[-1]["lines"]}
 
     if "send" in step or "send_hex" in step:
         try:
@@ -1307,6 +1437,80 @@ def cmd_stats(args) -> int:
     return _emit_window(reply, client)
 
 
+def cmd_lines(args) -> int:
+    """Read and/or drive the hardware control lines (R-156).
+
+    Goes through the same :func:`new_session` router as ``send``, so it works in
+    both modes: through the running window (the default, which also keeps the
+    two DTR/RTS switches in sync) or ``--direct`` when no window is running.
+    """
+    port = str(args.port or "").strip()
+    if not port:
+        return fail("缺少 --port")
+    try:
+        patch = line_patch(args)
+    except ValueError as exc:
+        return fail(str(exc))
+    session = new_session(args, port, serial_opts(args))
+    try:
+        session.open(args.open_timeout)
+        lines = session.lines()
+        applied: dict = {}
+        if patch:
+            result = session.set_lines(patch)
+            applied = result.get("applied") or {}
+            lines = result.get("lines") or lines
+            if result.get("error"):
+                return fail(result["error"], lines=lines, applied=applied,
+                            **session_via(session))
+        _emit({"ok": True, **session_via(session), "port": port,
+               "lines": lines, "applied": applied,
+               "opts": session.live_opts()})
+        return EXIT_OK
+    except (PortNotOpen, OSError) as exc:
+        return fail(f"串口错误：{exc}")
+    finally:
+        session.close()
+
+
+def cmd_reset(args) -> int:
+    """Pulse DTR (or RTS) to reset a board, then report the final state.
+
+    Boards wired like an Arduino/ESP devkit hold RESET on DTR (through a
+    capacitor), so "let an agent reboot the target" is a first-class need - and
+    it cannot be done with ``send``, because those bytes would land in the log as
+    traffic (R-156).
+    """
+    port = str(args.port or "").strip()
+    if not port:
+        return fail("缺少 --port")
+    key = str(args.line or "dtr").lower()
+    if key not in ("dtr", "rts"):
+        return fail(f"不支持的控制线：{key}（用 dtr / rts）")
+    low_ms = max(0.0, float(args.low_ms))
+    session = new_session(args, port, serial_opts(args))
+    edges: list[dict] = []
+    try:
+        session.open(args.open_timeout)
+        for level, wait_ms, label in ((False, low_ms, "low"), (True, 0.0, "high")):
+            result = session.set_lines({key: level})
+            if result.get("error"):
+                return fail(result["error"], edges=edges,
+                            **session_via(session))
+            edges.append({"edge": label, "level": level,
+                          "lines": result.get("lines") or {}})
+            if wait_ms:
+                time.sleep(wait_ms / 1000.0)
+        _emit({"ok": True, **session_via(session), "port": port,
+               "line": key, "low_ms": low_ms, "edges": edges,
+               "lines": edges[-1]["lines"]})
+        return EXIT_OK
+    except (PortNotOpen, OSError) as exc:
+        return fail(f"串口错误：{exc}")
+    finally:
+        session.close()
+
+
 # ------------------------------------------------------------------ selftest
 
 def cmd_selftest(args) -> int:
@@ -1329,13 +1533,34 @@ def cmd_selftest(args) -> int:
 
     # ---- layer 2: live DEMO port
     opts = {"baudrate": 115200, "bytesize": 8, "stopbits": 1, "parity": "N",
-            "rtscts": False, "xonxoff": False, "dtr": True, "rts": True,
-            "autoReconnect": True}
+            "rtscts": False, "xonxoff": False, "dsrdtr": False,
+            "dtr": True, "rts": True, "autoReconnect": True}
 
     session = PortSession(DEMO_PORT, opts)
     try:
         session.open()
         record("demo: 打开 DEMO 端口", session.manager.status().get("connected"))
+
+        # -- control lines (R-156): read, drive, and prove the value stuck.
+        lines = session.lines()
+        record("demo: 控制线可读",
+               {"dtr", "rts", "cts", "dsr"} <= set(lines),
+               lines)
+        record("demo: 打开时 DTR/RTS 为高",
+               lines.get("dtr") is True and lines.get("rts") is True, lines)
+        low = session.set_lines({"dtr": False, "rts": False})
+        record("demo: 拉低 DTR+RTS",
+               low["lines"].get("dtr") is False
+               and low["lines"].get("rts") is False,
+               low["lines"])
+        high = session.set_lines({"dtr": True})
+        record("demo: 只拉高 DTR，RTS 不动",
+               high["lines"].get("dtr") is True
+               and high["lines"].get("rts") is False,
+               high["lines"])
+        record("demo: 控制线不影响连通性",
+               session.manager.status().get("connected") is True)
+        session.set_lines({"dtr": True, "rts": True})
 
         session.write(b"AT\r\n")
         reply = session.read_for(1.5)
@@ -1441,6 +1666,16 @@ def build_parser() -> argparse.ArgumentParser:
                        help="保持 DTR 关闭（默认行为，兼容旧脚本）")
         p.add_argument("--no-rts", action="store_true",
                        help="保持 RTS 关闭（默认行为，兼容旧脚本）")
+        p.add_argument("--dsrdtr", action="store_true",
+                       help="启用 DSR/DTR 硬件握手（默认关闭）")
+        p.add_argument("--no-dsrdtr", action="store_true",
+                       help="保持 DSR/DTR 握手关闭（默认行为）")
+        p.add_argument("--line-dtr", dest="line_dtr", default=None,
+                       choices=list(LINE_CHOICES), metavar="on|off",
+                       help="就地拉高/拉低 DTR（不用 --dtr 那个开关）")
+        p.add_argument("--line-rts", dest="line_rts", default=None,
+                       choices=list(LINE_CHOICES), metavar="on|off",
+                       help="就地拉高/拉低 RTS")
         p.add_argument("--no-auto-reconnect", action="store_true", help="关闭拔插自动重连")
         p.add_argument("--open-timeout", type=float, default=6.0, help="打开超时秒数")
         p.add_argument("--direct", action="store_true",
@@ -1533,6 +1768,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_stats.add_argument("--reset", action="store_true", help="清零后再返回")
     add_window(p_stats, with_port=True)
     p_stats.set_defaults(func=cmd_stats)
+
+    p_lines = sub.add_parser(
+        "lines", help="读取/切换 DTR RTS CTS DSR 等控制线")
+    add_serial(p_lines)
+    p_lines.set_defaults(func=cmd_lines)
+
+    p_reset = sub.add_parser("reset", help="拉低再拉高 DTR/RTS，复位目标板")
+    add_serial(p_reset)
+    p_reset.add_argument("--line", default="dtr", choices=["dtr", "rts"],
+                         help="用哪根线做复位（默认 dtr）")
+    p_reset.add_argument("--low-ms", type=float, default=120.0,
+                         help="保持低电平的毫秒数（默认 120）")
+    p_reset.set_defaults(func=cmd_reset)
 
     p_mon = sub.add_parser("monitor", help="按行流式输出（NDJSON）")
     add_serial(p_mon)

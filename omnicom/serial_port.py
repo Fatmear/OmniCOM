@@ -63,6 +63,10 @@ def list_serial_ports() -> list[dict]:
             "serial": info.serial_number or "",
             "manufacturer": info.manufacturer or "",
             "product": info.product or "",
+            # USB topology (e.g. "1-5.3").  Only USB devices report it, but it
+            # is the one field that tells two identical adapters apart when the
+            # driver exposes no serial number (R-162).
+            "location": getattr(info, "location", None) or "",
         })
     ports.sort(key=lambda item: item["name"])
     return ports
@@ -91,6 +95,12 @@ class DemoDevice:
         self._tick = 0
         self.dtr = False
         self.rts = False
+        # Input lines as the DEMO device reports them: with no cable attached
+        # nothing raises CTS/DSR, which is what a real FTDI reports on a bare
+        # board.  Changeable so a test can prove a CTS-driven pause works
+        # without a loopback plug (R-156).
+        self.cts = False
+        self.dsr = False
         self.baudrate = 115200
         self.is_open = True
         self._stop = threading.Event()
@@ -219,6 +229,7 @@ class PortManager:
         self._reconnecting = False
         self._last_error: str | None = None
         self._retry_notice = 0.0
+        self._ambiguous_notice = 0.0
         self._opened_at = 0.0
 
         self.rx_bytes = 0
@@ -240,7 +251,66 @@ class PortManager:
                 "error": self._last_error,
                 "opts": dict(self._opts),
                 "exclusive": self._exclusive,
+                "lines": self.control_lines(),
             }
+
+    # ------------------------------------------------------- control lines
+    def control_lines(self) -> dict:
+        """Output lines we drive plus input lines the device reports.
+
+        ``dtr``/``rts`` are *ours* - they come from the options we applied, so
+        they are known even while the port is closed.  ``cts``/``dsr`` belong to
+        the device, so they are reported only while a handle is open, and a
+        driver that does not expose them reports ``None`` rather than ``False``:
+        "I cannot see this line" and "the line is low" are different facts and a
+        test tool must not confuse them (R-156).
+        """
+        with self._lock:
+            opts = dict(self._opts)
+            handle = self._ser
+        payload: dict = {
+            "dtr": bool(opts.get("dtr")),
+            "rts": bool(opts.get("rts")),
+            "cts": None,
+            "dsr": None,
+            "open": handle is not None,
+        }
+        if handle is not None:
+            for key in ("cts", "dsr"):
+                with contextlib.suppress(Exception):
+                    value = getattr(handle, key, None)
+                    if value is not None:
+                        payload[key] = bool(value)
+        return payload
+
+    def set_control_lines(self, patch: dict) -> dict:
+        """Raise/lower DTR and RTS without touching anything else.
+
+        Kept separate from :meth:`update_opts` because it is the one operation a
+        line-monitoring tool repeats: it must be instant, must not reopen the
+        port, and must never be silently dropped when the port is closed (the
+        value is remembered and applied on the next open) - R-156.
+        """
+        applied: dict = {}
+        for key in ("dtr", "rts"):
+            if key in patch and patch[key] is not None:
+                applied[key] = bool(patch[key])
+        if not applied:
+            return {"applied": {}, "lines": self.control_lines()}
+        with self._lock:
+            self._opts = _normalise({**self._opts, **applied})
+            handle = self._ser
+        failure = ""
+        if handle is not None:
+            for key, value in applied.items():
+                try:
+                    setattr(handle, key, value)
+                except Exception as exc:
+                    failure = f"{key.upper()} 设置失败：{exc}"
+                    self._emit({"t": "notice", "level": "warn", "text": failure})
+        self._emit_status()
+        return {"applied": applied, "lines": self.control_lines(),
+                "error": failure}
 
     def reset_stats(self) -> dict:
         """Zero the byte counters (the user cleared the log, not the wire)."""
@@ -274,7 +344,7 @@ class PortManager:
         identity = None
         for item in self._ports:
             if item["name"] == port:
-                identity = (item.get("serial") or "", item.get("vid"), item.get("pid"))
+                identity = _identity_of(item)
                 break
         with self._lock:
             self._generation += 1
@@ -463,6 +533,7 @@ class PortManager:
                             "serial": "DEMO-0001",
                             "manufacturer": "OmniCOM",
                             "product": "Virtual Demo Port",
+                            "location": "",
                         }]
                 signature = tuple(sorted((item["name"], item["hwid"]) for item in ports))
                 if signature != self._ports_sig:
@@ -474,7 +545,7 @@ class PortManager:
                     connected = self._ser is not None
                     auto = bool(self._opts.get("autoReconnect", True))
                 if want and not connected and auto:
-                    target = self._resolve_target(want, ports)
+                    target, refused = self._resolve_target(want, ports)
                     if target:
                         with self._lock:
                             if self._want != want or self._ser is not None:
@@ -486,6 +557,8 @@ class PortManager:
                             self._retry_notice = 0.0
                         else:
                             self._notify_retry_throttled()
+                    elif refused:
+                        self._notify_refused_throttled(want)
                 elif want and not connected:
                     with self._lock:
                         self._reconnecting = False
@@ -493,22 +566,60 @@ class PortManager:
                 pass
             time.sleep(0.4)
 
-    def _resolve_target(self, want: str, ports: list[dict]) -> str | None:
-        names = {item["name"] for item in ports}
-        if want in names:
-            return want
+    def _resolve_target(self, want: str, ports: list[dict]) -> tuple[str | None, bool]:
+        """Return ``(port to reopen, whether a look-alike was refused)``.
+
+        Auto-reconnect means *this device came back*, not *some port exists*
+        (R-162).  Reopening by name alone was harmless while the name survived,
+        but the old VID/PID tier happily attached to a **different** adapter of
+        the same model - the user watched the log fill with another board's
+        traffic after unplugging their own (L-222).  The tiers below therefore
+        go from the strongest evidence to the weakest, and stop as soon as the
+        evidence can no longer identify one physical device:
+
+        1. the same port name with a compatible identity;
+        2. the same USB serial number (the port number may have changed);
+        3. the same USB topology location (drivers that expose no serial);
+        4. a unique VID/PID when nothing better was ever known.
+
+        ``refused`` is true when ports of the same model were found but could
+        not be proven to be the original, so the caller can tell the user why
+        nothing happens instead of silently retrying forever.
+        """
         identity = self._identity
-        if not identity:
-            return None
-        serial_no, vid, pid = identity
-        for item in ports:
-            if serial_no and item.get("serial") == serial_no:
-                return item["name"]
-        if vid is not None:
+        serial_no, vid, pid, location = identity if identity else ("", None, None, "")
+        by_name = {item["name"]: item for item in ports}
+        candidate = by_name.get(want)
+        if candidate is not None and _identity_compatible(
+                identity, _identity_of(candidate)):
+            return want, False
+
+        if serial_no:
             for item in ports:
-                if item.get("vid") == vid and item.get("pid") == pid:
-                    return item["name"]
-        return None
+                if item.get("serial") == serial_no:
+                    return item["name"], False
+
+        if not serial_no and location:
+            for item in ports:
+                if item.get("location") == location:
+                    return item["name"], False
+
+        # Nothing but a model match is left.  It is only trustworthy when the
+        # original device never revealed anything better *and* exactly one such
+        # device is present: two identical dongles are indistinguishable.
+        ambiguous = False
+        if vid is not None and not serial_no and not location:
+            alike = [item for item in ports
+                     if item.get("vid") == vid and item.get("pid") == pid]
+            if len(alike) == 1:
+                return alike[0]["name"], False
+            ambiguous = bool(alike)
+        else:
+            alike = [item for item in ports
+                     if vid is not None and item.get("vid") == vid
+                     and item.get("pid") == pid]
+            ambiguous = bool(alike)
+        return None, ambiguous
 
     # ------------------------------------------------------------------ writes
     def write(self, data: bytes) -> int:
@@ -618,6 +729,39 @@ class PortManager:
             self._want = None
             self._reconnecting = False
         self._close_hardware(silent=True)
+
+
+def _identity_of(item: dict) -> tuple:
+    """A port's physical identity: ``(serial, vid, pid, location)``.
+
+    ``serial``, ``vid`` and ``pid`` were enough for one adapter but two boards of
+    the same model share VID/PID and drivers without a serial number report
+    nothing at all.  ``location`` is the USB topology path (``"1-5.3"``), which
+    stays with the socket rather than the device, so it is only used when the
+    serial number is unavailable (R-162).
+    """
+    return (str(item.get("serial") or ""), item.get("vid"), item.get("pid"),
+            str(item.get("location") or ""))
+
+
+def _identity_compatible(opened, found) -> bool:
+    """Can ``found`` be the same physical device that was opened?
+
+    ``opened`` is what we recorded at open time; ``None`` means we never knew
+    (the port was opened without an enumeration entry), in which case a
+    name match is all anyone can claim.
+    """
+    if opened is None:
+        return True
+    serial_no, vid, pid, location = opened
+    other_serial, other_vid, other_pid, other_location = found
+    if serial_no or other_serial:
+        return bool(serial_no) and serial_no == other_serial
+    if location or other_location:
+        return bool(location) and location == other_location
+    if vid is None:
+        return True
+    return vid == other_vid and pid == other_pid
 
 
 def _normalise(opts: dict) -> dict:
@@ -808,3 +952,19 @@ class Recorder:
         self._retry_notice = now
         self._emit({"t": "notice", "level": "warn",
                     "text": f"重连失败：{self._last_error}（仍在重试）"})
+
+    def _notify_refused_throttled(self, want: str) -> None:
+        """Explain why a reconnect stopped instead of grabbing a look-alike.
+
+        Same 4 s throttle as :meth:`_notify_retry_throttled`: this state can
+        last as long as the user's board stays unplugged (R-162).
+        """
+        now = time.time()
+        if now - self._ambiguous_notice < 4.0:
+            return
+        self._ambiguous_notice = now
+        self._emit({
+            "t": "notice", "level": "warn",
+            "text": (f"找不到 {want} 原来的设备（发现同型号的其他串口，但无法确认是同一台），"
+                     "已停止重连以免连错设备；插回原设备即可恢复"),
+        })

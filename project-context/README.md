@@ -1,11 +1,12 @@
 # Project brief
-Updated: 2026-10-27
+Updated: 2026-11-04
 
 Goal: **OmniCOM — All-in-One Embedded Serial Debugger**. A native Python (PySide6/Qt) desktop
 serial debugger with a liquid-glass look: lossless RX/TX, auto port detection + auto-reconnect,
 hex + millisecond timestamps, invisible-character display, collapsible right sidebar with an
-extension command list and multi-keyword search, pause-and-backfill printing, receive-to-file,
-and X/Y/ZMODEM transfers.
+extension command list and multi-keyword search (single-line sidebar, wrapped fullscreen), synchronized log scroll-follow
+switches, receive-to-file, X/Y/ZMODEM transfers, live ASCII charts and an independent plugin store
+with repository-hosted indexes and multiple catalog sources configured in Preferences.
 
 Read in order: REQUIREMENTS.md (binding) → LEDGER.md (already investigated; search it first) →
 HANDOFF.md (current) → DECISIONS.md (relevant entries).

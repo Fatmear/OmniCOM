@@ -7,6 +7,7 @@ GUI thread at high baud rates.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable
 from datetime import datetime
 
@@ -15,13 +16,22 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QKeySequence,
+    QTextBlockUserData,
     QTextCharFormat,
     QTextCursor,
+    QTextDocument,
     QTextOption,
 )
-from PySide6.QtWidgets import QApplication, QMenu, QPlainTextEdit, QWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QMenu,
+    QPlainTextDocumentLayout,
+    QPlainTextEdit,
+    QWidget,
+)
 
 from . import theme
+from .widgets import TailFollow
 
 # ---------------------------------------------------------------- buffering
 # The log is capped by *size*, not by a line count: 100 MB by default, chosen by
@@ -42,6 +52,34 @@ QT_BLOCK_CEILING = 2 * MAX_BLOCKS
 #: Trim down to this share of the budget, so trimming is rare instead of every
 #: append.  85 % of 100 MB is 15 MB of headroom.
 TRIM_TO = 0.85
+#: 清除窗口 may not block, whatever the buffer holds (R-168).
+#:
+#: ``QTextDocument.clear()`` - and every variant of it, including
+#: ``setPlainText("")``, a whole-document cursor removal and Qt's own
+#: ``maximumBlockCount`` shrink - is linear in the *block* count: measured ~1 us
+#: per block, i.e. 190 ms at 200 k lines and 775 ms at 800 k, plus ~1.2 us per
+#: block to destroy the emptied document.  That is the ``clear`` half of the
+#: freeze the user reported at 20 MB (L-226), and no flag combination beats it
+#: (blocking signals measured *slower*, 511 ms vs 408 ms at 400 k blocks).
+#:
+#: Swapping in a fresh document is constant time instead - but only when the old
+#: one is detached first: while it still belongs to the view, ``setDocument()``
+#: destroys it synchronously and the swap costs exactly what the clear cost
+#: (measured 475 ms vs 0.5 ms for 400 k blocks).  The retired document is then
+#: drained in small slices, so the destruction lands across many frames.
+#:
+#: A slice is *one cursor removal*, and its cost is a fixed ~0.4 ms plus ~2.5 us
+#: per block, so the chunk size decides whether the drain is smooth or lumpy.
+#: Measured p95 per slice at 400 k blocks: 5000 -> 28 ms, 1000 -> 16 ms,
+#: 500 -> 13 ms, 200 -> 4.8 ms, **100 -> 0.5 ms**.  The chunk is therefore not a
+#: constant: it is derived from the *measured* per-block cost of the last slice,
+#: which keeps one slice near RETIRE_TARGET_MS on any machine.  Doubling the
+#: chunk instead (measured 604 blocks -> 3.5 ms, one step 11.8 ms) overshoots.
+RETIRE_BUDGET_MS = 1.5
+RETIRE_CHUNK = 100
+RETIRE_CHUNK_MIN = 40
+RETIRE_CHUNK_MAX = 2_000
+RETIRE_TARGET_MS = 1.0
 
 # "收←" / "发→" read faster than RX/TX in a long log, and the direction column
 # keeps a fixed width so the payload starts at the same x on every line.  The
@@ -78,6 +116,26 @@ def stamp(ms: float) -> str:
     return datetime.fromtimestamp(ms / 1000.0).strftime("%H:%M:%S.%f")[:-3]
 
 
+class LineStamp(QTextBlockUserData):
+    """The absolute epoch milliseconds behind one log block (R-154).
+
+    The rendered stamp is ``HH:MM:SS.mmm`` with **no date**, so ``08:00:00.000``
+    exists on every day a long-lived log spans and cannot be used to filter by
+    time.  Keeping the epoch on the block itself gives the search panel a
+    collision-free value, and - unlike a parallel ``list[float]`` - it cannot
+    drift out of sync with the document: Qt drops the data together with the
+    block when ``_trim_oldest()`` deletes the leading range, and block numbers
+    renumber themselves.  (Verified by probe: 5 blocks, remove the first two,
+    the remaining three still carry 2000/3000/4000 ms.)
+    """
+
+    __slots__ = ("ms",)
+
+    def __init__(self, ms: float) -> None:
+        super().__init__()
+        self.ms = float(ms)
+
+
 def escape_control(text: str) -> str:
     """Render invisible characters as literal escapes (R-015)."""
     out: list[str] = []
@@ -101,6 +159,7 @@ class LogView(QPlainTextEdit):
     findRequested = Signal(str)
     clearRequested = Signal()
     latestRequested = Signal()
+    autoscrollChanged = Signal(bool)
     #: Emitted with the new pixel size after a Ctrl+wheel zoom, so the window can
     #: persist it (R-096).
     fontZoomed = Signal(int)
@@ -129,7 +188,6 @@ class LogView(QPlainTextEdit):
         self._apply_font()
         self.show_ts = True
         self.show_ctrl = False
-        self.autoscroll = True
         self._buffer_bytes = DEFAULT_BUFFER_MB * 1024 * 1024
         self._trim_pending = False
         self.setMaximumBlockCount(QT_BLOCK_CEILING)
@@ -138,6 +196,10 @@ class LogView(QPlainTextEdit):
         self._dirty = False
         self.trimmed = 0
         self._pending = False
+        # Documents whose content was cleared but not yet destroyed (R-168).
+        self._retired: list[QTextDocument] = []
+        self._retire_timer: QTimer | None = None
+        self._retire_chunk = RETIRE_CHUNK
         self._ts_format = self._make_format(theme.DIM)
         self._mark_format = self._make_format("#0A3F3A", background="#BFF0E6")
         self._marker_format = self._make_format(theme.DIM)
@@ -147,6 +209,16 @@ class LogView(QPlainTextEdit):
 
         # The floating "back to latest" pill listens to these.
         self.viewport().installEventFilter(self)
+        self._tail_follow = TailFollow(self, self.scroll_bottom)
+        self._tail_follow.changed.connect(self.autoscrollChanged.emit)
+
+    @property
+    def autoscroll(self) -> bool:
+        return self._tail_follow.enabled
+
+    @autoscroll.setter
+    def autoscroll(self, value: bool) -> None:
+        self._tail_follow.set_enabled(value)
 
     # ------------------------------------------------------------------ setup
     @staticmethod
@@ -239,6 +311,10 @@ class LogView(QPlainTextEdit):
                 or self.document().blockCount() > MAX_BLOCKS)
 
     def trim_oldest(self) -> int:
+        with self._tail_follow.updating():
+            return self._trim_oldest()
+
+    def _trim_oldest(self) -> int:
         """Drop leading text until the document fits the budget again.
 
         One cursor removal for the whole range: measured 49-123 ms for 2-7 Mchars,
@@ -287,8 +363,7 @@ class LogView(QPlainTextEdit):
         self.apply_font(size)
 
     def _at_bottom(self) -> bool:
-        bar = self.verticalScrollBar()
-        return bar.value() >= bar.maximum() - 4
+        return self._tail_follow.at_bottom()
 
     # ----------------------------------------------------------------- batch
     def begin_batch(self) -> None:
@@ -296,6 +371,7 @@ class LogView(QPlainTextEdit):
         if self._batching == 0:
             self._batch_cursor = QTextCursor(self.document())
             self._batch_cursor.beginEditBlock()
+            self._tail_follow.begin_update()
         self._batching += 1
 
     def end_batch(self) -> None:
@@ -310,22 +386,14 @@ class LogView(QPlainTextEdit):
             if self._dirty:
                 self._dirty = False
                 self._follow()
+            self._tail_follow.end_update()
 
     def _follow(self, _was_at_bottom: bool = True) -> None:
-        """自动滚动打开时**无条件**跟随最新一行.
-
-        Earlier this only followed when the view happened to already be at the
-        bottom, so scrolling up once silently disabled auto-scroll for good -
-        which is exactly what the user reported.  When the switch is off the
-        view stays put and the floating pill offers a way back down.
-        """
+        """Apply the current following state after content changes."""
         if self._batching:
             self._dirty = True
             return
-        if not self.autoscroll:
-            return
-        bar = self.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        self._tail_follow.follow()
 
     # ------------------------------------------------------------------ lines
     def compose_line(self, ts: float, direction: str, text: str) -> str:
@@ -348,6 +416,11 @@ class LogView(QPlainTextEdit):
     def append_line(self, ts: float, direction: str, text: str, kind: str = "rx",
                     keywords: Iterable[str] = (), lite: bool = False) -> int:
         """Append one line and return the document block it now occupies."""
+        with self._tail_follow.updating():
+            return self._append_line(ts, direction, text, kind, keywords, lite)
+
+    def _append_line(self, ts: float, direction: str, text: str, kind: str,
+                     keywords: Iterable[str], lite: bool) -> int:
         self._clear_pending_internal()
 
         cursor = QTextCursor(self.document())
@@ -370,6 +443,10 @@ class LogView(QPlainTextEdit):
             self._insert_marked(cursor, text, words, body_format)
         else:
             cursor.insertText(text, body_format)
+
+        # Stamp the block we just filled, so a time-filtered search can tell
+        # 08:00 today from 08:00 yesterday (R-154).
+        self.document().lastBlock().setUserData(LineStamp(ts))
 
         self._follow()
         self._apply_buffer_limit()
@@ -409,6 +486,10 @@ class LogView(QPlainTextEdit):
 
     # ---------------------------------------------------------------- pending
     def set_pending(self, text: str) -> None:
+        with self._tail_follow.updating():
+            self._set_pending(text)
+
+    def _set_pending(self, text: str) -> None:
         cursor = QTextCursor(self.document())
         if not self._pending:
             cursor.movePosition(QTextCursor.End)
@@ -422,8 +503,9 @@ class LogView(QPlainTextEdit):
         self._follow()
 
     def clear_pending(self) -> None:
-        if self._pending:
-            self._clear_pending_internal()
+        with self._tail_follow.updating():
+            if self._pending:
+                self._clear_pending_internal()
 
     def _clear_pending_internal(self) -> None:
         if not self._pending:
@@ -438,6 +520,41 @@ class LogView(QPlainTextEdit):
     def line_texts(self) -> list[str]:
         """Every rendered line, in document order (block index == list index)."""
         return self.toPlainText().split("\n")
+
+    def block_stamp(self, block: int) -> float | None:
+        """Epoch milliseconds for one block, or None when it carries no stamp.
+
+        None happens for lines that were not produced by ``append_line`` (the
+        pending line, and the empty first block of a fresh document), so callers
+        must treat it as "unknown", never as ``0``.
+        """
+        document = self.document()
+        if block < 0 or block >= document.blockCount():
+            return None
+        data = document.findBlockByNumber(block).userData()
+        return getattr(data, "ms", None)
+
+    def line_stamps(self) -> list[float | None]:
+        """One epoch-ms value per rendered line, aligned with ``line_texts()``.
+
+        ``None`` marks a line whose time is unknown (the pending line).  Built in
+        one document pass, and only the search panel asks for it - the log's hot
+        append path never materialises this list.
+        """
+        document = self.document()
+        stamps: list[float | None] = []
+        block = document.firstBlock()
+        while block.isValid():
+            stamps.append(getattr(block.userData(), "ms", None))
+            block = block.next()
+        return stamps
+
+    def time_span(self) -> tuple[float | None, float | None]:
+        """Earliest and latest stamp still in the buffer, for the UI default."""
+        document = self.document()
+        first = getattr(document.firstBlock().userData(), "ms", None)
+        last = getattr(document.lastBlock().userData(), "ms", None)
+        return first, last
 
     def goto_block(self, block: int, flash: bool = True) -> None:
         """Scroll to a block, put the cursor on it and flash it once."""
@@ -467,9 +584,130 @@ class LogView(QPlainTextEdit):
         return dict(_DIR_LABELS.get(language(), _DIR_LABELS["zh"]))
 
     def clear_all(self) -> None:
-        self.clear()
+        """Clear the log in constant time, whatever it holds (R-168).
+
+        ``clear()`` is O(blocks) - ~190 ms at 200 k lines and 775 ms at 800 k -
+        and destroying the emptied document costs another ~1.2 us per block.  At
+        the 100 MB default budget that is seconds of frozen window, which is
+        exactly what the user reported ("清除窗口会卡六七秒").
+
+        So the document is *retired* instead of emptied: a fresh, ready-to-use
+        plain-text document is swapped in (0.5 ms, constant), the old one is
+        detached from the view first - otherwise ``setDocument()`` destroys it
+        synchronously and the swap costs as much as the clear did - and
+        :meth:`_retire_step` drains it in slices on later event-loop turns.
+        """
+        self._reset_view_state()
+        old = self.document()
+        if old.blockCount() <= 1 and old.characterCount() <= 1:
+            # Already empty: nothing to retire, just make sure it is pristine.
+            old.clear()
+            return
+        old.setParent(None)                 # keep it alive past setDocument()
+        # Nobody is watching a document we are about to throw away, and every
+        # slice would otherwise emit documentChanged/contentsChanged for it.
+        old.blockSignals(True)
+        self.setDocument(self._fresh_document(old))
+        # The block ceiling is a property of the *document*, so the fresh one
+        # starts unlimited and has to get it back.
+        self.setMaximumBlockCount(QT_BLOCK_CEILING)
+        self._retired.append(old)
+        self._schedule_retire()
+
+    def _fresh_document(self, template: QTextDocument | None = None) -> QTextDocument:
+        """A document this view can adopt: plain-text layout, same face/margin."""
+        source = template or self.document()
+        document = QTextDocument()
+        document.setDocumentLayout(QPlainTextDocumentLayout(document))
+        document.setDefaultFont(self.font())
+        document.setDocumentMargin(source.documentMargin())
+        document.setUndoRedoEnabled(False)
+        return document
+
+    def _reset_view_state(self) -> None:
+        """Forget everything that belonged to the document being replaced.
+
+        The batch counter is reset *without* ``end_batch()``: that would touch
+        the document we are about to throw away (its trimmer, its follow pulse).
+        """
+        self._batching = 0
+        self._batch_cursor = None
+        self._dirty = False
+        self._trim_pending = False
         self._pending = False
         self.trimmed = 0
+
+    def _schedule_retire(self) -> None:
+        if self._retire_timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(0)
+            timer.timeout.connect(self._retire_step)
+            self._retire_timer = timer
+        if not self._retire_timer.isActive():
+            self._retire_timer.start()
+
+    def _retire_step(self) -> None:
+        """Drop a slice of every retired document, then yield to the event loop.
+
+        The emptied documents are destroyed here, a slice per event-loop turn, so
+        the cost is spread over many frames instead of one freeze.  A step never
+        runs longer than ``RETIRE_BUDGET_MS``, and the slice size follows the
+        measured per-block cost, so a slice lands near ``RETIRE_TARGET_MS`` on
+        any machine instead of on this one only.
+        """
+        deadline = time.perf_counter() + RETIRE_BUDGET_MS / 1000.0
+        pending: list[QTextDocument] = []
+        for document in self._retired:
+            while document.blockCount() > 1:
+                tick = time.perf_counter()
+                removed = self._drop_head(document, self._retire_chunk)
+                spent_ms = (time.perf_counter() - tick) * 1000.0
+                self._retire_chunk = self._fit_chunk(removed, spent_ms)
+                if time.perf_counter() >= deadline:
+                    break
+            if document.blockCount() > 1:
+                pending.append(document)
+            # else: the last reference goes out of scope right here.
+        self._retired = pending
+        if pending:
+            self._schedule_retire()
+
+    def _fit_chunk(self, removed: int, spent_ms: float) -> int:
+        """Size the next slice so it should cost ``RETIRE_TARGET_MS``.
+
+        The cost of one removal is a fixed part (findBlockByNumber + cursor
+        setup, ~0.4 ms) plus a part proportional to the block count.  Only the
+        proportional part is scaled, so the estimate does not collapse towards
+        zero, and the result is clamped - never extrapolate into a stall.
+        """
+        if removed <= 0:
+            return RETIRE_CHUNK
+        fixed_ms = 0.4
+        per_block = max(spent_ms - fixed_ms, 0.05) / removed
+        wanted = int((RETIRE_TARGET_MS - fixed_ms) / per_block)
+        blended = (self._retire_chunk + wanted) / 2
+        return max(RETIRE_CHUNK_MIN, min(RETIRE_CHUNK_MAX, int(blended)))
+
+    @staticmethod
+    def _drop_head(document: QTextDocument, blocks: int) -> int:
+        """Remove the leading ``blocks`` blocks with one cursor removal.
+
+        ``findBlockByNumber``, never ``findBlock``: the latter takes a *character
+        position*, so a 2000-block chunk silently became "the blocks inside the
+        first 2000 characters" - ~20 blocks - and the drain crawled (L-226).
+        """
+        if document.blockCount() <= 1:
+            return 0
+        wanted = min(blocks, document.blockCount() - 1)
+        target = document.findBlockByNumber(wanted)
+        if not target.isValid() or target.position() <= 0:
+            return 0
+        cursor = QTextCursor(document)
+        cursor.setPosition(0)
+        cursor.setPosition(target.position(), QTextCursor.KeepAnchor)
+        cursor.removeSelectedText()
+        return wanted
 
     def scroll_bottom(self) -> None:
         bar = self.verticalScrollBar()
@@ -521,7 +759,7 @@ class LogView(QPlainTextEdit):
         from . import theme
 
         menu = QMenu(self)
-        menu.setStyleSheet(theme.app_stylesheet())
+        menu.setStyleSheet(theme.menu_stylesheet())
 
         cursor = self.textCursor()
         copy = menu.addAction(tr("log.menu.copy"))

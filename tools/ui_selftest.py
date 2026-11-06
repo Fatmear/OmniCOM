@@ -36,7 +36,15 @@ shutil.rmtree(_DATA_DIR, ignore_errors=True)
 os.environ["OMNICOM_DATA_DIR"] = _DATA_DIR
 os.makedirs(_DATA_DIR, exist_ok=True)
 
-from PySide6.QtCore import QEvent, QPoint, QSettings, Qt, QTimer  # noqa: E402
+from PySide6.QtCore import (  # noqa: E402
+    QEvent,
+    QObject,
+    QPoint,
+    QRect,
+    QSettings,
+    Qt,
+    QTimer,
+)
 from PySide6.QtGui import (  # noqa: E402
     QColor,
     QContextMenuEvent,
@@ -48,11 +56,20 @@ from PySide6.QtGui import (  # noqa: E402
     QWheelEvent,
 )
 from PySide6.QtTest import QTest  # noqa: E402
-from PySide6.QtWidgets import QApplication, QDialog, QLabel, QPushButton, QWidget  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication,
+    QDialog,
+    QLabel,
+    QListWidget,
+    QPushButton,
+    QStyleOptionViewItem,
+    QWidget,
+)
 
 from omnicom.ui import theme  # noqa: E402
 from omnicom.ui.commands_panel import CommandRow, GroupDialog, GroupHeader  # noqa: E402
 from omnicom.ui.main_window import Aurora, OmniWindow  # noqa: E402
+from omnicom.ui.search_panel import ResultDelegate  # noqa: E402
 from omnicom.ui.theme import app_stylesheet  # noqa: E402
 
 RESULTS: list[tuple[bool, str, str]] = []
@@ -121,6 +138,12 @@ def wait(ms: int, then) -> None:
 
 def main() -> int:
     _utf8_console()
+    # Must precede QApplication: the dashboard plugin hosts a QWebEngineView
+    # (R-161), and WebEngine refuses to start without this attribute.
+    from omnicom.webengine import prepare as prepare_webengine
+
+    webengine_ready = prepare_webengine()
+    print(f"webengine  available={webengine_ready}", flush=True)
     app = QApplication(sys.argv)
     for filename in ("segoeui.ttf", "msyh.ttc", "consola.ttf"):
         font_path = os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts", filename)
@@ -252,19 +275,87 @@ def main() -> int:
         app.processEvents()
         bar = window.log.verticalScrollBar()
         bar.setValue(0)
+        paused = bar.value()
         window.log.append_line(0.0, "RX", "follow probe", "rx")
         app.processEvents()
-        check("R-012 手动上滑后新数据仍滚到底部", window.log._at_bottom(),
+        check("R-012 手动上滑关闭跟随和开关，新数据不拖走位置",
+              not window.log.autoscroll and not window.row_scroll.isChecked()
+              and bar.value() == paused,
               f"max={bar.maximum()} value={bar.value()}")
-        window.row_scroll.setChecked(False)
+        bar.setValue(bar.maximum())
+        window.log.append_line(0.0, "RX", "following resumed", "rx")
         app.processEvents()
+        check("R-012 滚到底自动开启开关并跟随新数据",
+              window.log.autoscroll and window.row_scroll.isChecked()
+              and window.log._at_bottom())
+        window.row_scroll.setChecked(False)
+        paused = bar.value()
+        window.log.append_line(0.0, "RX", "manual switch off", "rx")
+        app.processEvents()
+        check("R-012 底部手动关掉开关后追加不误开启",
+              not window.log.autoscroll and not window.row_scroll.isChecked()
+              and bar.value() == paused)
         bar.setValue(0)
         app.processEvents()
         check("R-012 关闭后浮出「回到最新」按钮", window.scroll_pill.isVisible(),
               f"max={bar.maximum()} value={bar.value()}")
         window.jump_to_latest()
-        check("R-012 「回到最新」可滚到底部", window.log._at_bottom())
+        check("R-012 「回到最新」到底并恢复开关和跟随",
+              window.log._at_bottom() and window.log.autoscroll
+              and window.row_scroll.isChecked())
+        centre = window.log.viewport().rect().center()
+        wheel = QWheelEvent(centre, window.log.viewport().mapToGlobal(centre),
+                            QPoint(), QPoint(0, 120), Qt.NoButton, Qt.NoModifier,
+                            Qt.NoScrollPhase, False)
+        QApplication.sendEvent(window.log.viewport(), wheel)
+        check("R-012 真实滚轮上滑同步关闭自动滚动",
+              not window.log.autoscroll and not window.row_scroll.isChecked())
+        QTest.keyClick(window.log, Qt.Key_End, Qt.ControlModifier)
+        check("R-012 键盘回到底部同步恢复自动滚动",
+              window.log.autoscroll and window.row_scroll.isChecked()
+              and window.log._at_bottom())
+        bar.setValue(0)
+        paused = bar.value()
+        window.log.begin_batch()
+        for index in range(10):
+            window.log.append_line(0.0, "RX", f"paused batch {index}", "rx")
+        window.log.end_batch()
+        window.log.set_pending("partial packet while reading history")
+        app.processEvents()
+        check("R-012 批量追加和未换行数据不恢复跟随或拖走视图",
+              not window.log.autoscroll and not window.row_scroll.isChecked()
+              and bar.value() == paused)
+        window.log.clear_pending()
         window.row_scroll.setChecked(True)
+        check("R-012 手动开启开关立即回到底部",
+              window.log.autoscroll and window.log._at_bottom())
+        window.row_scroll.setChecked(False)
+        bar.setValue(0)
+        with (
+            patch.object(window.log._tail_follow, "_jump", wraps=window.log.scroll_bottom) as jump,
+            patch.object(window.log, "scroll_bottom", wraps=window.log.scroll_bottom) as redundant,
+            patch.object(window, "_save_settings", wraps=window._save_settings) as save,
+            patch.object(window.settings, "setValue", wraps=window.settings.setValue) as setting,
+        ):
+            started = time.perf_counter()
+            QTest.mouseClick(window.row_scroll.switch, Qt.LeftButton)
+            elapsed = (time.perf_counter() - started) * 1000
+        check("R-150 左栏真实点击只跳底一次并同步跟随",
+              jump.call_count == 1 and redundant.call_count == 0
+              and window.log._at_bottom() and window.row_scroll.isChecked())
+        # R-155 turned every switch into session state, so the click must not
+        # write *anything* any more.  R-150's real point survives: no full
+        # settings save on the click path, and only one scrollToBottom.
+        check("R-150 左栏点击不保存整套设置也不写任何键",
+              save.call_count == 0 and setting.call_count == 0,
+              setting.call_count)
+        check("R-150 左栏点击回调小于40ms", elapsed < 40, f"{elapsed:.3f} ms")
+        window._save_settings()
+        window.settings.sync()
+        saved = QSettings(window.settings.sharedFileName(), QSettings.IniFormat)
+        check("R-155 开关不再持久化：保存后 INI 里没有 display/scroll",
+              saved.value("display/scroll") is None,
+              saved.value("display/scroll"))
         next_()
 
     # ------------------------------------------------------------- timed send
@@ -321,6 +412,11 @@ def main() -> int:
               window._search_overlay is not None
               and panel.width() > window.sidebar.width(),
               f"panel={panel.width()}px sidebar={window.sidebar.width()}px")
+        # R-158: full screen wraps, so it must not need a horizontal bar; the
+        # sidebar is the mode that scrolls sideways.
+        check("R-158 全屏时没有横向滚动条",
+              panel.results.horizontalScrollBar().maximum() == 0,
+              panel.results.horizontalScrollBar().maximum())
         panel.set_fullscreen(False)
         app.processEvents()
         check("R-027 退出全屏后回到右侧栏",
@@ -330,7 +426,7 @@ def main() -> int:
         next_()
 
     def step_search_pill(next_):
-        """R-144: the result list never follows, a bubble goes to the newest hit."""
+        """R-144: navigate to follow without search-specific controls."""
         panel = window.search_panel
         panel.clear_all()
         # Enough rows to overflow, otherwise "did it scroll" cannot be asked.
@@ -343,10 +439,9 @@ def main() -> int:
         check("R-144 全量搜索后结果列表停在第 1 条（不自动滚到最新）",
               bar.maximum() > 0 and bar.value() == 0,
               f"max={bar.maximum()} value={bar.value()}")
-        check("R-144 结果可以滚动时浮出「回到最新命中」按钮",
-              panel.scroll_pill.isVisible()
-              and not panel._results_at_bottom(),
-              f"visible={panel.scroll_pill.isVisible()}")
+        check("R-144 搜索没有自动滚动开关和最新命中按钮",
+              not hasattr(panel, "row_scroll") and not hasattr(panel, "scroll_pill")
+              and not panel._results_at_bottom())
 
         app.processEvents()
         rows = panel.results.count()
@@ -359,21 +454,68 @@ def main() -> int:
               and any("live hit while scrolled up" in row for row in texts),
               f"value={bar.value()} rows={rows} -> {len(texts)}")
 
-        panel.jump_to_latest()
-        # No wait: live DEMO lines keep arriving, so both facts are asserted on
-        # the same instant as the click.  ``_visible`` flips immediately, while
-        # ``isVisible()`` stays true for the 170 ms fade-out.
-        check("R-144 点一下「回到最新命中」即滚到最后一条",
-              panel._results_at_bottom() and not panel.scroll_pill._visible,
+        QTest.keyClick(panel.results, Qt.Key_End)
+        check("R-144 End键滚到最后一条并开启跟随",
+              panel._results_at_bottom() and panel.autoscroll,
               f"max={bar.maximum()} value={bar.value()}")
 
+        window.row_scroll.setChecked(True)
+        for fullscreen in (False, True):
+            panel.set_fullscreen(fullscreen)
+            app.processEvents()
+            app.processEvents()
+            mode = "全屏" if fullscreen else "侧栏"
+            bar.setValue(bar.maximum())
+            rows = panel.results.count()
+            window._log_line(0.0, "RX", f"AT {mode} following", "rx")
+            app.processEvents()
+            app.processEvents()
+            check(f"R-144 {mode}到底自动跟随新增命中",
+                  panel.autoscroll and panel._results_at_bottom()
+                  and panel.results.count() > rows)
+            check(f"R-144 {mode}不显示搜索专用滚动控件",
+                  not hasattr(panel, "row_scroll") and not hasattr(panel, "scroll_pill"))
+
+            centre = panel.results.viewport().rect().center()
+            wheel = QWheelEvent(centre, panel.results.viewport().mapToGlobal(centre),
+                                QPoint(), QPoint(0, 120), Qt.NoButton, Qt.NoModifier,
+                                Qt.NoScrollPhase, False)
+            QApplication.sendEvent(panel.results.viewport(), wheel)
+            paused = bar.value()
+            window._log_line(0.0, "RX", f"AT {mode} reading history", "rx")
+            app.processEvents()
+            check(f"R-144 {mode}真实滚轮上滑停止跟随且新命中不抢位置",
+                  not panel.autoscroll
+                  and bar.value() == paused and bar.value() < bar.maximum())
+            check(f"R-144 {mode}搜索暂停不会关闭日志跟随",
+                  window.log.autoscroll and window.row_scroll.isChecked())
+
+            QTest.keyClick(panel.results, Qt.Key_End)
+            check(f"R-144 {mode}键盘回到底部恢复跟随",
+                  panel.autoscroll
+                  and panel._results_at_bottom())
+            rows = panel.results.count()
+            window._log_line(0.0, "RX", f"AT {mode} following after End", "rx")
+            app.processEvents()
+            check(f"R-144 {mode}键盘到底后持续跟随新命中",
+                  panel.autoscroll and panel._results_at_bottom()
+                  and panel.results.count() > rows)
+
+        panel.set_fullscreen(False)
+        app.processEvents()
+        app.processEvents()
+        check("R-144 全屏切回侧栏保持跟随",
+              panel.autoscroll
+              and panel._results_at_bottom())
+        panel.run_search()
+        app.processEvents()
+        check("R-144 重新搜索从历史首条开始且关闭跟随",
+              bar.value() == 0 and not panel.autoscroll)
         bar.setValue(0)
         app.processEvents()
-        shown = panel.scroll_pill._visible
         panel.clear_results()
-        check("R-144 清空结果后按钮不会留在屏幕上",
-              shown and not panel.scroll_pill._visible,
-              f"before={shown}")
+        check("R-144 清空结果不残留滚动控件",
+              panel.results.count() == 0 and not hasattr(panel, "scroll_pill"))
         panel.clear_all()
         next_()
 
@@ -382,6 +524,79 @@ def main() -> int:
         check("R-014 结果列表随新数据增长", grown, f"{state['search_hits']} -> {window.search_panel.hits}")
         window.search_panel.remove_keyword("AT")
         check("R-014 移除关键字后结果清空", window.search_panel.hits == 0)
+        next_()
+
+    def step_search_row_height(next_):
+        """R-175: wrapped row heights are computed, never laid out.
+
+        Switching to full screen re-asks *every* row for its height, twice
+        (``setGridSize(QSize())`` then ``doItemsLayout()``).  When each answer
+        built a ``QTextDocument`` the window froze for 2339.7 ms at 2000 hits;
+        the arithmetic path answers in 241.7 ms (measured, L-235).  The
+        deterministic half of that regression is "no document is built", so
+        that is what is asserted; the wall clock is a loose safety net.
+        """
+        panel = window.search_panel
+        panel.clear_all()
+        for index in range(1200):
+            window.log.append_line(0.0, "RX",
+                                   f'AT+QENG="servingcell" {index} ' + "z" * 90,
+                                   "rx")
+        panel.add_keyword("AT+QENG")
+        app.processEvents()
+        delegate = panel.results.itemDelegate()
+        check("R-175 结果列表使用自算行高的委托",
+              isinstance(delegate, ResultDelegate), type(delegate).__name__)
+
+        panel.set_fullscreen(True)
+        app.processEvents()
+        option = QStyleOptionViewItem()
+        option.font = panel.results.font()
+        model = panel.results.model()
+        rows = panel.results.count()
+        built: list[int] = []
+        real_document = ResultDelegate.document
+
+        def counting_document(myself, opt, idx):
+            built.append(idx.row())
+            return real_document(myself, opt, idx)
+
+        with patch.object(ResultDelegate, "document", counting_document):
+            heights = [delegate.sizeHint(option, model.index(row, 0)).height()
+                       for row in range(rows)]
+        check("R-175 全屏时算行高不构造 QTextDocument", not built,
+              f"{len(built)} 次排版 / {rows} 行")
+        check("R-175 行高按单元格数折算且被缓存",
+              rows > 0 and all(height > 0 for height in heights)
+              and heights == [delegate.sizeHint(option, model.index(row, 0)).height()
+                              for row in range(rows)],
+              f"rows={rows}")
+
+        before = delegate.row_height(option, "z" * 2000)
+        delegate.reset_metrics()
+        check("R-175 字体/宽度变化后缓存失效并重新算出同样的高度",
+              not delegate._heights and not delegate._advances
+              and delegate.row_height(option, "z" * 2000) == before,
+              before)
+
+        panel.set_fullscreen(False)
+        app.processEvents()
+        started = time.perf_counter()
+        panel.set_fullscreen(True)
+        app.processEvents()
+        elapsed = (time.perf_counter() - started) * 1000.0
+        # 241.7 ms measured at 2000 hits after the fix, 2339.7 ms before it.  The
+        # budget is loose because the suite shares the machine with everything
+        # else; the document-count check above is the precise one.
+        check("R-175 全屏切换不再卡顿", elapsed < 900,
+              f"{elapsed:.1f} ms / {rows} 行")
+        panel.set_fullscreen(False)
+        app.processEvents()
+        # Leave the panel in the state ``step_search_all`` expects: it asserts
+        # the hit count only grew, so the keyword has to be back on.
+        panel.clear_all()
+        panel.add_keyword("AT")
+        app.processEvents()
         next_()
 
     # --------------------------------------------------------------- commands
@@ -614,12 +829,12 @@ def main() -> int:
                 texts.append(widget.text())
         check("R-067 左栏底部不再出现版本号小字",
               window.__class__.__name__ and not any(
-                  text.strip() == "1.1.4" for text in texts), str(texts[-5:]))
+                  text.strip() == "1.1.5" for text in texts), str(texts[-5:]))
         next_()
 
     def step_version(next_):
         from omnicom import __version__ as current
-        check("R-069 版本号为 1.1.4", current == "1.1.4", current)
+        check("R-069 版本号为 1.1.5", current == "1.1.5", current)
         check("R-069 窗口标题显示新版本号", current in window.windowTitle(),
               window.windowTitle())
         next_()
@@ -1244,11 +1459,14 @@ def main() -> int:
                 panel.sendRequested.disconnect(collector)
 
             window._save_settings()
-            stored = str(window.settings.value("display/enter_send", ""))
-            check("R-094 开关状态写入设置并可恢复",
-                  stored in ("0", "1")
-                  and window.settings.value("send/history", "") not in ("", None),
-                  f"enter_send={stored}")
+            window.settings.sync()
+            stored = window.settings.value("display/enter_send", None)
+            # R-155: the switch is session state, so the key must be *absent*
+            # after a save - not "0", not "1".
+            check("R-155 回车发送开关不写入设置",
+                  stored is None, f"enter_send={stored!r}")
+            check("R-094 发送历史仍然被记住（R-155 只针对开关）",
+                  window.settings.value("send/history", "") not in ("", None))
         finally:
             # Restore the *default*, not a hard-coded True: 回车发送 is off unless
             # the user turns it on (R-094, revised), and a later step asserts
@@ -1719,6 +1937,107 @@ def main() -> int:
         app.processEvents()
         next_()
 
+    def step_maximize_latency(next_):
+        """R-163: maximize / restore / Aero Snap land immediately (no lag).
+
+        The user's report was that maximising and restoring felt stuck.  The
+        rejected cure (R-153 / L-218) was an animation; the real cure is that the
+        path stays synchronous and single-shot - no animation, no snapshot
+        overlay, no second layout pass.
+
+        Two numbers are measured separately, because only one of them is the
+        window's own cost:
+        ``sync``  - what runs *before* the event loop turns again (the part that
+                    blocks the click), must be well under one frame;
+        ``frame`` - the re-layout + repaint the platform does afterwards.
+                    Offscreen re-lays out all three columns on the software
+                    rasteriser, so it costs ~50-90 ms here and says nothing
+                    about a real GPU-composited window (L-219 is the same trap).
+        """
+        if window.isMaximized():
+            window.showNormal()
+            app.processEvents()
+        window.setGeometry(window._restore_target()
+                           if window.width() > 400 else window.geometry())
+        window.resize(1100, 720)
+        app.processEvents()
+        QTest.qWait(120)
+        normal = QRect(window.geometry())
+
+        syncs: list[float] = []
+        frames: list[float] = []
+
+        def tray(action) -> tuple[float, float]:
+            tick = time.perf_counter()
+            action()
+            blocked = (time.perf_counter() - tick) * 1000
+            loop = time.perf_counter()
+            app.processEvents()
+            painted = (time.perf_counter() - loop) * 1000
+            syncs.append(blocked)
+            frames.append(painted)
+            return blocked, painted
+
+        blocked, painted = tray(window.toggle_maximize)
+        check(f"R-163 最大化同步部分 {blocked:.1f} ms（不阻塞点击）"
+              f"，之后重排一帧 {painted:.1f} ms",
+              blocked < 16.0)
+        check("R-163 最大化后立刻是最大化状态（没有待执行动画）",
+              window.isMaximized()
+              and getattr(window, "_motion", None) is None
+              and getattr(window, "_slide_motion", None) is None)
+
+        # ------------------------------------------- shadow ring follows state
+        ring_max = window.window_shadow_px()
+        check("R-163 最大化状态下阴影环为 0（不浪费屏幕，也没有灰边）",
+              ring_max == 0, str(ring_max))
+
+        blocked, painted = tray(window.toggle_maximize)
+        check(f"R-163 还原同步部分 {blocked:.1f} ms，之后重排一帧 "
+              f"{painted:.1f} ms", blocked < 16.0)
+        check("R-163 还原后阴影环立即回来", window.window_shadow_px() > 0,
+              str(window.window_shadow_px()))
+
+        # ------------------------------------------------- repeated round trip
+        for _ in range(4):
+            tray(window.toggle_maximize)
+            tray(window.toggle_maximize)
+        worst_sync = max(syncs)
+        frames.sort()
+        top = frames[-1] if frames else 0.0
+        p95 = frames[int(len(frames) * 0.95)] if frames else 0.0
+        check(f"R-163 四次往返：同步部分最慢 {worst_sync:.1f} ms（每次都是"
+              f"单次生效）", worst_sync < 16.0)
+        check(f"R-163 四次往返 {len(frames)} 帧重排中最慢 {top:.1f} ms、"
+              f"p95 {p95:.2f} ms（离屏软件栅格化，真机走 GPU 合成）",
+              top < 200.0)
+        check("R-163 多次往返不会越切越小（尺寸回到原值）",
+              abs(window.width() - normal.width()) <= 2
+              and abs(window.height() - normal.height()) <= 2,
+              f"{window.width()}x{window.height()} vs "
+              f"{normal.width()}x{normal.height()}")
+
+        # -------------------------------------------------------- Aero Snap
+        titlebar = window.titlebar
+        area = window.screen().availableGeometry()
+        titlebar._drag = QPoint(400, 20)
+        snap, _ = tray(lambda: titlebar._snap_to_max(
+            QPoint(area.center().x(), area.top())))
+        check(f"R-163 顶部吸附最大化同步部分 {snap:.1f} ms",
+              snap < 16.0 and window.isMaximized())
+        restore, _ = tray(lambda: titlebar._restore_from_max(
+            QPoint(area.center().x(), area.top() + 200)))
+        check(f"R-163 拖离还原同步部分 {restore:.1f} ms",
+              restore < 16.0 and not window.isMaximized())
+        titlebar._drag = None
+
+        if window.isMaximized():
+            window.showNormal()
+        window.setGeometry(normal)
+        app.processEvents()
+        QTest.qWait(80)
+        next_()
+
     def step_drag_reorder(next_):
         """R-130: drag a command into another group *and* into another position."""
         from PySide6.QtCore import QMimeData
@@ -2065,6 +2384,8 @@ def main() -> int:
         window.reload_plugins()
         app.processEvents()
         check("R-032 刷新插件后仍可用", f"plugin:{info.id}" in window.titlebar.tab_buttons)
+        check("R-032 刷新释放旧实例接口", info.api is None)
+        info = next(item for item in window.plugins.loaded() if item.id == info.id)
         check("R-032 插件的数据放在自己的目录",
               os.path.isdir(info.api.data_dir), info.api.data_dir)
         yes = window.plugins.search_paths()
@@ -2321,6 +2642,108 @@ def main() -> int:
         store.remove_group(marker["id"])
         window.commands_panel.rebuild()
         app.processEvents()
+        next_()
+
+    def step_menu_theme(next_):
+        """R-152: every context menu is light - no black panel with white text.
+
+        A ``QMenu`` is a top-level window, so the global ``*`` selector in
+        ``app_stylesheet()`` never reaches its items; whether a menu comes out
+        white or black is decided by the palette it is polished with.  Pixels are
+        the only honest check: ``palette()`` keeps reporting light colours while
+        the menu paints black.
+        """
+        from PySide6.QtGui import QPalette
+        from PySide6.QtWidgets import QMenu
+
+        from omnicom.plugins import PluginApi
+        from omnicom.ui import theme as th
+
+        def menu_image(stylesheet: str) -> tuple[float, str]:
+            """Grab a popup and return (dark pixel share, top-left colour)."""
+            menu = QMenu(window)
+            if stylesheet:
+                menu.setStyleSheet(stylesheet)
+            menu.addAction("复制")
+            menu.addAction("全选")
+            menu.addSeparator()
+            menu.addAction("查找")
+            menu.popup(QPoint(0, 0))
+            app.processEvents()
+            image = menu.grab().toImage()
+            menu.hide()
+            menu.deleteLater()
+            app.processEvents()
+            dark = 0
+            total = 0
+            for y in range(0, image.height(), 2):
+                for x in range(0, image.width(), 2):
+                    total += 1
+                    if QColor(image.pixel(x, y)).lightness() < 96:
+                        dark += 1
+            share = (dark / total) if total else 0.0
+            return share, QColor(image.pixel(0, 0)).name()
+
+        # Normal state: the application sheet is live and covers every menu.
+        share, corner = menu_image(th.menu_stylesheet())
+        check("R-152 套用主题后菜单是浅色（深色像素占比 < 20%）",
+              share < 0.20, f"{share:.1%}, 角落 {corner}")
+        check("R-152 菜单左上角是白色背景",
+              corner.lower() in ("#ffffff", "#fefefe", "#fdfdfd"), corner)
+
+        # The reported bug reproduces only under a dark palette with no sheet in
+        # scope, so the control has to build exactly that state - otherwise
+        # "bare is darker" is an assertion that cannot fail.
+        sheet = app.styleSheet()
+        previous = app.palette()
+        dark_palette = QPalette()
+        for role in (QPalette.Window, QPalette.Base, QPalette.Button,
+                     QPalette.AlternateBase, QPalette.ToolTipBase):
+            dark_palette.setColor(role, QColor("#202020"))
+        for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText,
+                     QPalette.ToolTipText):
+            dark_palette.setColor(role, QColor("#ffffff"))
+        app.setStyleSheet("")
+        app.setPalette(dark_palette)
+        app.processEvents()
+        bare_share, bare_corner = menu_image("")
+        themed_share, themed_corner = menu_image(th.menu_stylesheet())
+        app.setPalette(previous)
+        app.setStyleSheet(sheet)
+        app.processEvents()
+        check("R-152 对照：暗色 palette 下不套主题的菜单确实是黑底",
+              bare_share > 0.70, f"{bare_share:.1%}, 角落 {bare_corner}")
+        check("R-152 暗色 palette 下 menu_stylesheet 仍能保持浅色",
+              themed_share < 0.20, f"{themed_share:.1%}, 角落 {themed_corner}")
+
+        # Every menu surface in the product must carry the sheet.  Checking the
+        # call sites catches a new menu someone forgot to style.
+        import inspect
+
+        sources = {}
+        for name in ("log_view", "commands_panel", "terminal", "send_panel",
+                     "main_window", "search_panel", "transfer_panel",
+                     "update_dialog", "dialogs"):
+            module = sys.modules.get(f"omnicom.ui.{name}")
+            if module is None:
+                with contextlib.suppress(Exception):
+                    module = __import__(f"omnicom.ui.{name}", fromlist=["_"])
+            if module is not None:
+                with contextlib.suppress(Exception):
+                    sources[name] = inspect.getsource(module)
+        menuless = [name for name, text in sources.items()
+                    if "QMenu(" in text and "menu_stylesheet" not in text]
+        check("R-152 所有创建菜单的模块都套用了 menu_stylesheet",
+              not menuless, str(menuless))
+
+        # A plugin gets its own menu factory; an unstyled one is the regression
+        # this requirement was reported against.
+        plain = PluginApi.menu(window)
+        check("R-152 插件菜单默认就是浅色主题",
+              plain is not None and "QMenu" in plain.styleSheet(),
+              plain.styleSheet()[:40] if plain is not None else "none")
+        if plain is not None:
+            plain.deleteLater()
         next_()
 
     def step_visual_interactions(next_):
@@ -2865,6 +3288,70 @@ def main() -> int:
             manager.shutdown()
         next_()
 
+    def step_autoreconnect_identity(next_):
+        """R-162: auto-reconnect must only ever reopen the *same* device.
+
+        The user unplugged COM2 while another adapter of the same model was
+        plugged in, and the retry loop happily attached to that one.  Reconnect
+        therefore has to prove identity - serial number, then USB location -
+        and stop (with an explanation) rather than adopt a look-alike.
+        """
+        from omnicom import serial_port
+
+        def entry(name, serial="", vid=None, pid=None, location=""):
+            return {"name": name, "serial": serial, "vid": vid, "pid": pid,
+                    "location": location, "hwid": name, "description": name}
+
+        manager = serial_port.PortManager(lambda event: None)
+        try:
+            original = entry("COM2", "SER-AAA", 0x1A86, 0x55D3, "1-5.3")
+            manager._identity = serial_port._identity_of(original)
+
+            # 1. The very same port is back: reopen it.
+            check("R-162 原串口插回后仍按原名字重连",
+                  manager._resolve_target("COM2", [original]) == ("COM2", False))
+            # 2. Windows renumbered it, but the serial number matches.
+            moved = entry("COM7", "SER-AAA", 0x1A86, 0x55D3, "1-5.1")
+            check("R-162 端口号变化但序列号相同仍认回同一设备",
+                  manager._resolve_target("COM2", [moved]) == ("COM7", False))
+            # 3. A different board of the same model must NOT be adopted.
+            impostor = entry("COM3", "SER-BBB", 0x1A86, 0x55D3, "1-6.1")
+            check("R-162 同型号的另一块板子不会被误连",
+                  manager._resolve_target("COM2", [impostor]) == (None, True))
+            # 4. An impostor that took over the freed name is refused too: the
+            #    old code trusted the name blindly.
+            thief = entry("COM2", "SER-BBB", 0x1A86, 0x55D3, "1-6.1")
+            check("R-162 顶替原端口名的其他设备不会被误连",
+                  manager._resolve_target("COM2", [thief]) == (None, True))
+            # 5. Nothing of that model is present: plain "not yet".
+            check("R-162 设备不在时不重连也不报错",
+                  manager._resolve_target("COM2", [entry("COM3", "SER-ZZZ", 0x10C4, 0xEA60,
+                                                         "1-1.1")]) == (None, False))
+
+            # 6. Drivers without a serial number: the USB location is the only
+            #    evidence, so the same socket wins and another socket loses.
+            bare = entry("COM5", "", 0x10C4, 0xEA60, "1-2.2")
+            manager._identity = serial_port._identity_of(bare)
+            check("R-162 无序列号的设备按 USB 位置认回",
+                  manager._resolve_target("COM5", [entry("COM6", "", 0x10C4, 0xEA60,
+                                                         "1-2.2")]) == ("COM6", False))
+            check("R-162 无序列号且位置不同则不重连",
+                  manager._resolve_target("COM5", [entry("COM7", "", 0x10C4, 0xEA60,
+                                                         "1-2.9")]) == (None, True))
+
+            # 7. Evidence recorded at open time must include the location, or
+            #    case 6 could never work.
+            manager._ports = [entry("COM5", "", 0x10C4, 0xEA60, "1-2.2")]
+            manager._ports_sig = ()
+            with patch.object(serial_port.serial, "Serial", side_effect=OSError("no driver")):
+                manager.open("COM5", {"autoReconnect": True})
+            check("R-162 打开时记录的设备身份包含 USB 位置",
+                  manager._identity is not None and manager._identity[3] == "1-2.2",
+                  str(manager._identity))
+        finally:
+            manager.shutdown()
+        next_()
+
     def step_group_unique(next_):
         import json
         from pathlib import Path
@@ -3064,14 +3551,21 @@ def main() -> int:
         from pathlib import Path
         from types import SimpleNamespace
 
+        from omnicom.plugins import PluginApi
+
         module = next(info.module for info in window.plugins.plugins if info.id == "launcher")
         with tempfile.TemporaryDirectory(prefix="omnicom-launcher-") as directory:
             path = Path(directory) / "apps.json"
             entries = [{"id": "first", "name": "First", "path": sys.executable},
                        {"id": "second", "name": "Second", "path": sys.executable}]
             path.write_text(json.dumps(entries), encoding="utf-8")
+            # ``menu`` must exist and must be the themed factory: the launcher
+            # builds its context menu through it (R-152), so a stub without it
+            # raises inside the context-menu handler and the delete never runs.
             api = SimpleNamespace(data_dir=directory, t=lambda zh, en: zh,
-                                  notify=lambda *args: None, on_language=lambda callback: None)
+                                  notify=lambda *args: None,
+                                  on_language=lambda callback: None,
+                                  menu=PluginApi.menu)
             page = module.LauncherPage(api)
             page._timer.stop()
             page.show()
@@ -3225,6 +3719,24 @@ def main() -> int:
             app.processEvents()
             check("R-062 关闭应用时释放常亮请求", release.call_count == 1,
                   str(release.call_count))
+
+        # L-235: the user reported "I switched it off but the screen is still
+        # on".  The switch is innocent - a managed power plan can be set to
+        # "never turn off the display", in which case no release can change
+        # anything.  Detect that condition and *say so* instead of looking broken.
+        check("R-062 能读出本机电源方案是否已设为「从不关闭显示器」",
+              power.display_never_off() in (True, False, None),
+              repr(power.display_never_off()))
+        with patch.object(power, "set_keep_awake", return_value=True), \
+                patch.object(power, "display_never_off", return_value=True), \
+                patch.object(window, "notify") as noted:
+            window.row_awake.setChecked(True)
+            app.processEvents()
+            texts = [call.args[0] for call in noted.call_args_list]
+            check("R-062 系统本就永不息屏时，打开开关会说明原因而不是默默无效",
+                  any("从不关闭显示器" in text for text in texts), str(texts))
+            window.row_awake.setChecked(False)
+            app.processEvents()
         next_()
 
     def step_launcher_sections(next_):
@@ -3338,6 +3850,8 @@ def main() -> int:
         from pathlib import Path
         from types import SimpleNamespace
 
+        from omnicom.plugins import PluginApi
+
         module = next(info.module for info in window.plugins.plugins if info.id == "launcher")
 
         def menu_choose_last(tile):
@@ -3356,7 +3870,8 @@ def main() -> int:
                             encoding="utf-8")
             api = SimpleNamespace(data_dir=directory, t=lambda zh, en: zh,
                                   notify=lambda *args: None,
-                                  on_language=lambda callback: None)
+                                  on_language=lambda callback: None,
+                                  menu=PluginApi.menu)
             handles = [{"hwnd": 11, "pid": 900, "path": sys.executable, "title": "doc"}]
 
             top = module.LauncherPage(api)
@@ -3829,6 +4344,141 @@ def main() -> int:
         app.processEvents()
         next_()
 
+    def step_log_clear_latency(next_):
+        """R-168: clearing a big log is instant - the retired document drains later.
+
+        The user's report was "当 log 窗口积累 20 多 M 时，清除窗口会卡六七秒".
+        ``clear()`` is O(blocks) and destroying the emptied document adds another
+        ~1.2 us per block, so the fix retires the document instead: a fresh one is
+        swapped in (constant time) and the old one is dropped in slices on later
+        event-loop turns.  What must hold is therefore *two* things: the click
+        returns at once, **and** the drain never stalls a frame.
+        """
+        log = window.log
+        window.switch_page("terminal")
+        app.processEvents()
+        original_buffer = log.buffer_mb()
+
+        # The drain has to be measured, not inferred from frame timings: inside
+        # the full suite the event loop also carries every other panel's timers,
+        # and a single 60 ms frame that belonged to a neighbour failed this gate
+        # while the same step passed on its own (L-233).  So ``_retire_step`` is
+        # wrapped and each slice's own cost is recorded.  The slot is bound when
+        # the singleton timer is first connected, so the patch goes on the class
+        # *and* onto an already created timer.
+        slices: list[float] = []
+        slice_max_ms = 20.0
+        view_type = type(log)
+        plain_retire = view_type._retire_step
+
+        def timed_retire(view) -> None:
+            tick = time.perf_counter()
+            plain_retire(view)
+            slices.append((time.perf_counter() - tick) * 1000.0)
+
+        view_type._retire_step = timed_retire
+        if log._retire_timer is not None:
+            with contextlib.suppress(RuntimeError):
+                log._retire_timer.timeout.disconnect()
+            log._retire_timer.timeout.connect(lambda: timed_retire(log))
+
+        def pump(ms: float) -> list[float]:
+            """Run the event loop for ``ms`` and return each frame's cost."""
+            frames: list[float] = []
+            deadline = time.perf_counter() + ms / 1000.0
+            while time.perf_counter() < deadline:
+                tick = time.perf_counter()
+                app.processEvents()
+                frames.append((time.perf_counter() - tick) * 1000)
+            return frames
+
+        def measure(blocks: int) -> tuple[float, list[float], list[float], int]:
+            del slices[:]
+            window.apply_log_buffer(100)
+            window.clear_log()
+            pump(160)
+            # Baseline: the same number of event-loop turns with *no* retired
+            # document, so the numbers below can be attributed to the drain and
+            # not to whatever timers the rest of the suite left running.
+            baseline = [cost for _ in range(8) for cost in pump(4)]
+            line = b"TEMPERATURE=25.5C HUMIDITY=60% STATUS=OK\r\n"
+            while log.document().blockCount() < blocks:
+                for _ in range(200):
+                    window._on_rx(time.time() * 1000, line)
+                window._flush_rx()
+                app.processEvents()
+            held = log.document().blockCount()
+            started = time.perf_counter()
+            window.clear_log()
+            clear_ms = (time.perf_counter() - started) * 1000
+            frames = []
+            deadline = time.perf_counter() + 20.0
+            while log._retired and time.perf_counter() < deadline:
+                frames.extend(pump(4))
+            return clear_ms, frames, baseline, held
+
+        def report(label: str, blocks: int) -> bool:
+            clear_ms, frames, baseline, held = measure(blocks)
+            frames.sort()
+            baseline.sort()
+
+            def percentile(values: list[float], share: float) -> float:
+                if not values:
+                    return 0.0
+                return values[min(len(values) - 1, int(len(values) * share))]
+
+            p95 = percentile(frames, 0.95)
+            p95_base = percentile(baseline, 0.95)
+            # One descheduled slice is the OS, not the drain: a slice normally
+            # costs 0.5-5 ms, but on a loaded desktop Windows can take the core
+            # away for 50 ms mid-slice (measured 53 ms among 368 slices while
+            # two other OmniCOM windows and the IDE were running).  So the gate
+            # is on the *distribution*: at most 1% of the slices may overshoot.
+            # A regressed drain cannot hide in that allowance - dropping the
+            # whole document in one go means one huge slice, or none at all.
+            overspent = sum(1 for value in slices if value >= slice_max_ms)
+            allowed = max(1, len(slices) // 100)
+            # A user feels a *stall*, not one 15 ms frame: the gate is "the click
+            # returns at once" + "the drain never stalls the loop" + "the drain
+            # costs no more than 10 ms over the idle baseline".  The slice count
+            # keeps the check honest - a regression back to one blocking
+            # ``clear()`` (or to dropping the whole document in one go) produces
+            # zero slices.
+            ok = (held >= blocks and clear_ms < 10.0 and not log._retired
+                  and log.document().blockCount() <= 10
+                  and len(slices) >= 5 and overspent <= allowed
+                  and p95 - p95_base < 10.0)
+            check(f"{label} 清除 {held} 行只用 {clear_ms:.2f} ms，"
+                  f"排空 {len(slices)} 片超预算 {overspent} 片（允许 {allowed}），"
+                  f"逐帧 p95 {p95:.2f} ms（空转基线 {p95_base:.2f} ms）", ok)
+            return ok
+
+        report("R-168", 20001)
+        report("R-168 数据量翻十倍时依然瞬时", 200001)
+
+        # The clear must leave a *usable* log behind, not a half-retired one.
+        window._on_rx(time.time() * 1000, b"post-clear\r\n")
+        window._flush_rx()
+        pump(60)
+        check("R-168 清除后日志继续接收数据（不残留半废文档）",
+              any("post-clear" in text for text in log.line_texts())
+              and log.document().blockCount() <= 10
+              and not log._retired,
+              f"blocks={log.document().blockCount()} retired={len(log._retired)}")
+
+        window.apply_log_buffer(original_buffer)
+        window.clear_log()
+        app.processEvents()
+        view_type._retire_step = plain_retire
+        # The singleton timer kept the instrumented slot, so hand it back too -
+        # otherwise every later clear in this suite appends to a list the step
+        # has already finished with.
+        if log._retire_timer is not None:
+            with contextlib.suppress(RuntimeError):
+                log._retire_timer.timeout.disconnect()
+            log._retire_timer.timeout.connect(log._retire_step)
+        next_()
+
     def step_status_glass(next_):
         """R-082: the caption row is text only - no frame, no fill, no plate."""
         from PySide6.QtGui import QLinearGradient, QPainter
@@ -4274,26 +4924,109 @@ def main() -> int:
               and window._serial_opts().get("rts") is False,
               str(window._serial_opts()))
 
-        # The preference must persist as 0, and reading an INI that has no
-        # value yet must still come back off (the old default was "1").
+        # R-155 superseded the "persist as 0 / 1" behaviour: DTR and RTS are
+        # session state now.  What R-120 still guarantees is that they are *off*
+        # on every launch and that the key is purged, never restored.
         window._save_settings()
-        stored = (str(window.settings.value("serial/dtr", "?")),
-                  str(window.settings.value("serial/rts", "?")))
-        check("R-120 关闭状态写入配置为 0", stored == ("0", "0"), str(stored))
+        stored = (window.settings.value("serial/dtr", None),
+                  window.settings.value("serial/rts", None))
+        check("R-155 DTR / RTS 不写入配置", stored == (None, None), str(stored))
 
         window.row_dtr.setChecked(True)
         window._save_settings()
-        check("R-120 打开开关后配置记为 1（设置仍然有效）",
-              str(window.settings.value("serial/dtr", "?")) == "1")
-        # An INI without the key must restore as *off*: the restore path used
-        # to default to "1", which silently raised the line for every user who
-        # had never touched the switch.
-        window.settings.remove("serial/dtr")
+        check("R-155 打开 DTR 后配置里依然没有该项",
+              window.settings.value("serial/dtr", None) is None,
+              window.settings.value("serial/dtr", None))
+        # A stale INI written by an older build must be purged on restore, or the
+        # board would be reset through the RESET capacitor again (R-120 / L-145).
+        window.settings.setValue("serial/dtr", "1")
+        window.settings.setValue("serial/rts", "1")
         window.settings.sync()
-        fallback = str(window.settings.value("serial/dtr", "0"))
-        check("R-120 配置里没有该项时按关闭处理", fallback == "0", fallback)
+        window._reset_session_switches()
+        check("R-155 陈旧 DTR/RTS 值被清除而不是恢复",
+              window.row_dtr.isChecked() is False
+              and window.row_rts.isChecked() is False
+              and window.settings.value("serial/dtr", None) is None
+              and window.settings.value("serial/rts", None) is None,
+              f"dtr={window.row_dtr.isChecked()} rts={window.row_rts.isChecked()}")
         window.row_dtr.setChecked(False)
         window._save_settings()
+        next_()
+
+    def step_control_lines(next_):
+        """R-156: the CLI endpoint can read and drive DTR/RTS on this window."""
+        bridge = window.bridge
+        check("R-156 桥接层提供 set_lines",
+              callable(getattr(bridge, "set_lines", None)))
+
+        # The pins only exist while a handle is open, so make sure one is.
+        opened_here = False
+        if not bridge.state().get("connected"):
+            bridge.open("DEMO", window._serial_opts())
+            opened_here = True
+            for _ in range(80):
+                app.processEvents()
+                if bridge.state().get("connected"):
+                    break
+        check("R-156 端口已就绪（DEMO）", bool(bridge.state().get("connected")),
+              str(bridge.state().get("error")))
+
+        # Read-only call: no ``set`` key must never touch the pins.
+        snap = window._control_lines({}, {})
+        lines = snap.get("lines") or {}
+        check("R-156 窗口能读回 DTR/RTS/CTS/DSR 四根线",
+              {"dtr", "rts", "cts", "dsr"} <= set(lines), str(lines))
+
+        raised = window._control_lines({"set": {"dtr": True, "rts": True}}, {})
+        lines = raised.get("lines") or {}
+        check("R-156 窗口能拉高 DTR 与 RTS",
+              lines.get("dtr") is True and lines.get("rts") is True, str(lines))
+        check("R-156 拉线后两个开关同步显示",
+              window.row_dtr.isChecked() is True
+              and window.row_rts.isChecked() is True,
+              f"dtr={window.row_dtr.isChecked()} rts={window.row_rts.isChecked()}")
+        check("R-156 镜像开关不会触发重开串口",
+              bridge.state().get("error") in (None, "", "(无)"),
+              str(bridge.state().get("error")))
+
+        lowered = window._control_lines({"set": {"dtr": False}}, {})
+        lines = lowered.get("lines") or {}
+        check("R-156 只拉低 DTR 时 RTS 保持不动",
+              lines.get("dtr") is False and lines.get("rts") is True, str(lines))
+        check("R-156 拉低后开关也回到未选中",
+              window.row_dtr.isChecked() is False)
+
+        # A bad key must be refused rather than silently ignored, otherwise a
+        # typo in a script looks like a successful reset.
+        bad = window._control_lines({"set": {"cts": True}}, {})
+        check("R-156 只读线（CTS/DSR）被明确拒绝",
+              bad.get("ok") is False and "dtr" in str(bad.get("error")),
+              str(bad.get("error")))
+        check("R-156 拒绝时没有报告 applied",
+              not bad.get("applied"), str(bad.get("applied")))
+
+        # ``_push_opts`` reads the switches, so a CLI raise must survive it -
+        # this used to be the exact place where a raised RTS was dropped.
+        window._push_opts()
+        app.processEvents()
+        check("R-156 _push_opts 之后 RTS 状态没有丢",
+              bool((bridge.state().get("opts") or {}).get("rts")) is True,
+              str((bridge.state().get("opts") or {}).get("rts")))
+
+        # L-206: the window accepted a ``set`` command it had no handler for.
+        applied = window._control_opts({"opts": {"autoReconnect": False}}, {})
+        check("R-156 窗口模式可以在线改 opts",
+              applied.get("ok") is True, str(applied.get("error")))
+        refused = window._control_opts({"opts": {"parity": "E"}}, {})
+        check("R-156 会重开串口的帧格式改动被拒绝",
+              refused.get("ok") is False, str(refused.get("error")))
+        window._control_opts({"opts": {"autoReconnect": True}}, {})
+
+        window._control_lines({"set": {"dtr": False, "rts": False}}, {})
+        if opened_here:
+            bridge.close()
+            for _ in range(40):
+                app.processEvents()
         next_()
 
 
@@ -4331,6 +5064,840 @@ def main() -> int:
         panel.rebuild()
         check("R-127 删除测试命令后恢复原数量",
               len(store.items) == before, f"{len(store.items)} vs {before}")
+        next_()
+
+    def step_maximize_slide(next_):
+        """R-153: maximize / restore is instantaneous (slide rejected 2026-11-02)."""
+        window.showNormal()
+        window.setGeometry(window._restore_target()
+                           if window.width() > 400 else window.geometry())
+        window.resize(1100, 720)
+        app.processEvents()
+        QTest.qWait(120)
+        normal_rect = QRect(window.geometry())
+        max_rect = window._slide_max_rect()
+        check("R-153 最大化目标矩形与当前窗口不同（便于区分两端）",
+              max_rect != normal_rect,
+              f"normal={normal_rect.getRect()} max={max_rect.getRect()}")
+
+        window.toggle_maximize()
+        check("R-153 调用后 isMaximized 立即为真（吸附依赖它）",
+              window.isMaximized())
+        check("R-153 最大化后不再留阴影环", window.window_shadow_px() == 0,
+              window.window_shadow_px())
+        check("R-105 最大化不占用 _motion",
+              getattr(window, "_motion", None) is None)
+        # The rejected design used a floating snapshot overlay.  Its absence is
+        # the whole point of the revert: no separate top-level window can be
+        # left on the desktop, and nothing re-lays out after the click.
+        check("R-153 没有快照叠加层（不引入第二个顶层窗口）",
+              getattr(window, "_slide_overlay", None) is None
+              and not hasattr(window, "restore_with_slide")
+              and not hasattr(window, "maximize_with_slide"))
+        # ``showMaximized()`` is asynchronous on the offscreen platform: the
+        # window state flips at once but the geometry is only applied when the
+        # platform honours it, which offscreen never does (L-199).  Assert the
+        # state, not a pixel rect - the state is what Aero Snap and the button
+        # read.
+        check("R-153 最大化后窗口状态为 WindowMaximized",
+              bool(window.windowState() & Qt.WindowMaximized),
+              int(window.windowState().value))
+
+        # ------------------------------------------------------------ restore
+        window.toggle_maximize()
+        check("R-153 还原后 isMaximized 立即为假", not window.isMaximized())
+        check("R-139 还原后阴影环回来了", window.window_shadow_px() > 0,
+              window.window_shadow_px())
+        check("R-105 还原时 _motion 仍为 None",
+              getattr(window, "_motion", None) is None)
+        check("R-153 还原是瞬时的（无待执行动画）",
+              getattr(window, "_slide_motion", None) is None)
+        QTest.qWait(200)
+        check("R-153 还原到原矩形",
+              QRect(window.geometry()) == normal_rect, window.geometry().getRect())
+
+        # ------------------------------------------------- repeat / no drift
+        sizes = []
+        for _ in range(3):
+            window.toggle_maximize()
+            QTest.qWait(150)
+            window.toggle_maximize()
+            QTest.qWait(150)
+            sizes.append((window.width(), window.height()))
+        check("R-153 三次往返后尺寸不变（不会越切越小，L-117）",
+              all(size == (normal_rect.width(), normal_rect.height())
+                  for size in sizes), sizes)
+
+        # ---------------------------------------------- interrupted switching
+        window.toggle_maximize()
+        window.toggle_maximize()
+        QTest.qWait(200)
+        check("R-153 反向切换后没有残留叠加层",
+              getattr(window, "_slide_overlay", None) is None)
+        check("R-153 反向切换后 _slide_motion 为 None",
+              getattr(window, "_slide_motion", None) is None)
+        if window.isMaximized():
+            window.showNormal()
+            app.processEvents()
+        window.setGeometry(normal_rect)
+        app.processEvents()
+        next_()
+
+    def step_switch_hit_area(next_):
+        """R-159: only the text and the switch itself toggle, not the gap."""
+        row = window.row_scroll
+        row.show()
+        app.processEvents()
+
+        label = row.label
+        switch = row.switch
+        metrics = label.fontMetrics()
+        text_w = metrics.horizontalAdvance(label.text())
+        check("R-159 标签区域比文字更宽（否则没有留白可测）",
+              label.width() > text_w + 2,
+              f"label={label.width()} text={text_w}")
+
+        def click_label(x: int) -> bool:
+            before = row.isChecked()
+            QTest.mouseClick(label, Qt.LeftButton, pos=QPoint(x, label.height() // 2))
+            app.processEvents()
+            changed = row.isChecked() != before
+            if changed:
+                row.setChecked(before)
+                app.processEvents()
+            return changed
+
+        # 1. text
+        check("R-159 点击文字仍然切换开关", click_label(text_w // 2))
+        # 2. gap between the text and the switch
+        gap_x = text_w + max(4, (label.width() - text_w) // 2)
+        check("R-159 点击文字与开关之间的空白不切换（原缺陷）",
+              not click_label(gap_x),
+              f"x={gap_x} text={text_w} label={label.width()}")
+        # 3. switch body
+        before = row.isChecked()
+        QTest.mouseClick(switch, Qt.LeftButton,
+                         pos=QPoint(switch.width() // 2, switch.height() // 2))
+        app.processEvents()
+        flipped = row.isChecked() != before
+        row.setChecked(before)
+        app.processEvents()
+        check("R-159 点击开关本体仍然切换", flipped)
+
+        # 4. the compact layout (DTR / RTS) keeps its 8 px gap testable
+        compact = window.row_dtr
+        gap = compact.switch.x() - (compact.label.x() + compact.label.width())
+        check("R-159 紧凑行仍是贴在一起（R-039 未回归）", gap < 40, gap)
+        before = compact.isChecked()
+        QTest.mouseClick(compact.label, Qt.LeftButton,
+                         pos=QPoint(2, compact.label.height() // 2))
+        app.processEvents()
+        flipped = compact.isChecked() != before
+        compact.setChecked(before)
+        app.processEvents()
+        check("R-159 紧凑行点文字仍可切换", flipped)
+        next_()
+
+    def step_close_immediate(next_):
+        """R-160: closing hides the window at once; bookkeeping runs after."""
+        from omnicom.ui import main_window as mw
+
+        # A throwaway window: the real one has to survive the rest of the suite
+        # (this step *closes* what it measures).
+        victim = OmniWindow(demo=False,
+                            command_path=os.path.join(tempfile.mkdtemp(
+                                prefix="omnicom-close-"), "commands.json"))
+        victim.resize(1000, 700)
+        victim.show()
+        app.processEvents()
+        QTest.qWait(120)
+
+        # The window must be gone before the ~227 ms settings flush begins.
+        # Asserting "hidden when sync() is entered" pins the *order*, which is
+        # the actual fix - otherwise a fast machine would hide the latency.
+        seen: list[bool] = []
+        real_sync = victim.settings.sync
+
+        def spy_sync() -> None:
+            seen.append(victim.isVisible())
+            real_sync()
+
+        events: list[str] = []
+        real_hide = victim.hide
+
+        def spy_hide() -> None:
+            events.append("hide")
+            real_hide()
+
+        with patch.object(victim.settings, "sync", side_effect=spy_sync), \
+                patch.object(victim, "hide", side_effect=spy_hide), \
+                patch.object(mw.power, "release", wraps=mw.power.release) as released:
+            closed = victim.close()
+            check("R-160 关闭后窗口立即不可见",
+                  victim.isVisible() is False, victim.isVisible())
+            check("R-160 先隐藏窗口、后写配置（顺序即修复）",
+                  bool(seen) and not any(seen) and events[:1] == ["hide"],
+                  f"sync_saw_visible={seen} events={events[:3]}")
+            check("R-160 关闭后仍然执行了设置落盘（不能为了快而丢配置）",
+                  bool(seen), f"sync 调用次数={len(seen)}")
+            check("R-160 关闭后仍然释放了屏幕常亮", released.called)
+            check("R-160 close() 返回 True（事件被接受）", bool(closed), closed)
+            check("R-160 关闭标记已置位（防止重入重复保存）",
+                  getattr(victim, "_closing", False) is True)
+        victim.deleteLater()
+        app.processEvents()
+        next_()
+
+    def step_time_filter(next_):
+        """R-154: a time range filters the search, and never mixes days."""
+        from datetime import datetime
+
+        from PySide6.QtCore import QDateTime, QSignalBlocker
+
+        panel = window.search_panel
+        window.log.clear_all()
+        panel.clear_all()
+        QTest.qWait(80)
+
+        today = datetime(2026, 1, 2, 8, 0, 0)
+        yesterday = datetime(2026, 1, 1, 8, 0, 0)
+        fixture = [
+            (yesterday.replace(hour=7, minute=0), "OLD-DAY-1 first"),
+            (yesterday, "OLD-DAY-1 eight o'clock"),
+            (yesterday.replace(hour=9, minute=0), "OLD-DAY-1 last"),
+            (today.replace(hour=7, minute=0), "NEW-DAY-2 first"),
+            (today, "NEW-DAY-2 eight o'clock"),
+            (today.replace(hour=9, minute=0), "NEW-DAY-2 last"),
+        ]
+        window.log.begin_batch()
+        for moment, text in fixture:
+            window.log.append_line(moment.timestamp() * 1000.0, "RX", text, "rx")
+        window.log.end_batch()
+        app.processEvents()
+
+        stamps = window.log.line_stamps()
+        check("R-154 每行都带绝对时间戳",
+              len(stamps) == len(fixture) and all(s is not None for s in stamps),
+              f"{len(stamps)} stamps")
+        from omnicom.ui.log_view import stamp as stamp_text
+        rendered = {}
+        for block, (_moment, text) in enumerate(fixture):
+            rendered.setdefault(stamp_text(stamps[block]), []).append(text)
+        shared = [key for key, rows in rendered.items() if len(rows) > 1]
+        check("R-154 两天的 08:00 渲染成同一个字符串（这就是必须按日期过滤的原因）",
+              bool(shared), sorted(rendered))
+
+        panel.add_keyword("DAY")
+        app.processEvents()
+        check("R-154 不启用时间过滤时命中全部 6 行", panel.hits == 6,
+              panel.hits)
+
+        panel.time_box.setChecked(True)
+        app.processEvents()
+        check("R-154 打开过滤后自动取日志自身的时间范围",
+              panel.time_from.dateTime().toSecsSinceEpoch()
+              <= int(fixture[0][0].timestamp())
+              and panel.time_to.dateTime().toSecsSinceEpoch()
+              >= int(fixture[-1][0].timestamp()),
+              f"{panel.time_from.dateTime().toString()} ~ "
+              f"{panel.time_to.dateTime().toString()}")
+        check("R-154 默认范围覆盖全文时仍命中 6 行", panel.hits == 6, panel.hits)
+
+        def set_range(start: datetime, end: datetime) -> None:
+            with (QSignalBlocker(panel.time_from), QSignalBlocker(panel.time_to)):
+                panel.time_from.setDateTime(
+                    QDateTime.fromSecsSinceEpoch(int(start.timestamp())))
+                panel.time_to.setDateTime(
+                    QDateTime.fromSecsSinceEpoch(int(end.timestamp())))
+            panel._on_time_edited()
+            app.processEvents()
+
+        day2 = datetime(2026, 1, 2, 0, 0, 0)
+        day2_end = datetime(2026, 1, 2, 23, 59, 59)
+        set_range(day2, day2_end)
+        rows = [panel.results.item(index).text()
+                for index in range(panel.results.count())]
+        check("R-154 只查第二天只命中 3 行", panel.hits == 3, panel.hits)
+        check("R-154 命中的都是第二天那三行",
+              all("NEW-DAY-2" in row for row in rows)
+              and not any("OLD-DAY-1" in row for row in rows), rows)
+
+        day1 = datetime(2026, 1, 1, 0, 0, 0)
+        day1_end = datetime(2026, 1, 1, 23, 59, 59)
+        set_range(day1, day1_end)
+        rows = [panel.results.item(index).text()
+                for index in range(panel.results.count())]
+        check("R-154 只查第一天只命中 3 行（同样的 08:00 不串天）",
+              panel.hits == 3, panel.hits)
+        check("R-154 第一天结果里没有第二天那行",
+              all("OLD-DAY-1" in row for row in rows), rows)
+
+        exact = datetime(2026, 1, 2, 8, 0, 0)
+        set_range(exact, exact)
+        check("R-154 起止为同一时刻时只命中该行", panel.hits == 1, panel.hits)
+
+        set_range(day2, day1)
+        check("R-154 起止颠倒时不返回结果", panel.hits == 0, panel.hits)
+        check("R-154 起止颠倒时给出提示",
+              bool(panel.regex_hint.text()),
+              panel.regex_hint.text())
+        hint_inverted = panel.regex_hint.text()
+
+        set_range(datetime(2026, 1, 5, 0, 0, 0), datetime(2026, 1, 6, 0, 0, 0))
+        check("R-154 空时间段有专门提示",
+              panel.hits == 0 and panel.regex_hint.text() != hint_inverted,
+              panel.regex_hint.text())
+
+        # A live hit must obey the same range, or the list shows rows a re-run
+        # would not return.
+        set_range(day1, day1_end)
+        before = panel.hits
+        panel.add_hit(today.timestamp() * 1000.0, "[x] NEW-DAY-2 live", 0)
+        check("R-154 范围外的实时命中被拒绝", panel.hits == before,
+              f"{before} -> {panel.hits}")
+        panel.add_hit(yesterday.timestamp() * 1000.0, "[x] OLD-DAY-1 live", 0)
+        check("R-154 范围内的实时命中被接受", panel.hits == before + 1,
+              f"{before} -> {panel.hits}")
+
+        # Full screen and language switching must keep the filter intact.
+        rows_before = panel.hits
+        panel.set_fullscreen(True)
+        app.processEvents()
+        panel.run_search()
+        app.processEvents()
+        check("R-154 全屏后仍然只显示范围内的结果",
+              panel.hits == 3 and panel._fullscreen, panel.hits)
+        panel.set_fullscreen(False)
+        app.processEvents()
+
+        from omnicom import i18n as i18n_module
+        original = i18n_module.language()
+        panel.retranslate()
+        app.processEvents()
+        zh_format = panel.time_from.displayFormat()
+        i18n_module.set_language("en")
+        panel.retranslate()
+        app.processEvents()
+        en_format = panel.time_from.displayFormat()
+        from omnicom.i18n import tr
+        check("R-154 时间格式与标签随语言切换即可刷新",
+              zh_format == en_format == tr("search.time.format")
+              and not re.search("[\u4e00-\u9fff]", panel.time_box.text()),
+              f"{zh_format!r} / {en_format!r} / {panel.time_box.text()!r}")
+        i18n_module.set_language(original)
+        panel.retranslate()
+        app.processEvents()
+
+        panel.time_box.setChecked(False)
+        app.processEvents()
+        check("R-154 关掉过滤后恢复全部 6 行",
+              panel.hits == rows_before or panel.hits == 6, panel.hits)
+        check("R-154 关掉过滤后时间输入区隐藏",
+              not panel.time_fields.isVisible())
+        panel.clear_all()
+        window.log.clear_all()
+        # A cleared QPlainTextEdit still keeps one empty block, so the right
+        # assertion is "no stamp survives", not "the list is empty".
+        leftovers = window.log.line_stamps()
+        check("R-154 清空日志后时间戳也清空",
+              not any(s is not None for s in leftovers), leftovers)
+        next_()
+
+    def step_time_edit_style(next_):
+        """R-158: the time filter boxes look like their neighbours."""
+        from PySide6.QtWidgets import QDateTimeEdit
+
+        from omnicom.i18n import tr
+
+        panel = window.search_panel
+        panel.time_box.setChecked(True)
+        app.processEvents()
+        QTest.qWait(60)
+        source = panel.time_from
+        # The look must come from ``theme.app_stylesheet()``; a per-widget sheet
+        # is what made the old box 204 px wide and one font notch small (L-194).
+        check("R-158 时间框外观来自共享主题，没有内联样式表",
+              source.styleSheet() == "", source.styleSheet())
+        sheet = app_stylesheet()
+        check("R-158 主题里既有 QDateTimeEdit 也有日历弹层规则",
+              "QDateTimeEdit" in sheet and "QCalendarWidget" in sheet)
+        check("R-158 时间框高度与相邻输入框一致",
+              source.height() == panel.input.height()
+              and source.height() <= theme.CTRL_H,
+              f"time={source.height()} input={panel.input.height()} "
+              f"CTRL_H={theme.CTRL_H}")
+        check("R-158 不再叠加三个抢位置的微调按钮",
+              source.buttonSymbols() == QDateTimeEdit.ButtonSymbols.NoButtons,
+              source.buttonSymbols())
+        check("R-158 日历弹层仍然可弹出",
+              source.calendarPopup() and source.calendarWidget() is not None,
+              source.calendarPopup())
+        check("R-158 时间格式仍是本地化格式串",
+              source.displayFormat() == tr("search.time.format"),
+              source.displayFormat())
+        panel.time_box.setChecked(False)
+        app.processEvents()
+        next_()
+
+    def step_time_filter_flicker(next_):
+        """R-177: the 按时间过滤 block must be laid out exactly once on toggle.
+
+        The signal is not "is it a layout loop" - sampling the geometry across a
+        dozen event loops shows no oscillation at all (measured, L-239).  What
+        the user sees is the block painted twice, at **two different heights**:
+        shown while ``time_span`` is still empty (96 px), then grown once the
+        range text is filled in (102 px).  So the assertion records
+        ``(event, height, caption length)`` triples: no event may ever be
+        delivered while the caption is still empty, all paints must agree on one
+        height, and the block may be laid out at most once.
+        """
+        class Recorder(QObject):
+            def __init__(self, span):
+                super().__init__()
+                self.span = span
+                self.events = []
+
+            def eventFilter(self, watched, event):
+                if event.type() in (QEvent.Resize, QEvent.Paint, QEvent.Show):
+                    name = {QEvent.Resize: "resize", QEvent.Paint: "paint",
+                            QEvent.Show: "show"}[event.type()]
+                    # ``span`` is captured with every event: the flicker is "the
+                    # block was shown while this caption was still empty", and
+                    # that is observable without relying on paint delivery.
+                    self.events.append((name, watched.height(),
+                                        len(self.span.text().strip())))
+                return False
+
+        panel = window.search_panel
+        panel.time_box.setChecked(False)
+        panel.clear_all()
+        window.log.clear_all()
+        from datetime import datetime
+        # Two days of hits, so the span caption is as long as it gets in normal
+        # use (it wraps, which is what made the block 6 px taller).
+        moment = datetime(2026, 2, 1, 8, 0, 0).timestamp()
+        window.log.begin_batch()
+        for index in range(400):
+            window.log.append_line((moment + index) * 1000.0, "RX",
+                                   f"FLICK fixture line {index}", "rx")
+            window.log.append_line((moment + 86400 + index) * 1000.0, "RX",
+                                   f"FLICK fixture line {index + 400}", "rx")
+        window.log.end_batch()
+        app.processEvents()
+        panel.add_keyword("FLICK")
+        app.processEvents()
+        check(f"R-177 夹具已就位（{panel.hits} 条命中）", panel.hits == 800,
+              panel.hits)
+
+        # Counting the grid pins: one ``setGridSize`` relaying out the whole
+        # list per widening row is what made the results "jump" while they
+        # filled in, so the toggle must pin at most once.  Patched on the class
+        # (not the instance) because a Shiboken widget only reliably accepts
+        # attributes through its type.
+        grid_calls = []
+        original_set_grid = QListWidget.setGridSize
+
+        def counting_grid(self, size):
+            grid_calls.append((size.width(), size.height()))
+            return original_set_grid(self, size)
+
+        recorder = Recorder(panel.time_span)
+        panel.time_fields.installEventFilter(recorder)
+        QListWidget.setGridSize = counting_grid
+        try:
+            app.processEvents()
+            QTest.qWait(40)
+            grid_calls.clear()
+            recorder.events.clear()
+            panel.time_box.setChecked(True)
+            app.processEvents()
+            QTest.qWait(40)
+            app.processEvents()
+        finally:
+            QListWidget.setGridSize = original_set_grid
+            panel.time_fields.removeEventFilter(recorder)
+
+        resizes = [height for name, height, _ in recorder.events
+                   if name == "resize"]
+        paints = [height for name, height, _ in recorder.events
+                  if name == "paint"]
+        # The decisive check: no event may be delivered while the caption is
+        # still empty.  Before the fix the first ``show`` + ``resize`` + ``paint``
+        # all happened at 96 px with an empty label, then the block grew to
+        # 102 px (L-239).
+        early = [item for item in recorder.events if item[2] == 0]
+        check(f"R-177 显示瞬间并不存在空跨度文字 (events={recorder.events})",
+              not early, early)
+        check("R-177 勾选「按时间过滤」只 layout 一次",
+              len(resizes) <= 1, resizes)
+        check(f"R-177 整个过程只有一种高度 (paints={paints})",
+              len(set(paints)) <= 1, paints)
+        check("R-177 首次高度就是最终高度（不再 96 -> 102 跳一下）",
+              not resizes or resizes[-1] == panel.time_fields.height(),
+              f"{resizes} vs {panel.time_fields.height()}")
+        check(f"R-177 时间跨度文字在显示时就已就位 "
+              f"(span={panel.time_span.text()[:24]!r})",
+              bool(panel.time_span.text().strip()))
+        check(f"R-177 一次开关最多钉一次网格 (setGridSize calls={grid_calls})",
+              len(grid_calls) <= 2, grid_calls)
+
+        panel.time_box.setChecked(False)
+        app.processEvents()
+        check("R-177 关掉后时间块隐藏", not panel.time_fields.isVisible())
+
+        panel.clear_all()
+        window.log.clear_all()
+        app.processEvents()
+        next_()
+
+    def step_time_filter_no_rebuild(next_):
+        """R-179: toggling 按时间过滤 must not rebuild rows that do not change.
+
+        The old path ended ``_on_time_toggled()`` in ``run_search()``, which
+        began with ``clear_results()`` and then re-created **every** hit.  With
+        an empty list that is free; with 2000 rows it measured 100-125 ms
+        (clear 4.6 + match 13.1 + append 76.2 + stamps 2.6), which is exactly
+        what the user reported: "搜索结果里面有数据时，开关时间过滤就会卡顿"
+        (L-242).  The toggle *seeds* the range from the buffer itself, so the
+        hit set is identical - those 2000 rows were destroyed and re-created for
+        nothing.
+
+        So the step counts the two calls a rebuild cannot avoid
+        (``QListWidget.clear`` / ``addItem``) plus the panel's own
+        ``clear_results``, and toggles the switch over a full result list.  Both
+        directions must cost zero.  The counter-case keeps the fix honest: a
+        *narrowed* range must still rebuild, so "never touch the list" fails
+        here as loudly as "always rebuild".
+        """
+        from datetime import datetime
+
+        from PySide6.QtCore import QDateTime, QSignalBlocker
+
+        from omnicom.ui.search_panel import SearchPanel
+
+        panel = window.search_panel
+        panel.time_box.setChecked(False)
+        panel.clear_all()
+        window.log.clear_all()
+        moment = datetime(2026, 3, 1, 6, 0, 0).timestamp()
+        window.log.begin_batch()
+        for index in range(800):
+            window.log.append_line((moment + index) * 1000.0, "RX",
+                                   f"NOREBUILD fixture line {index}", "rx")
+        window.log.end_batch()
+        app.processEvents()
+        panel.add_keyword("NOREBUILD")
+        app.processEvents()
+        check(f"R-179 夹具已就位（{panel.hits} 条命中）", panel.hits == 800,
+              panel.hits)
+
+        cleared = []
+        added = []
+        original_clear = QListWidget.clear
+        original_add = QListWidget.addItem
+        original_panel_clear = SearchPanel.clear_results
+
+        def counting_clear(self):
+            cleared.append(("list", self.count()))
+            return original_clear(self)
+
+        def counting_add(self, item):
+            added.append(1)
+            return original_add(self, item)
+
+        def counting_panel_clear(self):
+            cleared.append(("panel", self.results.count()))
+            return original_panel_clear(self)
+
+        # Patched on the *class*: a Shiboken widget only reliably accepts
+        # attributes through its type, and the panel calls ``self.clear_results``
+        # so an instance patch would be bypassed anyway.
+        QListWidget.clear = counting_clear
+        QListWidget.addItem = counting_add
+        SearchPanel.clear_results = counting_panel_clear
+        try:
+            app.processEvents()
+            QTest.qWait(30)
+
+            def reset():
+                cleared.clear()
+                added.clear()
+
+            def settle():
+                app.processEvents()
+                QTest.qWait(30)
+                app.processEvents()
+
+            # (a) 800 rows on screen -> switch the filter ON.  The seeded range
+            # covers the whole buffer, so the hit set is unchanged.
+            reset()
+            panel.time_box.setChecked(True)
+            settle()
+            on_adds, on_clears = len(added), len(cleared)
+            check(f"R-179 打开时间过滤不重建已有行 (addItem={on_adds})",
+                  on_adds == 0, on_adds)
+            check(f"R-179 打开时间过滤不清空结果列表 (clear={on_clears})",
+                  on_clears == 0, cleared)
+            check(f"R-179 打开后命中数不变（{panel.hits}）", panel.hits == 800,
+                  panel.hits)
+            check(f"R-179 打开后行数仍是 800（{panel.results.count()}）",
+                  panel.results.count() == 800, panel.results.count())
+
+            # (b) Narrow the range: now the rows really do differ, so the list
+            # MUST be rebuilt - once, not 800 times.
+            with (QSignalBlocker(panel.time_from), QSignalBlocker(panel.time_to)):
+                panel.time_from.setDateTime(
+                    QDateTime.fromMSecsSinceEpoch(int(moment * 1000.0)))
+                panel.time_to.setDateTime(
+                    QDateTime.fromMSecsSinceEpoch(int((moment + 199) * 1000.0)))
+            reset()
+            panel._on_time_edited()
+            settle()
+            narrow_adds = len(added)
+            # ``clear_results()`` is itself counted *and* it calls
+            # ``results.clear()``, so one genuine clear shows up twice.  What
+            # matters is that it happened exactly once, not per row.
+            narrow_lists = len([1 for kind, _n in cleared if kind == "list"])
+            narrow_panels = len([1 for kind, _n in cleared if kind == "panel"])
+            check(f"R-179 收窄范围确实会重建 (addItem={narrow_adds})",
+                  narrow_adds == 200, narrow_adds)
+            check(f"R-179 收窄范围只清空一次 (clear={narrow_lists})",
+                  narrow_lists == 1 and narrow_panels == 1, cleared)
+            check(f"R-179 收窄后命中 200 条（{panel.hits}）", panel.hits == 200,
+                  panel.hits)
+
+            # (c) Widen back to the whole buffer: one full rebuild, still one
+            # clear - the single-pass path must not clear per row.
+            with (QSignalBlocker(panel.time_from), QSignalBlocker(panel.time_to)):
+                panel.time_to.setDateTime(
+                    QDateTime.fromMSecsSinceEpoch(int((moment + 799) * 1000.0)))
+            reset()
+            panel._on_time_edited()
+            settle()
+            widen_adds = len(added)
+            widen_lists = len([1 for kind, _n in cleared if kind == "list"])
+            widen_panels = len([1 for kind, _n in cleared if kind == "panel"])
+            check(f"R-179 放宽回去只清空一次 (clear={widen_lists})",
+                  widen_lists == 1 and widen_panels == 1, cleared)
+            check(f"R-179 放宽回去重建 800 行 (addItem={widen_adds})",
+                  widen_adds == 800, widen_adds)
+            check(f"R-179 放宽后命中回到 800（{panel.hits}）", panel.hits == 800,
+                  panel.hits)
+
+            # (d) Switch it OFF: the range disappears, the hits do not.
+            reset()
+            panel.time_box.setChecked(False)
+            settle()
+            off_adds = len(added)
+            off_clears = len(cleared)
+            check(f"R-179 关闭时间过滤也不重建 (addItem={off_adds})",
+                  off_adds == 0, off_adds)
+            check(f"R-179 关闭时间过滤不清空 (clear={off_clears})",
+                  off_clears == 0, cleared)
+            check(f"R-179 关闭后命中数不变（{panel.hits}）", panel.hits == 800,
+                  panel.hits)
+        finally:
+            QListWidget.clear = original_clear
+            QListWidget.addItem = original_add
+            SearchPanel.clear_results = original_panel_clear
+
+        # The cached metrics are what made 2000 rows affordable; a stale cache
+        # after a font change would measure with the wrong font (R-158/L-242).
+        check("R-179 行宽度量被缓存（不再每行构造 QFontMetrics）",
+              panel._metrics is not None, panel._metrics)
+        before = panel._metrics
+        panel.apply_font()
+        check("R-179 换字体后缓存被刷新",
+              panel._metrics is not None and panel._metrics is not before,
+              panel._metrics)
+
+        panel.clear_all()
+        window.log.clear_all()
+        app.processEvents()
+        next_()
+
+    def step_session_defaults(next_):
+        """R-155: every rail / send-bar switch opens at its factory default."""
+        rows = [(name, getattr(window, name, None))
+                for name, _key in OmniWindow.SESSION_SWITCHES]
+        missing = [name for name, row in rows if row is None]
+        check("R-155 所有会话开关都能解析到控件", not missing, missing)
+        nodes = [(name, row) for name, row in rows if row is not None]
+        check("R-155 每个开关都带出厂默认值",
+              all(hasattr(row, "default") for _name, row in nodes),
+              [n for n, row in nodes if not hasattr(row, "default")])
+        check("R-155 新窗口打开时每个开关都停在默认值",
+              all(row.isChecked() == row.default for _name, row in nodes),
+              [(n, row.isChecked(), row.default) for n, row in nodes
+               if row.isChecked() != row.default])
+
+        # Behaviour must follow the switches.  Proven by *driving* each row, not
+        # by sampling the current value: an earlier step may legitimately have
+        # scrolled the log up, which clears log.autoscroll through the scroll pill
+        # without ever touching the switch (R-155 only governs what is written and
+        # what state a window *opens* in).
+        wiring = (
+            ("时间戳", window.row_ts, lambda: window.log.show_ts),
+            ("自动滚动", window.row_scroll, lambda: window.log.autoscroll),
+            ("回车发送", window.row_enter,
+             lambda: window.send_panel.enter_sends()),
+            ("HEX 显示", window.row_hex_send,
+             lambda: window.send_panel.hex_send.isChecked()),
+        )
+        for label, row, read in wiring:
+            row.setChecked(not row.isChecked())
+            app.processEvents()
+            followed = read() == row.isChecked()
+            row.setChecked(not row.isChecked())
+            app.processEvents()
+            check(f"R-155 {label}开关切换后行为跟随", followed,
+                  (row.isChecked(), read()))
+
+        # Flip everything off-default, save, and prove nothing was written.
+        for _name, row in nodes:
+            row.setChecked(not row.default)
+        app.processEvents()
+        window._save_settings()
+        window.settings.sync()
+        left = [key for _name, key in OmniWindow.SESSION_SWITCHES
+                if window.settings.contains(key)]
+        check("R-155 保存后 INI 里没有任何开关项", not left, left)
+
+        # A stale value written by an older build must be purged, not honoured.
+        for _name, key in OmniWindow.SESSION_SWITCHES:
+            window.settings.setValue(key, "1")
+        window.settings.sync()
+        window._reset_session_switches()
+        app.processEvents()
+        check("R-155 陈旧开关值被清除而不是恢复",
+              all(row.isChecked() == row.default for _name, row in nodes)
+              and not any(window.settings.contains(key)
+                          for _name, key in OmniWindow.SESSION_SWITCHES),
+              [(n, row.isChecked()) for n, row in nodes
+               if row.isChecked() != row.default])
+
+        # Clicking must not write anything.
+        before = window.settings.value("display/scroll", None)
+        window.row_scroll.setChecked(not window.row_scroll.isChecked())
+        app.processEvents()
+        window.row_scroll.setChecked(window.row_scroll.default)
+        app.processEvents()
+        check("R-155 点击开关不写设置",
+              before is None and window.settings.value("display/scroll", None) is None,
+              (before, window.settings.value("display/scroll", None)))
+
+        # The drop-downs are *not* switches and stay remembered.
+        window.baud.setCurrentText("57600")
+        window._save_settings()
+        check("R-155 下拉框仍然被记住（R-155 只针对开关）",
+              str(window.settings.value("serial/baud")) == "57600",
+              window.settings.value("serial/baud"))
+        window.baud.setCurrentText("115200")
+        window._save_settings()
+        next_()
+
+    def step_pref_wheel(next_):
+        """R-157: a stray wheel must not change a preference.
+
+        The preferences page scrolls with the wheel, and its combo/spin fields
+        sit in that same stream.  Qt's stock handler consumes the tick and edits
+        the value even when the widget was never clicked - one gesture that both
+        rewrites a setting and stops the page from moving (L-204).  Proven on the
+        real dialog, and by *signal*: a guarded widget never emits, so counting
+        changes is stricter than comparing values (two ticks up then down would
+        otherwise cancel out).
+        """
+        from omnicom import i18n
+        from omnicom.ui.dialogs import PreferencesDialog
+
+        dialog = PreferencesDialog(
+            window, current_language=i18n.language(),
+            log_dir=str(window.settings.value("log/dir", "") or ""),
+            accent=theme.accent(), wallpaper=theme.wallpaper() or "",
+            buffer_mb=8, ui_family=theme.ui_family(),
+            ui_px=theme.ui_font_px(), log_family=theme.log_family(),
+            log_px=window.log.font_px(), history_limit=50, history_count=0,
+            plugin_sources="")
+        dialog.show()
+        app.processEvents()
+        fired: list[str] = []
+        dialog.bufferChanged.connect(lambda v: fired.append(f"buffer={v}"))
+        dialog.languageChanged.connect(lambda v: fired.append(f"lang={v}"))
+        dialog.accentChanged.connect(lambda v: fired.append(f"accent={v}"))
+        dialog.uiFontChanged.connect(lambda v, p: fired.append(f"ui={v}/{p}"))
+        dialog.logFontChanged.connect(lambda v, p: fired.append(f"log={v}/{p}"))
+        dialog.historyLimitChanged.connect(lambda v: fired.append(f"hist={v}"))
+
+        fields = {
+            "buffer_value": lambda: int(dialog.buffer_value.value()),
+            "history_value": lambda: int(dialog.history_value.value()),
+            "ui_size": lambda: int(dialog.ui_size.value()),
+            "log_size": lambda: int(dialog.log_size.value()),
+            "language_box": lambda: int(dialog.language_box.currentIndex()),
+            "accent_box": lambda: int(dialog.accent_box.currentIndex()),
+            "ui_family_box": lambda: int(dialog.ui_family_box.currentIndex()),
+            "log_family_box": lambda: int(dialog.log_family_box.currentIndex()),
+        }
+        check("R-157 首选项里每个下拉框/数值框都是受保护的控件",
+              all(type(getattr(dialog, name)).__name__ in ("Combo", "Spin")
+                  for name in fields),
+              {n: type(getattr(dialog, n)).__name__ for n in fields})
+
+        def wheel(target, dy: int):
+            centre = target.rect().center()
+            event = QWheelEvent(centre, target.mapToGlobal(centre), QPoint(0, 0),
+                                QPoint(0, dy), Qt.NoButton, Qt.NoModifier,
+                                Qt.NoScrollPhase, False)
+            app.sendEvent(target, event)
+            return event
+
+        before = {name: read() for name, read in fields.items()}
+        for name in fields:
+            target = getattr(dialog, name)
+            target.clearFocus()
+            event = wheel(target, -120)
+            app.processEvents()
+            check(f"R-157 {name} 未聚焦时滚轮把事件交回页面",
+                  not event.isAccepted(), f"accepted={event.isAccepted()}")
+        changed = {name: (before[name], read()) for name, read in fields.items()
+                   if read() != before[name]}
+        check("R-157 未聚焦滚轮不改任何首选项数值", not changed, changed)
+        check("R-157 未聚焦滚轮不触发任何设置变更信号", not fired, fired)
+
+        bar = dialog.preferences_scroll.verticalScrollBar()
+        check("R-157 首选项页面本身可滚动", bar.maximum() > 0,
+              f"max={bar.maximum()}")
+        bar.setValue(0)
+        viewport = dialog.preferences_scroll.viewport()
+        centre = viewport.rect().center()
+        app.sendEvent(viewport, QWheelEvent(
+            centre, viewport.mapToGlobal(centre), QPoint(0, 0), QPoint(0, -120),
+            Qt.NoButton, Qt.NoModifier, Qt.NoScrollPhase, False))
+        app.processEvents()
+        check("R-157 首选项页面仍能用滚轮向下滚动", bar.value() > 0,
+              f"0 -> {bar.value()}")
+
+        # The guard must not remove the feature: click into the field and the
+        # wheel works, and an open popup still scrolls its own list.
+        dialog.buffer_value.setFocus(Qt.OtherFocusReason)
+        app.processEvents()
+        start = int(dialog.buffer_value.value())
+        wheel(dialog.buffer_value, -120)
+        app.processEvents()
+        check("R-157 点进数值框后滚轮才改值",
+              int(dialog.buffer_value.value()) != start,
+              f"{start} -> {dialog.buffer_value.value()}")
+        dialog.ui_family_box.setFocus(Qt.OtherFocusReason)
+        dialog.ui_family_box.showPopup()
+        app.processEvents()
+        event = wheel(dialog.ui_family_box, -120)
+        app.processEvents()
+        check("R-157 下拉弹层打开时滚轮由列表消费",
+              dialog.ui_family_box.view().isVisible() and event.isAccepted(),
+              f"popup={dialog.ui_family_box.view().isVisible()} "
+              f"accepted={event.isAccepted()}")
+        dialog.ui_family_box.hidePopup()
+        dialog.close()
         next_()
 
     def step_left_click_only(next_):
@@ -4704,9 +6271,11 @@ def main() -> int:
                   and replaced == "new", f"{written} / {kept}")
             check("R-108 用户自己的插件不会被更新覆盖",
                   os.path.isfile(mine))
-            check("R-108 更新里的新插件会被装上",
-                  os.path.isfile(os.path.join(bundle, "plugins", "launcher",
-                                              "plugin.json")))
+            # R-174: plugins come from the store only, so a release archive must
+            # not install one - not even a brand-new folder the user lacks.
+            check("R-174 更新包里的插件不会被安装（插件只从商店装）",
+                  not os.path.exists(os.path.join(bundle, "plugins", "launcher",
+                                                  "plugin.json")))
             check("R-108 应用完更新后待装标记被清掉", update.pending() is None)
         finally:
             shutil_module.rmtree(bundle, ignore_errors=True)
@@ -5047,6 +6616,7 @@ def main() -> int:
     runner.add("timed_stop", step_timed_stop)
     runner.add("search", step_search)
     runner.add("search_check", step_search_check)
+    runner.add("R-175 search_row_height", step_search_row_height)
     runner.add("search_all", step_search_all)
     runner.add("R-144 search_pill", step_search_pill)
     runner.add("import", step_import)
@@ -5084,6 +6654,7 @@ def main() -> int:
     runner.add("R-076 no_console", step_no_console)
     runner.add("R-077 glass_panes", step_glass_panes)
     runner.add("R-081 log_buffer", step_log_buffer)
+    runner.add("R-168 log_clear_latency", step_log_clear_latency)
     runner.add("R-082 status_glass", step_status_glass)
     runner.add("R-083 no_exe", step_no_exe_distribution)
     runner.add("R-078 records_folder", step_records_folder)
@@ -5103,10 +6674,12 @@ def main() -> int:
     runner.add("logo", step_logo)
     runner.add("shell", step_shell)
     runner.add("menus", step_menus)
+    runner.add("R-152 menu_theme", step_menu_theme)
     runner.add("R-049 视觉与选区交互", step_visual_interactions)
     runner.add("R-054 performance", step_performance)
     runner.add("R-055 serial_lifecycle", step_serial_lifecycle)
     runner.add("R-055 serial_races", step_serial_races)
+    runner.add("R-162 autoreconnect_identity", step_autoreconnect_identity)
     runner.add("R-056 group_unique", step_group_unique)
     runner.add("R-057 connection_colours", step_connection_colours)
     runner.add("R-058 motion_buttons", step_motion_buttons)
@@ -5123,6 +6696,7 @@ def main() -> int:
     runner.add("R-138 window_edge", step_window_edge)
     runner.add("R-141 group_gap", step_group_gap)
     runner.add("R-140 aero_snap", step_aero_snap)
+    runner.add("R-163 window_latency", step_maximize_latency)
     runner.add("R-130 drag_reorder", step_drag_reorder)
     runner.add("R-095 left_click", step_left_click_only)
     runner.add("R-100 brand", step_brand_centred)
@@ -5137,6 +6711,16 @@ def main() -> int:
     runner.add("R-117 port_labels", step_port_labels)
     runner.add("R-120 dtr_defaults", step_dtr_defaults)
     runner.add("R-127 unchecked_default", step_unchecked_default)
+    runner.add("R-153 maximize_slide", step_maximize_slide)
+    runner.add("R-159 switch_hit_area", step_switch_hit_area)
+    runner.add("R-160 close_immediate", step_close_immediate)
+    runner.add("R-154 time_filter", step_time_filter)
+    runner.add("R-177 time_filter_flicker", step_time_filter_flicker)
+    runner.add("R-179 time_filter_no_rebuild", step_time_filter_no_rebuild)
+    runner.add("R-158 time_edit_style", step_time_edit_style)
+    runner.add("R-155 session_defaults", step_session_defaults)
+    runner.add("R-156 control_lines", step_control_lines)
+    runner.add("R-157 pref_wheel", step_pref_wheel)
     runner.add("R-107 update", step_update)
 
     if "--only" in sys.argv:

@@ -149,6 +149,9 @@ _accent = DEFAULT_ACCENT
 #: Wallpaper path chosen by the user ("" / None = flat colour, see R-020).
 _wallpaper: str | None = None
 _wallpaper_cache: tuple[tuple[str, float], Any] | None = None
+#: Cover-cropped page photo with the white veil already baked in, keyed by
+#: (path, mtime, width, height) - see ``page_cover()`` (R-163).
+_page_cache: tuple[tuple[str, float, int, int], Any] | None = None
 
 # --------------------------------------------------------- frosted glass (R-077)
 #: White veil over the page photo.  Lower = the picture reads stronger; the
@@ -215,36 +218,46 @@ def wallpaper() -> str | None:
     return _wallpaper
 
 
+def _wallpaper_stamp() -> float | None:
+    """mtime of the current wallpaper, or ``None`` when it cannot be read."""
+    if not _wallpaper:
+        return None
+    try:
+        return os.path.getmtime(_wallpaper)
+    except OSError:
+        return None
+
+
 def set_wallpaper(path: str | None) -> str | None:
     """Use ``path`` as the page backdrop; an empty value restores the flat fill."""
     global _wallpaper, _wallpaper_cache
-    global _glass_cache
+    global _glass_cache, _page_cache
     cleaned = (path or "").strip()
     if not cleaned:
         _wallpaper = None
         _wallpaper_cache = None
         _glass_cache = None
+        _page_cache = None
         return None
     absolute = os.path.abspath(os.path.expanduser(cleaned))
     if not os.path.isfile(absolute):
         _wallpaper = None
         _wallpaper_cache = None
         _glass_cache = None
+        _page_cache = None
         return None
     _wallpaper = absolute
     _wallpaper_cache = None
     _glass_cache = None
+    _page_cache = None
     return absolute
 
 
 def wallpaper_pixmap():
     """Decoded wallpaper (cached by path + mtime); ``None`` when unset/broken."""
     global _wallpaper_cache
-    if not _wallpaper:
-        return None
-    try:
-        stamp = os.path.getmtime(_wallpaper)
-    except OSError:
+    stamp = _wallpaper_stamp()
+    if stamp is None:
         return None
     key = (_wallpaper, stamp)
     if _wallpaper_cache is None or _wallpaper_cache[0] != key:
@@ -269,6 +282,42 @@ def cover_pixmap(pixmap, width: int, height: int):
                        max(0, (scaled.height() - height) // 2), width, height)
 
 
+def page_cover(width: int, height: int):
+    """The page photo, cover-cropped and veiled, cached per size (R-163).
+
+    Both halves are baked into one pixmap on purpose: ``cover_pixmap`` rescales
+    the whole wallpaper, which costs ~14 ms at 1440p, and ``Aurora`` used to run
+    it - plus a full-page white fill - on *every* repaint.  Maximising or
+    restoring the window therefore missed frames.
+
+    Returns ``None`` when no wallpaper is set, so the caller paints its flat
+    colour instead (R-020).
+    """
+    global _page_cache
+    pixmap = wallpaper_pixmap()
+    if pixmap is None or width <= 0 or height <= 0:
+        return None
+    stamp = _wallpaper_stamp()
+    if stamp is None:
+        return None
+    key = (str(_wallpaper), stamp, width, height)
+    if _page_cache is not None and _page_cache[0] == key:
+        return _page_cache[1]
+
+    from PySide6.QtGui import QColor, QPainter
+
+    cover = cover_pixmap(pixmap, width, height)
+    if cover is None:
+        return None
+    painter = QPainter(cover)
+    try:
+        painter.fillRect(cover.rect(), QColor(255, 255, 255, PAGE_VEIL))
+    finally:
+        painter.end()
+    _page_cache = (key, cover)
+    return cover
+
+
 def glass_layer(width: int, height: int):
     """Blurred + veiled wallpaper that the panes sample for their glass (R-077).
 
@@ -280,9 +329,8 @@ def glass_layer(width: int, height: int):
     pixmap = wallpaper_pixmap()
     if pixmap is None or width <= 0 or height <= 0:
         return None
-    try:
-        stamp = os.path.getmtime(str(_wallpaper))
-    except (OSError, TypeError):
+    stamp = _wallpaper_stamp()
+    if stamp is None:
         return None
     key = (str(_wallpaper), stamp, width, height)
     if _glass_cache is not None and _glass_cache[0] == key:
@@ -291,15 +339,24 @@ def glass_layer(width: int, height: int):
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QColor, QPainter
 
-    cover = cover_pixmap(pixmap, width, height)
-    if cover is None:
+    # Crop first, at 1/16, then grow: sizing the *cover* at full resolution only
+    # to shrink it again was the most expensive step in this function.
+    tiny = cover_pixmap(pixmap, max(1, width // GLASS_BLUR_DIV),
+                        max(1, height // GLASS_BLUR_DIV))
+    if tiny is None:
         return None
-    tiny = cover.scaled(max(1, width // GLASS_BLUR_DIV), max(1, height // GLASS_BLUR_DIV),
-                        Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-    blurred = tiny.scaled(width, height, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    # Two smooth scales instead of one.  A direct 1/16 -> full smooth upscale
+    # costs ~18 ms at 1440p; passing through a quarter-size intermediate halves
+    # that, and the two layering orders land within one colour level of each
+    # other (measured, R-163).
+    quarter = tiny.scaled(max(1, width // 4), max(1, height // 4),
+                          Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    blurred = quarter.scaled(width, height, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
     painter = QPainter(blurred)
-    painter.fillRect(blurred.rect(), QColor(255, 255, 255, GLASS_VEIL))
-    painter.end()
+    try:
+        painter.fillRect(blurred.rect(), QColor(255, 255, 255, GLASS_VEIL))
+    finally:
+        painter.end()
     _glass_cache = (key, blurred)
     return blurred
 
@@ -408,6 +465,85 @@ QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
   border-top: 5px solid {DIM}; width: 0; height: 0;
 }}
 
+/* --------------------------------------------- date / time editors (R-158)
+   QDateTimeEdit was missing entirely, so the time filter fell back to the
+   platform style: transparent 15 px spin buttons drawing *no* arrow at all and a
+   padding that left ~80 px of dead space around the text (L-194).  The editors
+   now share the text boxes' metrics and carry one affordance - the calendar
+   drop-down - whose arrow is the same painted CSS triangle QSpinBox uses.  The
+   spin buttons are switched off in code (``setButtonSymbols(NoButtons)``): three
+   little click targets in a 200 px box was the ugly part, not a missing glyph. */
+QDateTimeEdit {{
+  background: {CARD};
+  border: 1px solid {LINE};
+  border-radius: {RADIUS_CTRL}px;
+  padding: 0 6px;
+  min-height: {CTRL_H - 2}px;
+  selection-background-color: rgba({TEAL_RGB}, 60);
+  selection-color: {INK};
+}}
+QDateTimeEdit:hover {{ border-color: {LINE_STRONG}; }}
+QDateTimeEdit:focus {{ border: 1px solid {TEAL}; }}
+QDateTimeEdit:disabled {{ color: {TEXT_DISABLED}; background: {WASH}; }}
+QDateTimeEdit::drop-down {{
+  subcontrol-origin: padding;
+  subcontrol-position: center right;
+  width: 20px;
+  border: 0;
+  background: transparent;
+}}
+QDateTimeEdit::down-arrow {{
+  image: none;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid {INK2};
+  width: 0; height: 0;
+}}
+QDateTimeEdit::down-arrow:on {{ border-top-color: {TEAL}; }}
+QDateTimeEdit::up-button, QDateTimeEdit::down-button {{
+  width: 0; border: 0; background: transparent;
+}}
+/* The calendar popup is a separate top-level window: it inherits nothing. */
+QCalendarWidget {{ background: {CARD}; }}
+QCalendarWidget QWidget#qt_calendar_navigationbar {{
+  background: {CARD};
+  border-bottom: 1px solid {LINE_SOFT};
+  min-height: {CTRL_H - 4}px;
+}}
+QCalendarWidget QToolButton {{
+  background: transparent;
+  border: 0;
+  border-radius: {RADIUS_CTRL}px;
+  color: {INK};
+  padding: 3px 8px;
+  font-weight: 600;
+}}
+QCalendarWidget QToolButton:hover {{ background: {WASH_HOVER}; }}
+QCalendarWidget QToolButton:pressed {{ background: {WASH}; }}
+QCalendarWidget QToolButton::menu-indicator {{ image: none; width: 0; height: 0; }}
+QCalendarWidget QMenu {{
+  background: {CARD};
+  border: 1px solid {LINE};
+  border-radius: {RADIUS_CTRL}px;
+  padding: 4px;
+}}
+QCalendarWidget QMenu::item {{ padding: 4px 18px; border-radius: {RADIUS_CTRL}px; }}
+QCalendarWidget QMenu::item:selected {{ background: {TEAL_SOFT}; color: {INK}; }}
+QCalendarWidget QSpinBox {{
+  background: {CARD};
+  border: 1px solid {LINE};
+  border-radius: {RADIUS_CTRL}px;
+  padding: 0 6px;
+}}
+QCalendarWidget QAbstractItemView {{
+  background: {CARD};
+  color: {INK};
+  outline: none;
+  selection-background-color: {TEAL_SOFT};
+  selection-color: {INK};
+}}
+QCalendarWidget QAbstractItemView:disabled {{ color: {TEXT_DISABLED}; }}
+
 /* ----------------------------------------------------------------- buttons */
 QPushButton {{
   background: {CARD};
@@ -508,6 +644,14 @@ QLabel#SectionTitle {{
   font-weight: 600;
   letter-spacing: 1.4px;
 }}
+QLabel#PluginName {{
+  color: {INK};
+  font-size: {_ui_px + 1}px;
+  font-weight: 700;
+}}
+QLabel#PluginTagline {{
+  color: {DIM};
+}}
 QLabel#Badge {{
   color: {INK2};
   background: {WASH};
@@ -555,11 +699,52 @@ QMenu {{
   background: {CARD}; border: 1px solid {LINE};
   border-radius: {RADIUS_CARD}px; padding: 6px;
 }}
-QMenu::item {{ padding: 7px 20px; border-radius: {RADIUS_CTRL}px; }}
+QMenu::item {{
+  color: {INK}; padding: 7px 20px; border-radius: {RADIUS_CTRL}px;
+  background: transparent;
+}}
+QMenu::item:selected {{ background: {TEAL_SOFT}; color: {INK}; }}
+QMenu::item:disabled {{ color: {TEXT_DISABLED}; background: transparent; }}
 QMenu::separator {{ height: 1px; background: {LINE_SOFT}; margin: 5px 8px; }}
-QMenu::item:selected {{ background: {TEAL_SOFT}; }}
+QMenu::icon {{ padding-left: 6px; }}
+QMenu::indicator {{ width: 16px; height: 16px; }}
+QMenu::scroller {{ background: {CARD}; border: 0; height: 14px; }}
 QDialog {{ background: {CARD}; }}
 QSplitter::handle {{ background: transparent; }}
+"""
+
+
+def menu_stylesheet() -> str:
+    """Standalone sheet for **every** popup menu (R-152).
+
+    A ``QMenu`` is a top-level window, so its look is decided by whatever sheet
+    is in scope when it is *polished*.  Relying on the application-wide sheet is
+    enough today, but it is also the only thing keeping a menu white: with no
+    sheet at all, a dark Windows palette paints a black popup, and the item text
+    (``QMenu`` does **not** inherit ``* { color }`` from a parent widget's sheet)
+    turns white-on-black (L-193).  Handing each menu this sheet makes the colour
+    independent of where and when it was created; ``QMenu::item`` therefore has
+    an explicit ``color`` too, not just a background.
+    """
+    return f"""
+QMenu {{
+  background: {CARD};
+  border: 1px solid {LINE};
+  border-radius: {RADIUS_CARD}px;
+  padding: 6px;
+}}
+QMenu::item {{
+  color: {INK};
+  padding: 7px 20px;
+  border-radius: {RADIUS_CTRL}px;
+  background: transparent;
+}}
+QMenu::item:selected {{ background: {TEAL_SOFT}; color: {INK}; }}
+QMenu::item:disabled {{ color: {TEXT_DISABLED}; background: transparent; }}
+QMenu::separator {{ height: 1px; background: {LINE_SOFT}; margin: 5px 8px; }}
+QMenu::icon {{ padding-left: 6px; }}
+QMenu::indicator {{ width: 16px; height: 16px; }}
+QMenu::scroller {{ background: {CARD}; border: 0; height: 14px; }}
 """
 
 

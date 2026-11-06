@@ -154,6 +154,20 @@ class SendInput(QPlainTextEdit):
             return
         super().keyPressEvent(event)
 
+    # ------------------------------------------------------------------ menu
+    def contextMenuEvent(self, event) -> None:
+        """Undo/redo/cut/copy/paste/select-all, in the light theme (R-152).
+
+        Left to Qt, this menu comes from ``createStandardContextMenu()``, which is
+        a bare top-level ``QMenu`` with **no** stylesheet of its own.  Relying on
+        the application sheet is what let it render black with white text once
+        nothing was in effect for it (L-193).  Building it here keeps every
+        standard action and pins the colours at the same time.
+        """
+        menu = self.createStandardContextMenu()
+        menu.setStyleSheet(theme.menu_stylesheet())
+        menu.exec(event.globalPos())
+
 
 #: Height of one compact option row (label + switch) in the send panel.
 OPT_ROW_H = 20
@@ -410,6 +424,10 @@ class SendPanel(GlassFrame):
         row.addWidget(label)
         switch = ToggleSwitch(holder, checked=checked,
                               width=OPT_SWITCH_W, height=OPT_SWITCH_H)
+        #: Factory state, re-applied on every launch (R-155): the send bar's
+        #: switches are session state, so ``_restore_settings`` puts them back
+        #: here instead of trusting the INI.
+        switch.default = bool(checked)
         switch.setToolTip(tip)
         row.addWidget(switch)
         row.addStretch(1)

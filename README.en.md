@@ -7,9 +7,9 @@
 **A native serial workbench: one window instead of a serial assistant, a terminal,
 a transfer tool and a script interface.**
 
-![version](https://img.shields.io/badge/version-1.1.4-2f6fed)![license](https://img.shields.io/badge/license-MIT-2ea44f)![python](https://img.shields.io/badge/python-3.13-3776ab)![ui](https://img.shields.io/badge/ui-Qt%20%2F%20PySide6-41cd52)![platform](https://img.shields.io/badge/platform-Windows-0078d4)
+![version](https://img.shields.io/badge/version-1.1.5-2f6fed)![license](https://img.shields.io/badge/license-MIT-2ea44f)![python](https://img.shields.io/badge/python-3.13-3776ab)![ui](https://img.shields.io/badge/ui-Qt%20%2F%20PySide6-41cd52)![platform](https://img.shields.io/badge/platform-Windows-0078d4)
 
-[Quick start](#quick-start) · [Features](#features) · [Portable build](#portable-build) · [CLI](#command-line-interface) · [Manual](#user-manual) · [Verify](#verify)
+[Quick start](#quick-start) · [Features](#features) · [Plugins](#plugins) · [Portable build](#portable-build) · [CLI](#command-line-interface) · [Manual](#user-manual) · [Verify](#verify)
 
 </div>
 
@@ -75,6 +75,7 @@ local web server, no browser, and no self-built executable in the distribution.
 </table>
 
 The screenshots are rendered by `python tools/make_screenshots.py` from the real program (virtual DEMO port), not mocked up.
+The plugin pictures come from `python tools/make_plugin_screenshots.py`, which grabs the live plugin pages.
 
 ## Features
 
@@ -115,6 +116,59 @@ The screenshots are rendered by `python tools/make_screenshots.py` from the real
 </td></tr>
 </table>
 
+## Plugins
+
+A plugin is a self-contained folder (`plugin.json` plus an entry module) dropped
+into `plugins/` or `omnicom-data/plugins/`; each one gets its own tab at the top
+of the window. *Plugins -> Plugin store* installs, updates, downgrades and
+removes them by version, and uninstalling keeps the plugin's own user data. Two
+plugins ship with the program.
+
+### Dashboard · `chart`
+
+![Dashboard plugin](docs/images/plugin-chart.png)
+
+<sub>Rendered from the live program: five widgets, each bound to its own channel,
+every readout parsed out of `[OmniCOM-chart]` lines. `python tools/make_plugin_screenshots.py`
+regenerates it and reads the page DOM back first - if one card still says `--`
+the run fails instead of producing a picture.</sub>
+
+If the device prints one line of text, the dashboard grows by itself:
+
+```
+[OmniCOM-chart] temperature=24.6 supply=4.87 current=0.49 level=65 alarm=1
+```
+
+| Widget | How it shows the value | Good for |
+| --- | --- | --- |
+| Line | ECharts polyline, x axis is receive time | trends, jitter, step response |
+| Gauge | half dial pointing at the value within `min`/`max` | anything with bounds, e.g. voltage |
+| Value | one big number plus its unit (2 decimals by default) | a reading without a plot |
+| Bar | fill computed from the card's own min/max | buffer usage, completion |
+| Lamp | lit when the value is non-zero, reads ON / OFF | alarm and status bits |
+
+- **Channels are discovered**: every key in the line becomes a channel (128 max), nothing to configure up front.
+- **The bar respects its range**: below the minimum it is empty, above the maximum it fills and turns red, and the caption shows the range (`0.00 - 100.00`) with the unit; with no data it reads `--`.
+- **Layout is direct**: drag a card anywhere, drag its bottom-right corner to resize; the grid background stays visible so alignment is obvious. There is no edit-mode switch to find.
+- **Each line card carries its own two zoom sliders**, one for the time axis and one for the value axis; pressing on a slider zooms, pressing anywhere else on the card still drags it.
+- **5000 points per channel** are kept, the time window defaults to *all*, nothing is decimated, and a live refresh never resets your zoom.
+- **Export**: CSV for the numbers, PNG for the picture; dropped history, invalid lines, over-long lines and the channel ceiling are counted separately, never silently lost.
+
+### Launcher · `launcher`
+
+![Launcher plugin](docs/images/plugin-launcher.png)
+
+<sub>Rendered from the live program: the top row comes from `apps.json`, the bottom
+row is a genuine window enumeration (the windows in the picture are started by the
+script itself, so none of this machine's own document titles end up in it).</sub>
+
+- **The top row is shortcuts**: one click opens a new instance - debugging two boards at once means one window per board, so the logs never interleave.
+- **The bottom row is what is already running**: one click switches to that window; several windows of the same program are listed separately and can be named A, B.
+- **Both rows can be reordered by dragging** and renamed from the context menu (the bottom row defaults to the window title, and long titles wrap instead of being clipped).
+- **Remove from list** (top row) only deletes the shortcut and leaves the window open; **End this window (process)** (bottom row) closes exactly that one.
+- While the page is on screen the window list is rescanned every 4 s on a background thread, so an unresponsive program cannot freeze the window.
+- The list lives in `omnicom-data/plugin-data/launcher/apps.json`; only `path` is required, and `name` is yours to choose.
+
 ## Quick start
 
 ```bash
@@ -153,7 +207,7 @@ dist/OmniCOM/                # 98 MB with the bundled runtime
 ├── assets/  plugins/  logo.png
 └── README.md / README.en.md
 
-dist/OmniCOM-1.1.4-win64.zip
+dist/OmniCOM-1.1.5-win64.zip
 ```
 
 Unzip and double-click `OmniCOM.cmd`. The target machine needs **no Python, no
@@ -238,8 +292,9 @@ defects in `project-context/LEDGER.md`.
 ### 2. Serial log
 
 * Each line reads `[hh:mm:ss.mmm]RX←◇payload` (received) or `TX→◇payload` (sent). Switch the language and the two direction markers change with it.
-* *Auto-scroll to latest* always follows the newest line. Turn it off and a *back to latest* bubble appears while you read history.
-* *Keep screen awake* stops Windows from blanking or sleeping on idle - handy during a long capture. It is released automatically when OmniCOM closes, and always starts off: the switch is deliberately not remembered.
+* Reaching the bottom resumes following; scrolling up stops it and synchronizes the switch. Turn the switch on or use the latest bubble to resume. Receiving and printing continue.
+* *Keep screen awake* stops Windows from blanking or sleeping on idle - handy during a long capture. It is released automatically when OmniCOM closes, and always starts off: like every other rail / send-bar switch it is deliberately not remembered.
+* Every switch in the left rail and the send bar opens at its default: auto-reconnect, timestamps, echo and auto-scroll on; HEX view, control chars, keep-awake and Enter-to-send off; DTR / RTS low. Nothing is remembered, so a switch turned off in a collapsed rail can never hide your echo on the next launch. The drop-downs (baud, data bits, parity, flow) are still remembered.
 * *Show \r \n and other control chars* applies to both directions, so you can see the line ending that was really sent.
 * *HEX view* prints 16 bytes per line: offset, hex, ASCII.
 * Clearing the log also resets the RX/TX counters in the title bar.
@@ -261,7 +316,7 @@ the bytes are printed as normal send lines and a progress bar tracks the transfe
 
 ### 4. Serial parameters
 
-* DTR and RTS start **low**: many USB-serial boards wire DTR to RESET through a capacitor, so raising it would reboot the device every time the port opens. Flip the switch when you need the line high.
+* DTR and RTS start **low**: many USB-serial boards wire DTR to RESET through a capacitor, so raising it would reboot the device every time the port opens. Flip the switch when you need the line high - but it is not remembered, so the next launch is safe again.
 
 ### 5. File transfer
 
@@ -287,10 +342,21 @@ the bytes are printed as normal send lines and a progress bar tracks the transfe
 * Select log text and right-click Find to replace the old query and search literally. A multi-line selection matches any of its lines.
 * Double-click any row to jump to that line in the log; it flashes.
 * Modes: Plain / Fuzzy (characters in order) / Whole word / Regex, plus a *Match case* switch.
+* Tick *limit to a time range* to search one window of time. Switching it on seeds the range from the log's own first and last timestamp, and *Today* / *All* jump to the common cases. Rendered timestamps carry no date, so the filter compares the full date-time: the same 08:00 on two different days never mixes. An inverted range is reported instead of silently returning nothing, and an empty window says so.
 * The expand arrow blows the results up to the full window; Esc exits.
+* Sidebar results use one line per hit; fullscreen results display all text with character wrapping and no horizontal scrollbar. A full search starts at the first hit; reaching the bottom resumes following and scrolling up stops it. Search results have no dedicated auto-scroll switch or latest button. Switching between the sidebar and fullscreen does not stall: row heights are computed from the character count and cached instead of laying out every row.
 
 ### 8. Plugins
 
+* Plugins → Plugin Store lists every catalog entry and installed plugin, with installed/latest versions, install/update/uninstall actions and an upper-right red update dot. Each row carries a version drop-down, so a specific (older) build can be installed; an older build goes through the identical verification and rollback path as an update, and the search box filters by name, author or description. Offline errors retain the local catalog and allow retry.
+* Configure plugin catalog URLs in Preferences, one per line. All sources are queried; newer versions win for the same ID, with the first source winning ties. One source failing does not block the rest and retains its own cache. The default index is the Git repository's plugins/catalog.json, not a Release asset.
+* Live Charts receives one ASCII line at a time: `[OmniCOM-chart] AA=11 BB=1.1`. Integers, decimals, negative values and scientific notation are supported. Channels appear dynamically with individual visibility checkboxes. The dashboard refreshes as soon as it opens, so its button reads *Pause*; pausing freezes the picture only - reception, the frame counter and the widget values keep running - and *Resume* brings the refresh back. The pause is not remembered: whether the last dashboard was paused or closed, reopening always comes up refreshing instead of a frozen picture.
+* Charts offer a time window, per-channel history limit, axis reset, clear and CSV export. Invalid/oversized frames, evicted history and excess channels are counted. The time axis uses relative host receive time, not the device sample clock.
+* Each channel keeps its latest 5000 samples and the time window defaults to All; every retained point is drawn, with no down-sampling, and a live refresh never resets the zoom.
+* There are five widget kinds: line, gauge, value, progress bar and lamp. A progress bar turns the current value into a fill proportion using the card's own minimum and maximum, with the range and a unit-suffixed readout underneath. Below the minimum the bar is empty, above the maximum it is full and turns red, and a card without data shows `--`.
+* The dashboard has no edit switch: every card is draggable at all times, the lower-right corner resizes it, and the snap grid stays visible as a guide.
+* Every line card carries two independent zoom sliders - horizontal under the plot, vertical at its right - so you can magnify the time axis alone or the value axis alone. Pressing a strip zooms; pressing anywhere else on the card still drags it. The dashboard has no page-wide Ctrl+wheel zoom, because that scaled the cards and the toolbar together and could only be undone by restarting.
+* The store uses a separately published HTTPS catalog and verifies package SHA-256, metadata and API compatibility. It installs into the data directory; uninstall preserves plugin-data. Plugins are trusted Python code, not sandboxed. Plugin releases do not require an application update.
 * A plugin is a folder under `plugins/` or `omnicom-data/plugins/`; each one gets its own tab in the top bar.
 * Copy the whole folder to another machine's `plugins/`, press *Plugins → Reload* and it is installed.
 * Ships with *Launcher*: the top row holds shortcuts (click opens a new window) and the bottom row holds running windows (click to switch to that window).
@@ -307,6 +373,8 @@ the bytes are printed as normal send lines and a progress bar tracks the transfe
 
 * `python -m omnicom.cli ports` lists ports; `send` sends and waits for a reply; `read` reads; `monitor` streams.
 * `session --script file.json` runs a scripted exchange.
+* Control lines are fully scriptable: `lines --line-dtr on --line-rts off` moves DTR / RTS in place (no reopen), and `reset --line dtr --low-ms 120` emits a reset pulse (low, wait, high) that ends with the line high. `lines` also reports CTS / DSR; a driver that cannot see a line reports `null`, not `false`, and writing CTS / DSR or passing a bad value is an error rather than a silent success.
+* Use `--dsrdtr` for DSR/DTR hardware handshake (distinct from `--flow rtscts`). With a window open these commands go through it, so the two switches follow.
 * Every command writes exactly **one** JSON document to stdout - `monitor`, `send --repeat N` and `send --ports A,B` write one per line.
 * The exit code always matches `ok`: 0 success, 1 failure, 2 bad usage. stdout is UTF-8, so non-ASCII text survives the pipe.
 * Wait for a fixed answer with `--expect OK --wait 2`; for commands that do not echo, use `--settle 0.4` to return 0.4 s after the last byte instead of burning the whole `--wait`.
@@ -344,11 +412,12 @@ the bytes are printed as normal send lines and a progress bar tracks the transfe
 * The port list shows *port number + device name*, e.g. `COM139  USB-Enhanced-SERIAL CH340`; hover for the full name and hardware ID.
 * Opening usually fails because another program holds the port (another terminal, a VM, a vendor flasher), the driver is missing, or the cable has no data wires. Refresh the list and try another port.
 * Keep *auto-reconnect* on and unplugging/replugging re-attaches the same device instead of a same-named one.
-* DTR / RTS start low (see above); switch them on for boards that need the lines high - the choice is remembered per machine.
+* DTR / RTS start low (see above); switch them on for boards that need the lines high - the choice is **not** remembered, so a later launch cannot reset the board.
 
 ### 15. Multiple windows
 
 * Several windows can run at once, each with its own port and its own log. Size, split and composer height are remembered per window (`window-<n>.ini`).
+* Maximising and restoring (title-bar button, double-click, or dragging to the screen top for Aero Snap) slides instead of jumping, and repeated round trips never shrink the window.
 * The launcher plugin opens a new window per shortcut, so two boards never share a log.
 * The CLI routes by **port name**: `cli state --port COM5` asks the window that owns COM5 and nothing else; `--window <PID>` pins a specific window.
 

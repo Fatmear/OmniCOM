@@ -65,6 +65,21 @@ class SerialBridge(QObject):
     def update_opts(self, opts: dict) -> None:
         self._submit(self.manager.update_opts, dict(opts))
 
+    def set_lines(self, patch: dict) -> dict:
+        """Drive DTR/RTS on the calling thread and return the new line state.
+
+        Unlike the other lifecycle calls this one is **synchronous and does not
+        go through the executor** (R-156): a control-line edge is a matter of
+        microseconds, a ``reset`` pulse needs both edges in order, and queueing
+        them behind a pending open would turn a 120 ms pulse into seconds.  The
+        pyserial attribute write is a kernel ioctl, so it does not block.
+        """
+        try:
+            return self.manager.set_control_lines(dict(patch or {}))
+        except Exception as exc:                      # never crash the GUI
+            return {"applied": {}, "lines": self.manager.control_lines(),
+                    "error": str(exc)}
+
     def set_capture_dir(self, directory: str) -> None:
         """Follow the folder chosen in Preferences (R-070)."""
         self.recorder.set_directory(directory)

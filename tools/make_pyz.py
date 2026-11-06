@@ -11,8 +11,12 @@ So this script stops shipping a new executable at all (R-019 / R-083):
     dist/OmniCOM/
         OmniCOM.pyz        our own code, one zip (also readable as source)
         OmniCOM.cmd        double-click / shortcut target
-        assets/  plugins/  the same files the source tree uses
+        assets/            icons and logos
         omnicom-data/      created on first run (logs, commands, plugins)
+
+No ``plugins/`` folder is shipped any more (R-174): every plugin - the data
+dashboard included - is installed from the plugin store, so a release can never
+shadow the copy the user installed or reinstall one they removed.
 
 The launcher runs ``pythonw`` (no console) or ``python`` (console, for debugging)
 from PATH; nothing is compiled, nothing is self-extracting, so there is nothing
@@ -93,7 +97,10 @@ def build(target: Path, *, stubs_only: bool = False) -> Path:
                           compressed=True)
     shutil.rmtree(staging)
 
-    for folder in ("assets", "plugins"):
+    # Only ``assets`` ships beside the archive (R-174).  Plugins are **not**
+    # bundled any more: every plugin comes from the plugin store, so an update
+    # can never resurrect a built-in copy next to the user's installed one.
+    for folder in ("assets",):
         destination = target / folder
         if destination.exists():
             shutil.rmtree(destination)
@@ -105,10 +112,18 @@ def build(target: Path, *, stubs_only: bool = False) -> Path:
             shutil.copy2(ROOT / asset, target / asset)
     # The CLI contract has to travel with the program: an agent that only has the
     # unzipped folder must be able to learn the whole interface from it (R-086).
-    for doc in ("CLI.md", "AI-GUIDE.md"):
+    for doc in ("CLI.md", "AI-GUIDE.md", "PLUGINS.md"):
         source = ROOT / "docs" / doc
         if source.is_file():
             shutil.copy2(source, target / doc)
+    # ``docs/PLUGINS.md`` sits in ``docs/`` in the repository but lands at the
+    # bundle root, so its ``images/...`` links would point a level too high and
+    # every embedded picture would be broken inside the portable folder.
+    plugins_doc = target / "PLUGINS.md"
+    if plugins_doc.is_file():
+        text = plugins_doc.read_text(encoding="utf-8")
+        plugins_doc.write_text(text.replace("](images/", "](docs/images/"),
+                              encoding="utf-8", newline="\n")
     # The READMEs embed `docs/images/*.png`; ship them or the copy inside the
     # bundle shows six broken pictures.
     images = ROOT / "docs" / "images"

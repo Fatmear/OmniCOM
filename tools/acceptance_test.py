@@ -108,14 +108,14 @@ TITLES = {
     "R-059": "快捷启动右键删除与配置持久化",
     "R-060": "多窗口独立图标、精确绑定与切换",
     "R-061": "波特率可自定义（真实键盘输入）",
-    "R-062": "屏幕常亮开关（每次启动为关、关闭时释放）",
+    "R-062": "屏幕常亮开关（每次启动为关、关闭时释放、电源方案本就永不关屏时明确告知）",
     "R-063": "快捷启动上下两区 + 窗口实例重命名 + 长名称完整显示",
     "R-064": "快捷启动上下两区支持拖拽排序并持久化",
     "R-065": "上排删除只删快捷方式、下排删除只结束该窗口",
     "R-066": "收发双向记录到文件 + 随时清空并继续记录",
     "R-067": "左栏底部不再重复串口/流控/版本信息",
     "R-068": "左栏默认宽度与右侧栏一致",
-    "R-069": "版本号为 1.1.4",
+    "R-069": "版本号为 1.1.5",
     "R-070": "首选项可设置日志默认保存目录",
     "R-071": "首选项可换主题色 / 设置壁纸",
     "R-072": "日志更新时搜索结果持续追加",
@@ -187,8 +187,46 @@ TITLES = {
     "R-141": "两个展开分组之间只留一段行距（不是一大块空白）",
     "R-142": "随包文档里的版本声明必须等于 __version__",
     "R-143": "检查更新要有进度、有结论、有当前版本，失败要说明原因",
-    "R-144": "搜索结果不自动滚到最新，改为浮动「回到最新命中」按钮",
+    "R-144": "搜索到底跟随、上滑停止，无搜索专用开关或气泡",
     "R-145": "更新检查直接读取发布页，不访问 GitHub API",
+    "R-146": "搜索侧栏单行可横向滚动，仅全屏完整换行且无水平滚动",
+    "R-147": "独立动态多通道 ASCII 实时曲线插件",
+    "R-148": "独立插件商店、版本状态、更新红点及安全安装卸载",
+    "R-149": "曲线宽布局、仓库内插件目录及首选项多来源聚合",
+    "R-150": "左栏自动滚动单次跳底、单项保存与点击响应",
+    "R-151": "实时曲线真正绘出（固件前缀可解析、曲线不被网格遮挡）",
+    "R-152": "全软件右键菜单为浅色主题，无黑底白字",
+    "R-153": "全屏 / 还原瞬时切换（滑动动画已撤销）且不缩小窗口",
+    "R-154": "关键字搜索支持按完整日期时间范围过滤",
+    "R-155": "左栏与发送栏开关每次开启都回到默认，不再记忆",
+    "R-156": "CLI 完整支持 DTR/RTS/CTS/DSR 控制线读写与复位脉冲",
+    "R-157": "首选项下拉框/数值框未点开时滚轮不改配置",
+    "R-158": "搜索时间输入框与相邻控件同外观，日历弹层浅色主题",
+    "R-159": "左栏开关只有文字与开关本体可点，中间空白不生效",
+    "R-160": "点击关闭按钮窗口立刻消失，配置落盘在隐藏之后",
+    "R-161": "可拖拽数据看板（曲线/仪表盘/数值/进度条/指示灯，离线 ECharts）",
+    "R-162": "自动重连只连回同一台设备（USB 序列号 / 拓扑位置）",
+    "R-163": "最大化 / 还原 / Aero Snap 即时完成且无卡顿",
+    "R-164": "曲线控件历史至少保留 5000 帧，不因降采样丢细节",
+    "R-165": "看板卡片 × 真正删除控件，页面到 Python 的回传不丢失",
+    "R-166": "指示灯圆点直径放大一倍且保持正圆",
+    "R-167": "运行按钮配色对齐串口开关（空闲白色 / 运行主题色）",
+    "R-168": "日志窗口 20 MB 以上清除立即生效不卡顿",
+    "R-169": "看板卡片任何时候都能拖动，不需要先勾选「编辑」",
+    "R-170": "曲线横轴纵轴独立缩放、刷新不重置、不误触拖动",
+    "R-171": "看板禁止 Ctrl+滚轮缩放整个界面",
+    "R-172": "看板新增进度条控件，按 min..max 展示当前值",
+    "R-173": "看板去掉开关控件与编辑开关，网格背景常显",
+    "R-174": "发布包不再内置任何插件，插件只从插件商店安装",
+    "R-175": "搜索结果全屏切换不卡顿（行高自算并缓存，不逐行排版）",
+    "R-176": "看板默认且始终为运行状态，按钮为「暂停/继续」，暂停状态不记忆",
+    "R-177": "按时间过滤开关不闪烁（时间块一次布局到位）",
+    "R-178": "插件商店每个插件带版本下拉框，可安装指定版本（含降级）",
+    "R-179": "搜索结果已有数据时开关「按时间过滤」不卡顿（不重建已有行）",
+    "R-180": "插件商店插件名加粗，并与介绍之间有分隔线",
+    "R-181": "插件商店检查更新不再闪现空白小窗口（徽标不再变成顶层窗口）",
+    "R-182": "数据看板五种控件都必须显示真实数值，不得留着 --",
+    "R-183": "快捷启动插件有回归测试（上排快捷方式、下排运行中窗口、计数与改名）",
 }
 
 
@@ -416,6 +454,102 @@ def suite_cli() -> None:
     add("R-125", "并发调用各自仍只输出一个文档",
         all(len((out or "").strip().splitlines()) == 1 for out, _ in outputs),
         "每个进程 1 行")
+
+    # ---- R-156: control lines (DTR / RTS / CTS / DSR) --------------------
+    # Read: every pin is reported, and the two inputs are booleans once a
+    # handle is open (``None`` would mean "the driver cannot see this line").
+    pins = cli_json("lines", "--port", "DEMO", "--direct")
+    add("R-156", "lines 报告 DTR/RTS/CTS/DSR 四根线",
+        pins.get("ok") is True
+        and {"dtr", "rts", "cts", "dsr"} <= set(pins.get("lines") or {}),
+        pins.get("lines"))
+    add("R-156", "打开串口时 DTR/RTS 默认仍为低（R-120 不被破坏）",
+        (pins.get("lines") or {}).get("dtr") is False
+        and (pins.get("lines") or {}).get("rts") is False,
+        pins.get("lines"))
+
+    # Drive: ``--line-dtr on`` must actually raise the pin and report it.
+    raised = cli_json("lines", "--port", "DEMO", "--direct", "--line-dtr", "on")
+    add("R-156", "--line-dtr on 就地拉高 DTR",
+        (raised.get("lines") or {}).get("dtr") is True
+        and (raised.get("applied") or {}).get("dtr") is True,
+        raised.get("lines"))
+    add("R-156", "只改 DTR 时 RTS 保持不动",
+        (raised.get("lines") or {}).get("rts") is False, raised.get("lines"))
+
+    # A bad value must be refused, not silently coerced to False.  argparse
+    # rejects it before ``line_value`` runs, which is the stronger outcome: the
+    # process leaves with a non-zero code and never emits a success document.
+    bad = run(["-m", "omnicom.cli", "lines", "--port", "DEMO", "--direct",
+               "--line-dtr", "maybe"])
+    add("R-156", "非法控制线取值被拒绝（不静默当作 off）",
+        bad.returncode != 0 and '"ok": true' not in (bad.stdout or ""),
+        f"exit={bad.returncode}")
+
+    # --dsrdtr reaches the opts dict instead of being dropped (L-205).
+    dsr = cli_json("lines", "--port", "DEMO", "--direct", "--dsrdtr")
+    add("R-156", "--dsrdtr 出现在串口选项中",
+        (dsr.get("opts") or {}).get("dsrdtr") is True, dsr.get("opts"))
+    add("R-156", "默认不开启 --dsrdtr",
+        (pins.get("opts") or {}).get("dsrdtr") is False, pins.get("opts"))
+
+    # reset: both edges in order, and the pin ends high.
+    pulse = cli_json("reset", "--port", "DEMO", "--direct", "--low-ms", "40")
+    edges = pulse.get("edges") or []
+    add("R-156", "reset 产生低->高两个沿",
+        pulse.get("ok") is True and [item.get("edge") for item in edges]
+        == ["low", "high"], [item.get("edge") for item in edges])
+    add("R-156", "reset 结束时 DTR 为高",
+        (pulse.get("lines") or {}).get("dtr") is True, pulse.get("lines"))
+
+    # The scripted ``line`` / ``pulse`` verbs must work without hardware.
+    script_path = os.path.join(ROOT, ".artifacts", "r156-lines.json")
+    os.makedirs(os.path.dirname(script_path), exist_ok=True)
+    with open(script_path, "w", encoding="utf-8") as handle:
+        json.dump({"port": "DEMO", "steps": [
+            {"line": {"dtr": "on", "rts": "on"}},
+            {"lines": True},
+            {"pulse": {"line": "dtr", "low_ms": 30}},
+        ]}, handle)
+    out = run(["-m", "omnicom.cli", "session", "--port", "DEMO", "--direct",
+               "--script", script_path])
+    payload = json.loads((out.stdout or "").strip() or "{}")
+    results = payload.get("results") or []
+    add("R-156", "脚本 line 步骤能拉高两根线",
+        payload.get("ok") is True and bool(results)
+        and (results[0].get("lines") or {}).get("dtr") is True
+        and (results[0].get("lines") or {}).get("rts") is True,
+        results[0] if results else "")
+    add("R-156", "脚本 lines 步骤能读回控制线",
+        len(results) > 1
+        and {"dtr", "rts", "cts", "dsr"} <= set(results[1].get("lines") or {}),
+        results[1] if len(results) > 1 else "")
+    add("R-156", "脚本 pulse 步骤产生两个沿",
+        len(results) > 2 and [item.get("level")
+                              for item in (results[2].get("edges") or [])]
+        == [False, True],
+        results[2] if len(results) > 2 else "")
+
+    # A scripted ``line`` step with a read-only pin or a bad word must fail the
+    # step.  Filtering the key silently reported ``ok: true`` with an empty
+    # patch, so ``{"line": {"cts": true}}`` looked like a successful reset.
+    # A session stops at the first failed step (steps_run == 1), so each bad
+    # step needs its own script.
+    def scripted_line(spec: dict) -> dict:
+        with open(script_path, "w", encoding="utf-8") as handle:
+            json.dump({"port": "DEMO", "steps": [{"line": spec}]}, handle)
+        result = run(["-m", "omnicom.cli", "session", "--port", "DEMO",
+                      "--direct", "--script", script_path])
+        doc = json.loads((result.stdout or "").strip() or "{}")
+        steps = doc.get("results") or []
+        return steps[0] if steps else {}
+
+    step = scripted_line({"cts": "on"})
+    add("R-156", "脚本 line 步骤拒绝只读线 CTS",
+        step.get("ok") is False and "dtr" in str(step.get("error")), step)
+    step = scripted_line({"dtr": "maybe"})
+    add("R-156", "脚本 line 步骤拒绝非法取值",
+        step.get("ok") is False and "不合法" in str(step.get("error")), step)
 
 
 GUI_LINE = re.compile(r"^\s*(PASS|FAIL)\s+(R-\d+)\s+(.*?)\s*(?:\[(.*)\])?$")
@@ -1031,6 +1165,14 @@ input()
 
 def suite_visual() -> None:
     print("\n== 6/6 视觉 / 交付形态")
+    plugins = run(["tools/plugin_selftest.py"], timeout=180)
+    for line in (plugins.stdout or "").splitlines():
+        match = GUI_LINE.match(line)
+        if match:
+            status, req, name, detail = match.groups()
+            add(req, name.strip(), status == "PASS", detail or "")
+    add("R-148", "插件/曲线/换行独立回归整体通过", plugins.returncode == 0,
+        "" if plugins.returncode == 0 else (plugins.stderr or "")[-1500:])
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     os.environ.setdefault("OMNICOM_SETTINGS_SUFFIX", "-test")
     from PySide6.QtWidgets import QApplication
@@ -1482,25 +1624,31 @@ def suite_visual() -> None:
             and not os.path.exists(os.path.join(download_dir, update_mod.PENDING_MARKER))
             and not os.path.exists(os.path.join(download_dir, "staged-9.9.9")))
 
-    # -- R-144: the result list must not follow new hits; a floating bubble
-    #    takes the user back to the newest one instead, exactly like the log.
-    search_source = source_of("omnicom", "ui", "search_panel.py")
-    add("R-144", "追加结果时不滚动（跟随会把用户正在看的那行拖走）",
-        "def _append_row" in search_source
-        and "def jump_to_latest" in search_source
-        and "scrollToBottom" not in search_source.split("def jump_to_latest")[0])
-    add("R-144", "结果视图上有和日志同款的浮动「回到最新命中」按钮",
-        "ScrollBottomPill" in search_source
-        and "self.scroll_pill" in search_source
-        # Same widget class as the log's bubble, not a second implementation.
-        and "self.scroll_pill = ScrollBottomPill(log_host)" in window_source)
-    add("R-144", "滚动位置与尺寸变化都会重算气泡该不该出现",
-        "valueChanged.connect" in search_source
-        and "rangeChanged.connect" in search_source
-        and "QEvent.Resize" in search_source)
-    add("R-144", "清空结果会收起气泡",
-        "def clear_results" in search_source
-        and "self.scroll_pill.hide_pill()" in search_source)
+    from omnicom.ui.search_panel import SearchPanel
+    from omnicom.ui.widgets import ScrollBottomPill, SwitchRow, TailFollow
+
+    search_probe = SearchPanel()
+    add("R-144", "搜索与日志复用到底跟随/离底停止状态机，追加受保护",
+        isinstance(search_probe._tail_follow, TailFollow)
+        and search_probe._tail_follow._view is search_probe.results)
+    add("R-144", "搜索没有滚动开关或最新气泡实例",
+        not search_probe.findChildren(ScrollBottomPill)
+        and not search_probe.findChildren(SwitchRow))
+    search_probe.set_fullscreen(True)
+    fullscreen_clean = (search_probe.results.wordWrap()
+                        and not search_probe.findChildren(ScrollBottomPill)
+                        and not search_probe.findChildren(SwitchRow))
+    search_probe.set_fullscreen(False)
+    add("R-144", "全屏和侧栏切换不会重新创建搜索滚动控件",
+        fullscreen_clean and not search_probe.results.wordWrap()
+        and not search_probe.findChildren(ScrollBottomPill)
+        and not search_probe.findChildren(SwitchRow))
+    search_probe.add_hit(0, "probe", block=0)
+    search_probe.clear_results()
+    add("R-144", "清空结果不残留命中或滚动控件",
+        search_probe.hits == 0 and search_probe.results.count() == 0
+        and not search_probe.findChildren(ScrollBottomPill))
+    search_probe.close()
 
     add("R-110", "\\r\\n 框与 HEX / 回车开关组成同高的一组",
         "OPT_BAND_H = 2 * OPT_ROW_H" in send_source
@@ -1521,10 +1669,11 @@ def suite_visual() -> None:
         "OPT_LABEL_W" in send_source
         and "label.setFixedWidth(OPT_LABEL_W)" in send_source)
 
-    add("R-094", "回车发送默认关闭",
+    add("R-094", "回车发送默认关闭且不被记住（R-155 改为会话状态）",
         "self.enter_sends = False" in send_source
         and 'setValue("display/enter_send", "0"' not in window_source
-        and 'value("display/enter_send", "0")' in window_source)
+        and 'value("display/enter_send", "0")' not in window_source
+        and '("row_enter", "display/enter_send")' in window_source)
 
     add("R-115", "日志按字符换行，首行不会被整段正文挤走",
         "self.setWordWrapMode(QTextOption.WrapAnywhere)" in log_source_full
@@ -1597,10 +1746,22 @@ def suite_visual() -> None:
         and '"rts": False' in serial_source
         and 'SwitchRow("DTR", False' in window_source
         and 'SwitchRow("RTS", False' in window_source
-        and 's.value("serial/dtr", "0")' in window_source)
+        # R-155 removed the read; the pair must stay forced to its default and
+        # the old key must be purged, never restored (a raised DTR resets the
+        # board through the RESET capacitor - L-145).
+        and 's.value("serial/dtr", "0")' not in window_source
+        and '("row_dtr", "serial/dtr")' in window_source)
     add("R-120", "CLI 默认不开 DTR/RTS，需要显式 --dtr / --rts",
-        '"dtr": bool(getattr(args, "dtr", False))' in cli_source
-        and 'p.add_argument("--dtr", action="store_true",' in cli_source)
+        # ``--no-dtr`` / ``--no-rts`` (R-156) turned the inline expression into
+        # a computed local, so assert the semantics rather than the old literal:
+        # the default is False and the flag is the only way to raise it.
+        'dtr = bool(getattr(args, "dtr", False)) and not getattr(args, "no_dtr", False)'
+        in cli_source
+        and 'rts = bool(getattr(args, "rts", False)) and not getattr(args, "no_rts", False)'
+        in cli_source
+        and 'p.add_argument("--dtr", action="store_true",' in cli_source
+        and "DEFAULT_OPTS" in serial_source
+        and '"dtr": False' in serial_source)
 
     add("R-121", "可以从本地 zip 升级：版本号读包内，非法包被拒",
         "def package_version" in update_source
@@ -1716,17 +1877,30 @@ def suite_visual() -> None:
     import re as _re
 
     image_re = _re.compile(r'!\[[^\]]*\]\(([^)]+)\)|<img src="([^"]+)"')
-    readme_path = os.path.join(ROOT, "README.md")
-    with open(readme_path, encoding="utf-8") as handle:
-        readme_body = handle.read()
-    missing = [hit[0] or hit[1] for hit in image_re.findall(readme_body)
-               if not (hit[0] or hit[1]).startswith("http")
-               and not os.path.isfile(os.path.join(ROOT, hit[0] or hit[1]))]
+
+    def broken_images(doc: str, base: str) -> list[str]:
+        """Relative image links in ``doc`` that do not resolve from ``base``."""
+        with open(os.path.join(ROOT, doc), encoding="utf-8") as handle:
+            body = handle.read()
+        return [hit for hit in (one or two for one, two in image_re.findall(body))
+                if not hit.startswith("http")
+                and not os.path.isfile(os.path.join(ROOT, base, hit))]
+
+    missing = broken_images("README.md", ".")
     add("R-034", "README 引用的截图都真实存在（不会出现坏图）", not missing,
         missing)
+    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as handle:
+        readme_body = handle.read()
     add("R-034", "README 至少展示一张界面截图",
-        any("docs/images/" in (hit[0] or hit[1])
-            for hit in image_re.findall(readme_body)))
+        any("docs/images/" in (one or two)
+            for one, two in image_re.findall(readme_body)))
+    # The English README and the shipped plugin guide carry the same pictures,
+    # and a path typo there is invisible to anyone reading Chinese (R-182/R-183).
+    en_missing = broken_images("README.en.md", ".")
+    add("R-034", "README.en 引用的截图都真实存在", not en_missing, en_missing)
+    plugins_missing = broken_images(os.path.join("docs", "PLUGINS.md"), "docs")
+    add("R-034", "插件说明里的实机图都真实存在", not plugins_missing,
+        plugins_missing)
     add("R-086", "打包版的 OmniCOM.cmd cli … 会保留 stdout 与退出码",
         # Text markers only: a literal backslash path here is one escaping
         # level away from silently matching the wrong occurrence.

@@ -32,7 +32,6 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -186,23 +185,25 @@ def _extract_icon(path: str, size: int = 48) -> QIcon:
 def _letter_icon(name: str, size: int = 48) -> QIcon:
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing, True)
-    hue = (sum(ord(char) for char in name) * 37) % 360
-    color = QColor.fromHsv(hue, 150, 205)
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(color)
-    radius = size * 0.32
-    painter.drawRoundedRect(0, 0, size, size, radius, radius)
-    painter.setPen(QPen(QColor("#FFFFFF")))
-    font = painter.font()
-    font.setPixelSize(int(size * 0.5))
-    font.setBold(True)
-    painter.setFont(font)
-    painter.drawText(pixmap.rect(), Qt.AlignCenter,
-                     (name[:1] or "?").upper())
-    painter.end()
-    return QIcon(pixmap)
+    try:
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        hue = (sum(ord(char) for char in name) * 37) % 360
+        color = QColor.fromHsv(hue, 150, 205)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(color)
+        radius = size * 0.32
+        painter.drawRoundedRect(0, 0, size, size, radius, radius)
+        painter.setPen(QPen(QColor("#FFFFFF")))
+        font = painter.font()
+        font.setPixelSize(int(size * 0.5))
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(pixmap.rect(), Qt.AlignCenter,
+                         (name[:1] or "?").upper())
+        return QIcon(pixmap)
+    finally:
+        painter.end()
 
 
 # --------------------------------------------------------------------------- #
@@ -345,37 +346,40 @@ class AppTile(QWidget):
 
     # -- painting ---------------------------------------------------------
     def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        if self._hover or self._press:
-            painter.setPen(QPen(QColor(18, 26, 43, 60 if self._press else 34), 1))
-            painter.setBrush(QColor(18, 26, 43, 30 if self._press else 12))
-            painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 12, 12)
-        elif self.property("dropTarget"):
-            painter.setPen(QPen(QColor("#0B7A6E"), 2, Qt.DashLine))
-            painter.setBrush(QColor(11, 122, 110, 18))
-            painter.drawRoundedRect(self.rect().adjusted(1, 1, -2, -2), 12, 12)
-        painter.drawPixmap((TILE_W - ICON_PX) // 2, TILE_PAD,
-                           self._icon.pixmap(QSize(ICON_PX, ICON_PX)))
+        try:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            if self._hover or self._press:
+                painter.setPen(QPen(QColor(18, 26, 43, 60 if self._press else 34), 1))
+                painter.setBrush(QColor(18, 26, 43, 30 if self._press else 12))
+                painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 12, 12)
+            elif self.property("dropTarget"):
+                painter.setPen(QPen(QColor("#0B7A6E"), 2, Qt.DashLine))
+                painter.setBrush(QColor(11, 122, 110, 18))
+                painter.drawRoundedRect(self.rect().adjusted(1, 1, -2, -2), 12, 12)
+            painter.drawPixmap((TILE_W - ICON_PX) // 2, TILE_PAD,
+                               self._icon.pixmap(QSize(ICON_PX, ICON_PX)))
 
-        font = painter.font()
-        font.setPixelSize(11)
-        painter.setFont(font)
-        metrics = QFontMetrics(font)
-        painter.setPen(QColor("#121A2B"))
-        text = self.title or ""
-        rect = self._text_rect()
-        wrapped = metrics.boundingRect(rect, Qt.TextWordWrap | Qt.AlignHCenter, text)
-        if wrapped.height() > rect.height():
-            # Only an unreasonably long name loses its tail; the tooltip keeps
-            # the whole text, so nothing is silently hidden.
-            flags = Qt.AlignHCenter | Qt.AlignTop
-            text = metrics.elidedText(text, Qt.ElideRight, rect.width())
-        else:
-            flags = Qt.TextWordWrap | Qt.AlignHCenter | Qt.AlignTop
-        painter.drawText(rect, flags, text)
-        if self._running:
-            self._paint_badge(painter)
+            font = painter.font()
+            font.setPixelSize(11)
+            painter.setFont(font)
+            metrics = QFontMetrics(font)
+            painter.setPen(QColor("#121A2B"))
+            text = self.title or ""
+            rect = self._text_rect()
+            wrapped = metrics.boundingRect(rect, Qt.TextWordWrap | Qt.AlignHCenter, text)
+            if wrapped.height() > rect.height():
+                # Only an unreasonably long name loses its tail; the tooltip keeps
+                # the whole text, so nothing is silently hidden.
+                flags = Qt.AlignHCenter | Qt.AlignTop
+                text = metrics.elidedText(text, Qt.ElideRight, rect.width())
+            else:
+                flags = Qt.TextWordWrap | Qt.AlignHCenter | Qt.AlignTop
+            painter.drawText(rect, flags, text)
+            if self._running:
+                self._paint_badge(painter)
+        finally:
+            painter.end()
 
     def _paint_badge(self, painter: QPainter) -> None:
         painter.setRenderHint(QPainter.Antialiasing, True)
@@ -845,7 +849,9 @@ class LauncherPage(QWidget):
         app = next((item for item in self.apps if item["id"] == payload.get("id")), None)
         if app is None:
             return
-        menu = QMenu(self)
+        # Themes menu through the host factory: a bare QMenu is a top-level
+        # window, so it renders black on a dark Windows palette (R-152 / L-193).
+        menu = self.api.menu(self)
         if instance is None:
             launch = menu.addAction(self.api.t("打开一个新窗口", "Open a new window"))
             rename = menu.addAction(self.api.t("重命名…", "Rename…"))

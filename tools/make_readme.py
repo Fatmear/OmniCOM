@@ -38,7 +38,7 @@ HEADER_ZH = f"""<div align="center">
 
 {BADGES}
 
-[快速开始](#快速开始) · [功能](#功能) · [便携包](#免安装便携包) · [命令行接口](#命令行接口) · [使用说明](#使用说明) · [验证](#验证)
+[快速开始](#快速开始) · [功能](#功能) · [插件](#插件) · [便携包](#免安装便携包) · [命令行接口](#命令行接口) · [使用说明](#使用说明) · [验证](#验证)
 
 </div>
 
@@ -103,7 +103,8 @@ HEADER_ZH = f"""<div align="center">
 </tr>
 </table>
 
-截图由 `python tools/make_screenshots.py` 用真实程序渲染（虚拟串口 DEMO），不是拼的示意图。
+截图由 `python tools/make_screenshots.py` 用真实程序渲染（虚拟串口 DEMO），
+插件截图由 `python tools/make_plugin_screenshots.py` 从活的插件页面抓取，不是拼的示意图。
 
 ## 功能
 
@@ -143,6 +144,54 @@ HEADER_ZH = f"""<div align="center">
 
 </td></tr>
 </table>
+
+## 插件
+
+插件是自包含目录（`plugin.json` + 入口模块），放在 `plugins/` 或
+`omnicom-data/plugins/` 下，每个插件在顶部占一个标签页；
+「插件 → 插件商店」可以按版本安装、更新、降级和卸载，卸载时保留插件自己的用户数据。
+随包提供两个插件。
+
+### 数据看板 · `chart`
+
+![数据看板插件](docs/images/plugin-chart.png)
+
+<sub>实机渲染：五个控件各绑一个通道，读数全部来自 `[OmniCOM-chart]` 报文解析，不是拼的示意图。
+`python tools/make_plugin_screenshots.py` 负责重新生成，生成前会读回页面 DOM，某一格还是 `--` 就直接报错不出图。</sub>
+
+设备只要逐行打印一行文本，看板自己就长出来：
+
+```
+[OmniCOM-chart] temperature=24.6 supply=4.87 current=0.49 level=65 alarm=1
+```
+
+| 控件 | 显示方式 | 适用 |
+| --- | --- | --- |
+| 曲线 | ECharts 折线，横轴是接收时间 | 趋势、抖动、响应过程 |
+| 仪表盘 | 半圆表，按 `min`/`max` 指到当前值 | 电压、温度这类有上下限的量 |
+| 数值 | 一个大数字 + 单位（小数位默认 2） | 只要读数、不要图形的场合 |
+| 进度条 | 按卡片自己的最小/最大值折算填充 | 缓冲占用、进度百分比 |
+| 指示灯 | 非 0 就亮，显示 ON / OFF | 告警位、状态位 |
+
+- **自动发现变量**：报文里出现的键自动成为通道（最多 128 个），不用预先配置。
+- **进度条有量程**：低于下限为空，高于上限填满并变红，下方显示 `0.00 – 100.00` 这样的范围和带单位读数；没有数据时显示 `--`。
+- **随手排布**：卡片直接拖、右下角拖拽改尺寸，网格背景一直显着对位；没有「编辑」开关这一步。
+- **每张曲线卡自带横、纵两个缩放滑块**：可以只放大时间轴或只放大数值轴；滑条区域按住是缩放，其它位置按住仍然是拖动。
+- **每通道只留最近 5000 点**，时间窗默认「全部」，只显示不抽稀，实时刷新不会重置你的缩放。
+- **导出**：CSV 留数据、PNG 留画面；历史淘汰、无效行、超长行、通道上限分别计数，不会悄悄丢。
+
+### 快捷启动 · `launcher`
+
+![快捷启动插件](docs/images/plugin-launcher.png)
+
+<sub>实机渲染：上排快捷方式来自 `apps.json`，下排是真实枚举到的窗口（这张图里的窗口是脚本自己启的，不会拍到你本机的文档标题）。</sub>
+
+- **上排是快捷方式**：点一下新开一个窗口——同时调两块板子时，一块板一个窗口，抓日志不会串。
+- **下排是正在运行的窗口**：点一下直接切过去；同一个程序开了多个窗口时带实例角标，可以分别命名 A、B。
+- **两排都能拖拽排序**，右键重命名（下排默认用窗口标题，长名字自动换行不遮挡）。
+- **上排「从列表移除」只删快捷方式**，不关闭已经开着的窗口；下排「结束这个窗口（进程）」只关那一个。
+- 页面在屏幕上时每 4 秒后台重扫一次窗口，扫描从不在界面线程上跑，卡死的程序不会连带冻住窗口。
+- 列表存在 `omnicom-data/plugin-data/launcher/apps.json`，只有 `path` 是必填，`name` 可以自己起。
 
 ## 快速开始
 
@@ -262,7 +311,7 @@ a transfer tool and a script interface.**
 
 {BADGES}
 
-[Quick start](#quick-start) · [Features](#features) · [Portable build](#portable-build) · [CLI](#command-line-interface) · [Manual](#user-manual) · [Verify](#verify)
+[Quick start](#quick-start) · [Features](#features) · [Plugins](#plugins) · [Portable build](#portable-build) · [CLI](#command-line-interface) · [Manual](#user-manual) · [Verify](#verify)
 
 </div>
 
@@ -329,6 +378,7 @@ local web server, no browser, and no self-built executable in the distribution.
 </table>
 
 The screenshots are rendered by `python tools/make_screenshots.py` from the real program (virtual DEMO port), not mocked up.
+The plugin pictures come from `python tools/make_plugin_screenshots.py`, which grabs the live plugin pages.
 
 ## Features
 
@@ -368,6 +418,59 @@ The screenshots are rendered by `python tools/make_screenshots.py` from the real
 
 </td></tr>
 </table>
+
+## Plugins
+
+A plugin is a self-contained folder (`plugin.json` plus an entry module) dropped
+into `plugins/` or `omnicom-data/plugins/`; each one gets its own tab at the top
+of the window. *Plugins -> Plugin store* installs, updates, downgrades and
+removes them by version, and uninstalling keeps the plugin's own user data. Two
+plugins ship with the program.
+
+### Dashboard · `chart`
+
+![Dashboard plugin](docs/images/plugin-chart.png)
+
+<sub>Rendered from the live program: five widgets, each bound to its own channel,
+every readout parsed out of `[OmniCOM-chart]` lines. `python tools/make_plugin_screenshots.py`
+regenerates it and reads the page DOM back first - if one card still says `--`
+the run fails instead of producing a picture.</sub>
+
+If the device prints one line of text, the dashboard grows by itself:
+
+```
+[OmniCOM-chart] temperature=24.6 supply=4.87 current=0.49 level=65 alarm=1
+```
+
+| Widget | How it shows the value | Good for |
+| --- | --- | --- |
+| Line | ECharts polyline, x axis is receive time | trends, jitter, step response |
+| Gauge | half dial pointing at the value within `min`/`max` | anything with bounds, e.g. voltage |
+| Value | one big number plus its unit (2 decimals by default) | a reading without a plot |
+| Bar | fill computed from the card's own min/max | buffer usage, completion |
+| Lamp | lit when the value is non-zero, reads ON / OFF | alarm and status bits |
+
+- **Channels are discovered**: every key in the line becomes a channel (128 max), nothing to configure up front.
+- **The bar respects its range**: below the minimum it is empty, above the maximum it fills and turns red, and the caption shows the range (`0.00 - 100.00`) with the unit; with no data it reads `--`.
+- **Layout is direct**: drag a card anywhere, drag its bottom-right corner to resize; the grid background stays visible so alignment is obvious. There is no edit-mode switch to find.
+- **Each line card carries its own two zoom sliders**, one for the time axis and one for the value axis; pressing on a slider zooms, pressing anywhere else on the card still drags it.
+- **5000 points per channel** are kept, the time window defaults to *all*, nothing is decimated, and a live refresh never resets your zoom.
+- **Export**: CSV for the numbers, PNG for the picture; dropped history, invalid lines, over-long lines and the channel ceiling are counted separately, never silently lost.
+
+### Launcher · `launcher`
+
+![Launcher plugin](docs/images/plugin-launcher.png)
+
+<sub>Rendered from the live program: the top row comes from `apps.json`, the bottom
+row is a genuine window enumeration (the windows in the picture are started by the
+script itself, so none of this machine's own document titles end up in it).</sub>
+
+- **The top row is shortcuts**: one click opens a new instance - debugging two boards at once means one window per board, so the logs never interleave.
+- **The bottom row is what is already running**: one click switches to that window; several windows of the same program are listed separately and can be named A, B.
+- **Both rows can be reordered by dragging** and renamed from the context menu (the bottom row defaults to the window title, and long titles wrap instead of being clipped).
+- **Remove from list** (top row) only deletes the shortcut and leaves the window open; **End this window (process)** (bottom row) closes exactly that one.
+- While the page is on screen the window list is rescanned every 4 s on a background thread, so an unresponsive program cannot freeze the window.
+- The list lives in `omnicom-data/plugin-data/launcher/apps.json`; only `path` is required, and `name` is yours to choose.
 
 ## Quick start
 

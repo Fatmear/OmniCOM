@@ -11,10 +11,11 @@ from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
+    QPlainTextEdit,
     QScrollArea,
-    QSpinBox,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -25,7 +26,7 @@ from . import theme
 from .log_view import DEFAULT_BUFFER_MB, MAX_BUFFER_MB, MIN_BUFFER_MB
 from .send_panel import HISTORY_DEFAULT, HISTORY_MAX, HISTORY_MIN
 from .widgets import Button as QPushButton
-from .widgets import Combo, GlyphButton
+from .widgets import Combo, GlyphButton, Spin
 
 
 def _dialog_shell(parent, title: str, width: int, height: int) -> tuple[QDialog, QVBoxLayout]:
@@ -52,13 +53,15 @@ class PreferencesDialog(QDialog):
     logFontChanged = Signal(str, int)
     historyLimitChanged = Signal(int)    # how many typed commands ↑ remembers
     historyCleared = Signal()
+    pluginSourcesChanged = Signal(str)
 
     def __init__(self, parent=None, current_language: str = "zh",
                  log_dir: str = "", accent: str = "",
                  wallpaper: str = "", buffer_mb: int = DEFAULT_BUFFER_MB,
                  ui_family: str = "", ui_px: int = 13,
                  log_family: str = "", log_px: int = 13,
-                 history_limit: int = 50, history_count: int = 0) -> None:
+                 history_limit: int = 50, history_count: int = 0,
+                 plugin_sources: str = "") -> None:
         super().__init__(parent)
         self.setWindowTitle(i18n.tr("pref.title"))
         self.setModal(True)
@@ -68,7 +71,16 @@ class PreferencesDialog(QDialog):
         self._history_entries = int(history_count or 0)
         self._wallpaper = wallpaper or ""
 
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.preferences_scroll = QScrollArea()
+        self.preferences_scroll.setWidgetResizable(True)
+        self.preferences_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.preferences_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        self.preferences_scroll.setWidget(content)
+        outer.addWidget(self.preferences_scroll)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(10)
 
@@ -151,7 +163,7 @@ class PreferencesDialog(QDialog):
         self.buffer_section = self._section(layout, "pref.buffer")
         row = QHBoxLayout()
         row.setSpacing(10)
-        self.buffer_value = QSpinBox()
+        self.buffer_value = Spin()
         self.buffer_value.setRange(MIN_BUFFER_MB, MAX_BUFFER_MB)
         self.buffer_value.setSingleStep(10)
         self.buffer_value.setSuffix(" MB")
@@ -173,7 +185,7 @@ class PreferencesDialog(QDialog):
         row.setSpacing(8)
         self.ui_family_box = self._family_combo(ui_family)
         row.addWidget(self.ui_family_box, 1)
-        self.ui_size = QSpinBox()
+        self.ui_size = Spin()
         self.ui_size.setRange(theme.UI_FONT_MIN, theme.UI_FONT_MAX)
         self.ui_size.setSuffix(" px")
         self.ui_size.setValue(max(theme.UI_FONT_MIN,
@@ -187,7 +199,7 @@ class PreferencesDialog(QDialog):
         row.setSpacing(8)
         self.log_family_box = self._family_combo(log_family)
         row.addWidget(self.log_family_box, 1)
-        self.log_size = QSpinBox()
+        self.log_size = Spin()
         self.log_size.setRange(theme.LOG_FONT_MIN, theme.LOG_FONT_MAX)
         self.log_size.setSuffix(" px")
         self.log_size.setValue(max(theme.LOG_FONT_MIN,
@@ -202,7 +214,7 @@ class PreferencesDialog(QDialog):
         self.history_section = self._section(layout, "pref.history")
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.history_value = QSpinBox()
+        self.history_value = Spin()
         self.history_value.setRange(HISTORY_MIN, HISTORY_MAX)
         self.history_value.setSingleStep(5)
         self.history_value.setSuffix(i18n.tr("pref.history.unit"))
@@ -224,6 +236,15 @@ class PreferencesDialog(QDialog):
         row.addWidget(self.btn_clear_history)
         layout.addLayout(row)
         self.history_hint = self._hint(layout, "pref.history.hint")
+
+        self.plugin_sources_section = self._section(layout, "pref.plugin_sources")
+        self.plugin_sources = QPlainTextEdit()
+        self.plugin_sources.setMinimumHeight(90)
+        self.plugin_sources.setMaximumHeight(150)
+        self.plugin_sources.setPlainText(plugin_sources)
+        self.plugin_sources.textChanged.connect(
+            lambda: self.pluginSourcesChanged.emit(self.plugin_sources.toPlainText()))
+        layout.addWidget(self.plugin_sources)
 
         self.ui_family_box.currentIndexChanged.connect(self._on_ui_font)
         self.ui_size.valueChanged.connect(self._on_ui_font)
@@ -354,6 +375,7 @@ class PreferencesDialog(QDialog):
         self.log_font_section.setText(i18n.tr("pref.font.log"))
         self.log_font_hint.setText(i18n.tr("pref.font.log.hint"))
         self.history_section.setText(i18n.tr("pref.history"))
+        self.plugin_sources_section.setText(i18n.tr("pref.plugin_sources"))
         self.history_value.setToolTip(i18n.tr("pref.history.tip"))
         self.history_value.setSuffix(i18n.tr("pref.history.unit"))
         self.btn_clear_history.setText(i18n.tr("pref.history.clear"))

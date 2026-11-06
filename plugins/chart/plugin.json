@@ -1,0 +1,18 @@
+{
+  "id": "chart",
+  "name": {
+    "zh": "数据看板",
+    "en": "Dashboard"
+  },
+  "version": "1.1.2",
+  "author": "OmniCOM",
+  "description": {
+    "zh": "可拖拽布置的数据监控大屏：曲线、仪表盘、数值、进度条、指示灯控件，每个控件单独绑定通道",
+    "en": "Draggable telemetry dashboard with line, gauge, value, progress bar and lamp widgets; each widget binds its own channel"
+  },
+  "entry": "plugin.py",
+  "api": 2,
+  "python": "3.13",
+  "platform": "win_amd64",
+  "icon": "icon.png"
+}

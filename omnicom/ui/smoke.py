@@ -53,9 +53,12 @@ def run() -> int:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     os.environ.setdefault("OMNICOM_SETTINGS_SUFFIX", "-test")
 
+    from ..webengine import prepare as prepare_webengine
     from .main_window import OmniWindow
     from .theme import app_stylesheet
 
+    # A QWebEngineView inside the dashboard plugin needs this before QApplication.
+    prepare_webengine()
     app = QApplication(sys.argv[:1])
     app.setStyle("Fusion")
     app.setStyleSheet(app_stylesheet())

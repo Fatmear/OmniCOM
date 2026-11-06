@@ -127,44 +127,47 @@ class TipPopup(QWidget):
 
     # -- painting -----------------------------------------------------------
     def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        card = QRectF(self.rect()).adjusted(SHADOW, SHADOW, -SHADOW, -SHADOW)
+        try:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            card = QRectF(self.rect()).adjusted(SHADOW, SHADOW, -SHADOW, -SHADOW)
 
-        # Soft shadow: a few expanding rounded rects.  Everything outside the
-        # card is translucent, which is exactly what removes the white block the
-        # user saw around the native tooltip (R-084).
-        painter.setPen(Qt.NoPen)
-        for step in range(SHADOW, 0, -1):
-            colour = QColor(18, 26, 43, 12)
-            painter.setBrush(colour)
-            inflated = card.adjusted(-step, -step + 1, step, step + 1)
-            painter.drawRoundedRect(inflated, RADIUS + step, RADIUS + step)
+            # Soft shadow: a few expanding rounded rects.  Everything outside the
+            # card is translucent, which is exactly what removes the white block the
+            # user saw around the native tooltip (R-084).
+            painter.setPen(Qt.NoPen)
+            for step in range(SHADOW, 0, -1):
+                colour = QColor(18, 26, 43, 12)
+                painter.setBrush(colour)
+                inflated = card.adjusted(-step, -step + 1, step, step + 1)
+                painter.drawRoundedRect(inflated, RADIUS + step, RADIUS + step)
 
-        if self._backdrop is not None and not self._backdrop.isNull():
-            # Same recipe as the panes: the blurred slice, then a white wash.
-            glass = QPainterPath()
-            glass.addRoundedRect(card, RADIUS, RADIUS)
-            painter.save()
-            painter.setClipPath(glass)
-            painter.drawPixmap(card.toRect(), self._backdrop)
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(255, 255, 255, theme.GLASS_ALPHA + 30))
-            painter.drawPath(glass)
-            painter.restore()
-        else:
-            painter.setBrush(QColor(theme.CARD))
-            painter.setPen(Qt.NoPen)
+            if self._backdrop is not None and not self._backdrop.isNull():
+                # Same recipe as the panes: the blurred slice, then a white wash.
+                glass = QPainterPath()
+                glass.addRoundedRect(card, RADIUS, RADIUS)
+                painter.save()
+                painter.setClipPath(glass)
+                painter.drawPixmap(card.toRect(), self._backdrop)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(QColor(255, 255, 255, theme.GLASS_ALPHA + 30))
+                painter.drawPath(glass)
+                painter.restore()
+            else:
+                painter.setBrush(QColor(theme.CARD))
+                painter.setPen(Qt.NoPen)
+                painter.drawRoundedRect(card, RADIUS, RADIUS)
+
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor(18, 26, 43, 46), 1.0))
             painter.drawRoundedRect(card, RADIUS, RADIUS)
 
-        painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(QColor(18, 26, 43, 46), 1.0))
-        painter.drawRoundedRect(card, RADIUS, RADIUS)
-
-        painter.setPen(QColor(theme.INK))
-        body = card.adjusted(PAD_X, PAD_Y, -PAD_X, -PAD_Y)
-        painter.drawText(body, Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignVCenter,
-                         self._text)
+            painter.setPen(QColor(theme.INK))
+            body = card.adjusted(PAD_X, PAD_Y, -PAD_X, -PAD_Y)
+            painter.drawText(body, Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignVCenter,
+                             self._text)
+        finally:
+            painter.end()
 
 
 class TooltipWatcher(QObject):

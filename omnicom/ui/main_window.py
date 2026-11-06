@@ -15,6 +15,7 @@ import sys
 import time
 
 from PySide6.QtCore import (
+    QByteArray,
     QEasingCurve,
     QEvent,
     QParallelAnimationGroup,
@@ -23,6 +24,7 @@ from PySide6.QtCore import (
     QPropertyAnimation,
     QRect,
     QRectF,
+    QSignalBlocker,
     Qt,
     QTimer,
 )
@@ -265,19 +267,18 @@ class Aurora(QWidget):
         return image
 
     def _paint_wallpaper(self, painter: QPainter, target) -> None:
-        pixmap = theme.wallpaper_pixmap()
-        if pixmap is None or pixmap.isNull():
+        """Blit the prepared page photo; never resample it here (R-163).
+
+        ``theme.page_cover()`` caches the cover-cropped, veiled pixmap per size.
+        Doing the crop and the full-page white fill in this method cost ~14 ms at
+        1440p *per repaint*, which is what made maximising and restoring the
+        window stutter: the whole backdrop is invalidated on both transitions.
+        """
+        cover = theme.page_cover(target.width(), target.height())
+        if cover is None:
             return
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-        # Same cover-crop the panes sample from, so the glass content lines up
-        # with the photo painted here (R-077).
-        cover = theme.cover_pixmap(pixmap, target.width(), target.height())
-        if cover is not None:
-            painter.drawPixmap(target.topLeft(), cover)
-        # A white veil keeps the photo muted enough for the panes to read as
-        # frosted glass on top of it; the text that sits straight on the page
-        # (the status strip) additionally gets its own plate (R-077).
-        painter.fillRect(target, QColor(255, 255, 255, theme.PAGE_VEIL))
+        painter.drawPixmap(target.topLeft(), cover)
 
     def _paint_edge(self, painter: QPainter, target) -> None:
         """Draw the window outline *inside* the page, one pixel wide.
@@ -324,27 +325,30 @@ class BrandMark(QWidget):
         self.setAutoFillBackground(False)
 
     def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        rect = QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0)
-        gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-        gradient.setColorAt(0.0, QColor("#10A794"))
-        gradient.setColorAt(0.55, QColor("#4884F0"))
-        gradient.setColorAt(1.0, QColor("#7455F5"))
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(gradient))
-        painter.drawRoundedRect(rect, self.width() * 0.28, self.width() * 0.28)
+        try:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            rect = QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0)
+            gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+            gradient.setColorAt(0.0, QColor("#10A794"))
+            gradient.setColorAt(0.55, QColor("#4884F0"))
+            gradient.setColorAt(1.0, QColor("#7455F5"))
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(gradient))
+            painter.drawRoundedRect(rect, self.width() * 0.28, self.width() * 0.28)
 
-        # White arc + baseline: a compact "serial line" mark.
-        pen = QPen(QColor(255, 255, 255, 235), max(1.6, self.width() * 0.075))
-        pen.setCapStyle(Qt.RoundCap)
-        painter.setPen(pen)
-        inset = self.width() * 0.27
-        painter.drawArc(QRectF(inset, inset, self.width() - inset * 2,
-                               self.height() - inset * 2), 30 * 16, 240 * 16)
-        baseline = self.height() * 0.7
-        painter.drawLine(QPointF(self.width() * 0.3, baseline),
-                         QPointF(self.width() * 0.7, baseline))
+            # White arc + baseline: a compact "serial line" mark.
+            pen = QPen(QColor(255, 255, 255, 235), max(1.6, self.width() * 0.075))
+            pen.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen)
+            inset = self.width() * 0.27
+            painter.drawArc(QRectF(inset, inset, self.width() - inset * 2,
+                                   self.height() - inset * 2), 30 * 16, 240 * 16)
+            baseline = self.height() * 0.7
+            painter.drawLine(QPointF(self.width() * 0.3, baseline),
+                             QPointF(self.width() * 0.7, baseline))
+        finally:
+            painter.end()
 
 
 class TitleBar(GlassFrame):
@@ -522,10 +526,12 @@ class TitleBar(GlassFrame):
     def _show_menu(self) -> None:
         window = self.window_ref
         menu = QMenu(self)
+        menu.setStyleSheet(theme.menu_stylesheet())
 
         menu.addAction(tr("menu.preferences"), window.open_preferences)
 
         plugin_menu = menu.addMenu(tr("plugin.menu"))
+        plugin_menu.addAction(tr("store.title"), window.open_plugin_store)
         plugin_menu.addAction(tr("plugin.reload"), window.reload_plugins)
         plugin_menu.addAction(tr("plugin.opendir"), window.open_plugin_dir)
         if window.plugins.loaded():
@@ -767,6 +773,10 @@ class OmniWindow(QMainWindow):
         self._minimizing = False
         self._minimize_pending = False
         self._was_minimized = False
+        #: Set once ``closeEvent`` starts, so a re-entrant close (taskbar menu +
+        #: Alt+F4 while ``processEvents()`` pumps) cannot run the save/unload
+        #: bookkeeping a second time (R-159).
+        self._closing = False
         self._rx_timer = QTimer(self)
         self._rx_timer.setSingleShot(True)
         self._rx_timer.setInterval(28)          # ~36 fps, cheaper than per-chunk
@@ -795,7 +805,7 @@ class OmniWindow(QMainWindow):
         self.tooltips = install_tooltips()
 
         self.plugins = PluginHost(notify=self.notify, log_line=self._plugin_log,
-                                  parent=self)
+                                  send_bytes=self._plugin_send, parent=self)
 
         self._build_ui()
         self._wire()
@@ -987,7 +997,6 @@ class OmniWindow(QMainWindow):
                            self.row_echo, self.row_scroll, self.row_awake):
             layout.addWidget(row_widget)
         layout.addWidget(self._divider())
-
         # ---- capture
         self.sec_record = SectionTitle(tr("rail.record"))
         layout.addWidget(self.sec_record)
@@ -1098,6 +1107,11 @@ class OmniWindow(QMainWindow):
         log_layout.addWidget(self.log_hint)
 
         self.send_panel = SendPanel()
+        #: The send bar's two switches belong to the same "session state" group
+        #: as the rail's (R-155).  Exposed under the same ``row_*`` naming so
+        #: ``SESSION_SWITCHES`` handles both columns with one loop.
+        self.row_enter = self.send_panel.enter_send
+        self.row_hex_send = self.send_panel.hex_send
 
         # Log above, composer below, with a grab handle between them so the
         # send box can be resized (R-043).
@@ -1269,14 +1283,10 @@ class OmniWindow(QMainWindow):
 
     def reload_plugins(self) -> None:
         """Tear the plugin pages down, then load whatever is on disk now."""
-        for key in list(self._plugin_pages):
-            widget = self._plugin_pages.pop(key)
-            index = self.stack.indexOf(widget)
-            if index >= 0:
-                self.stack.removeWidget(widget)
-            widget.setParent(None)
-            widget.deleteLater()
-        self.plugins.reload()
+        current = self.stack.currentWidget()
+        key_before = next((key for key, widget in self._plugin_pages.items() if widget is current), None)
+        self.suspend_plugins()
+        self.plugins.load()
         for info in self.plugins.loaded():
             widget = info.widget
             if widget is None:
@@ -1285,7 +1295,31 @@ class OmniWindow(QMainWindow):
             self._plugin_pages[key] = widget
             self.stack.addWidget(widget)
         self._rebuild_tabs()
+        if key_before in self._plugin_pages:
+            self.switch_page(key_before)
         self.notify(tr("plugin.reloaded", n=len(self.plugins.loaded())), "ok")
+
+    def suspend_plugins(self) -> None:
+        self.plugins.unload()
+        for key in list(self._plugin_pages):
+            widget = self._plugin_pages.pop(key)
+            index = self.stack.indexOf(widget)
+            if index >= 0:
+                self.stack.removeWidget(widget)
+            widget.setParent(None)
+            widget.deleteLater()
+        self._rebuild_tabs()
+
+    def open_plugin_store(self) -> None:
+        from .plugin_store import PluginStoreDialog
+
+        dialog = getattr(self, "_plugin_store_dialog", None)
+        if dialog is None:
+            dialog = PluginStoreDialog(self)
+            self._plugin_store_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def open_plugin_dir(self) -> None:
         target = os.path.join(paths.resource_dir(), "plugins")
@@ -1294,6 +1328,28 @@ class OmniWindow(QMainWindow):
 
     def _plugin_log(self, text: str) -> None:
         self._log_line(time.time() * 1000, "··", text, "sys")
+
+    def _plugin_send(self, data: bytes) -> bool:
+        """Send path for plugins: refuses when closed, prints TX like a manual send.
+
+        A plugin must never touch ``bridge.manager`` directly - it would bypass
+        the TX echo, the counters and the "no port" guard, and a dashboard
+        switch that silently writes into a closed port is indistinguishable from
+        a broken device (L-150 family).
+        """
+        if not data:
+            return False
+        if not self._status.get("connected"):
+            self.notify(tr("console.needport"), "warn")
+            return False
+        try:
+            written = self.bridge.manager.write(data)
+        except Exception as exc:
+            self.notify(str(exc), "warn")
+            return False
+        self._on_tx_print(data)
+        self._refresh_stats()
+        return written is not False and written != 0
 
     # --------------------------------------------------------------- wiring
     def _wire(self) -> None:
@@ -1325,6 +1381,7 @@ class OmniWindow(QMainWindow):
         self.log.clearRequested.connect(self.clear_log)
         self.log.findRequested.connect(self.focus_search)
         self.log.latestRequested.connect(self.jump_to_latest)
+        self.log.autoscrollChanged.connect(self._sync_autoscroll)
 
         self.row_auto.toggled.connect(lambda _: self._push_opts())
         for row in (self.row_dtr, self.row_rts):
@@ -1337,7 +1394,9 @@ class OmniWindow(QMainWindow):
         self.row_hex.toggled.connect(self._on_hex_mode)
         self.row_ts.toggled.connect(lambda value: setattr(self.log, "show_ts", value))
         self.row_ctrl.toggled.connect(self._on_ctrl_mode)
-        self.row_echo.toggled.connect(self._save_settings)
+        # 回显 is session state (R-155), so it no longer writes the settings on
+        # every click - only the log options it actually changes.
+        self.row_echo.toggled.connect(self._on_echo_mode)
         self.row_scroll.toggled.connect(self._on_autoscroll)
         self.row_awake.toggled.connect(self._on_keep_awake)
 
@@ -1380,13 +1439,27 @@ class OmniWindow(QMainWindow):
         if enabled and not accepted:
             # Never pretend it worked: a silent no-op would look like a bug.
             self.notify(tr("rail.awake.failed"), "warn")
+            return
+        if enabled and power.display_never_off():
+            # Say it up front when the switch cannot change anything: on a
+            # managed machine the power plan is often already "never blank the
+            # display", and the user then reports "I switched it off but the
+            # screen is still on" (L-235).  Measured, never guessed.
+            self.notify(tr("rail.awake.policy"), "info")
 
     # ------------------------------------------------------------- settings
     def _restore_settings(self) -> None:
         s = self.settings
         geometry = s.value("ui/geometry")
-        if geometry is not None:
+        # A ``QByteArray`` stored in an INI file comes back as one only while Qt
+        # can decode its ``@ByteArray(...)`` form; a hand-edited or older file
+        # yields a plain ``str`` and ``restoreGeometry()`` raises TypeError, which
+        # killed window construction outright.  Restoring a window position is
+        # never worth a crash (R-159).
+        if isinstance(geometry, (QByteArray, bytes, bytearray)):
             self.restoreGeometry(geometry)
+        elif geometry is not None:
+            self.settings.remove("ui/geometry")
         if s.value("ui/sidebar", "1") == "0":
             self._sidebar_widget.hide()
         with contextlib.suppress(TypeError, ValueError):
@@ -1417,27 +1490,14 @@ class OmniWindow(QMainWindow):
         self.stopbits.setCurrentIndex(max(0, index))
         self.parity.setCurrentIndex(max(0, self.parity.findData(s.value("serial/parity", "N"))))
         self.flow.setCurrentIndex(max(0, self.flow.findData(s.value("serial/flow", "none"))))
-        self.row_auto.setChecked(s.value("serial/auto", "1") == "1")
-        self.row_dtr.setChecked(s.value("serial/dtr", "0") == "1")
-        self.row_rts.setChecked(s.value("serial/rts", "0") == "1")
-        self.row_hex.setChecked(s.value("display/hex", "0") == "1")
-        self.row_ts.setChecked(s.value("display/ts", "1") == "1")
-        self.row_ctrl.setChecked(s.value("display/ctrl", "0") == "1")
-        self.row_echo.setChecked(s.value("display/echo", "1") == "1")
-        self.row_scroll.setChecked(s.value("display/scroll", "1") == "1")
-        # 保持屏幕常亮 is **never** restored (R-062, revised 2026-10-30): it is
-        # applied for the current session only.  Remembering it meant a machine
-        # that once had it on never slept again after a restart, with the switch
-        # hidden behind a collapsed rail.
-        self.row_awake.setChecked(False)
-        if s.contains("display/awake"):
-            # Purge the value old builds wrote, or downgrading would resurrect it.
-            s.remove("display/awake")
+        # Every switch in the rail and the send bar is **session state** as of
+        # R-155: it opens at its factory default and nothing is remembered.  The
+        # old values are purged here, or a downgrade/upgrade cycle would bring a
+        # stale "hex on" back from an INI written by an older build.
+        self._reset_session_switches()
         self.log.show_ts = self.row_ts.isChecked()
         self.log.autoscroll = self.row_scroll.isChecked()
-        # Enter inserts a line break unless the user turned 回车发送 on
-        # (R-094, revised 2026-10-29).
-        self.send_panel.set_enter_sends(s.value("display/enter_send", "0") == "1")
+        self.send_panel.set_enter_sends(self.row_enter.isChecked())
         # Bound the list *before* loading it, so a huge legacy file cannot
         # resurrect thousands of entries (R-116).
         from .send_panel import HISTORY_DEFAULT, HISTORY_MAX, HISTORY_MIN
@@ -1449,6 +1509,48 @@ class OmniWindow(QMainWindow):
         self._apply_keep_awake(self.row_awake.isChecked())
         self._on_ports(self.bridge.manager.ports())
 
+    #: Switches that are **session state**, never remembered (R-155).
+    #:
+    #: ``(row attribute, saved key)``.  The row is forced to the default its
+    #: ``SwitchRow`` was constructed with, and the key is deleted from the INI so
+    #: an older build's value cannot come back.  Precedent: 保持屏幕常亮 was
+    #: already never restored (R-062) for the same reason - a switch that hides
+    #: in a collapsed rail must not silently override the next launch.
+    SESSION_SWITCHES = (
+        ("row_auto", "serial/auto"),
+        ("row_dtr", "serial/dtr"),
+        ("row_rts", "serial/rts"),
+        ("row_hex", "display/hex"),
+        ("row_ts", "display/ts"),
+        ("row_ctrl", "display/ctrl"),
+        ("row_echo", "display/echo"),
+        ("row_scroll", "display/scroll"),
+        ("row_awake", "display/awake"),
+        ("row_enter", "display/enter_send"),
+        ("row_hex_send", "send/hex_send"),
+    )
+
+    def _reset_session_switches(self) -> None:
+        """Force every rail / send-bar switch to its factory default (R-155).
+
+        Runs in ``_restore_settings``, i.e. on every launch *and* every window
+        that opens, which is exactly the "每次开启页面用默认" the user asked for.
+
+        The factory defaults are read off the widgets themselves (``SwitchRow``
+        is constructed with its default), so this cannot drift out of sync with
+        the layout: 自动重连 on, DTR/RTS off, 时间戳 on, 回显 on, 自动滚动 on,
+        HEX off, 控制符 off, 常亮 off, 回车发送 off.
+        """
+        for attribute, key in self.SESSION_SWITCHES:
+            row = getattr(self, attribute, None)
+            if row is not None:
+                # Blocked: setChecked must not run the persistence handlers that
+                # used to write these keys (``row_echo`` called _save_settings).
+                with QSignalBlocker(row):
+                    row.setChecked(row.default)
+            if self.settings.contains(key):
+                self.settings.remove(key)
+
     def _save_settings(self) -> None:
         s = self.settings
         s.setValue("serial/baud", self.baud.currentText())
@@ -1456,18 +1558,13 @@ class OmniWindow(QMainWindow):
         s.setValue("serial/stopbits", self.stopbits.currentText())
         s.setValue("serial/parity", self.parity.currentData())
         s.setValue("serial/flow", self.flow.currentData())
-        s.setValue("serial/auto", "1" if self.row_auto.isChecked() else "0")
-        s.setValue("serial/dtr", "1" if self.row_dtr.isChecked() else "0")
-        s.setValue("serial/rts", "1" if self.row_rts.isChecked() else "0")
-        s.setValue("display/hex", "1" if self.row_hex.isChecked() else "0")
-        s.setValue("display/ts", "1" if self.row_ts.isChecked() else "0")
-        s.setValue("display/ctrl", "1" if self.row_ctrl.isChecked() else "0")
-        s.setValue("display/echo", "1" if self.row_echo.isChecked() else "0")
-        s.setValue("display/scroll", "1" if self.row_scroll.isChecked() else "0")
-        # ``display/awake`` is deliberately absent: R-062 says the switch starts
-        # off in every session, so there is nothing to save.
-        s.remove("display/awake")
-        s.setValue("display/enter_send", "1" if self.send_panel.enter_sends() else "0")
+        # The switches are **not** written (R-155): every launch starts at the
+        # factory default, so persisting them would only leave keys behind that
+        # the next restore has to purge again.  The drop-downs above *are*
+        # remembered - retyping a baud rate every launch is not the same thing.
+        for _attribute, key in self.SESSION_SWITCHES:
+            if s.contains(key):
+                s.remove(key)
         # A JSON string, not a QStringList: the INI writer would otherwise store
         # a comma-joined value that cannot carry a comma inside a command.
         s.setValue("send/history",
@@ -1488,6 +1585,11 @@ class OmniWindow(QMainWindow):
         except ValueError:
             baud = 115200
         baud = max(50, min(12_000_000, baud))
+        # ``dsrdtr`` has no switch in this window, but it must still be carried:
+        # a CLI that turned the handshake on would otherwise have it silently
+        # cleared by the next ``_push_opts`` (the window would rewrite the port
+        # with its own idea of the options) - R-156 / L-205.
+        current = self.bridge.manager.status().get("opts") or {}
         return {
             "baudrate": baud,
             "bytesize": int(self.bytesize.currentText()),
@@ -1496,6 +1598,7 @@ class OmniWindow(QMainWindow):
             "flow": self.flow.currentData(),
             "rtscts": self.flow.currentData() == "rtscts",
             "xonxoff": self.flow.currentData() == "xonxoff",
+            "dsrdtr": bool(current.get("dsrdtr", False)),
             "dtr": self.row_dtr.isChecked(),
             "rts": self.row_rts.isChecked(),
             "autoReconnect": self.row_auto.isChecked(),
@@ -1673,6 +1776,7 @@ class OmniWindow(QMainWindow):
         # sticky (R-049).  Chunks are accumulated and flushed once per frame.
         if not data:
             return
+        self.plugins.publish_rx(ts, data)
         # Mirror the bytes into the control ring before printing: the agent then
         # reads exactly what the user sees, including anything that arrived
         # between two CLI requests (R-112).
@@ -1812,9 +1916,14 @@ class OmniWindow(QMainWindow):
     # -------------------------------------------------------------- following
     def _on_autoscroll(self, value: bool) -> None:
         self.log.autoscroll = value
-        if value:
-            self.log.scroll_bottom()
-        self._save_settings()
+        # No settings write: 自动滚动 is session state (R-155).  R-150 still holds
+        # - the click path stays a single ``autoscroll = value`` plus the pill
+        # refresh, which is what keeps it under 40 ms on a large log.
+        self._on_log_scrolled()
+
+    def _sync_autoscroll(self, value: bool) -> None:
+        with QSignalBlocker(self.row_scroll):
+            self.row_scroll.setChecked(value)
         self._on_log_scrolled()
 
     def _on_log_scrolled(self) -> None:
@@ -1840,7 +1949,7 @@ class OmniWindow(QMainWindow):
         panel.input.selectAll()
 
     def jump_to_latest(self) -> None:
-        self.log.scroll_bottom()
+        self.log.autoscroll = True
         self.scroll_pill.hide_pill()
 
     def _on_terminal_keys(self, data: bytes) -> None:
@@ -2014,7 +2123,8 @@ class OmniWindow(QMainWindow):
         self.search_panel.clear_results()
 
     def _on_hex_mode(self, enabled: bool) -> None:
-        self._save_settings()
+        # No settings write: the switch is session state (R-155).  An INI flush
+        # on a click was also a needless 30 ms disk hit on a large settings file.
         self._clear_decoder()
         if self._appended > 0:
             self.clear_log()
@@ -2023,11 +2133,19 @@ class OmniWindow(QMainWindow):
         self.status_line.setText(tr("rail.hex") + (" ✓" if enabled else " ✗"))
 
     def _on_ctrl_mode(self, enabled: bool) -> None:
-        self._save_settings()
         self._clear_decoder()
         if self._pending_text:
             self.log.set_pending(self._clean(self._pending_text, pending=True))
         self.status_line.setText(tr("rail.ctrl") + (" ✓" if enabled else " ✗"))
+
+    def _on_echo_mode(self, enabled: bool) -> None:
+        """回显: whether locally typed text is written into the log (R-155).
+
+        Only the decoder needs resetting - nothing here is persisted, so this
+        must not call ``_save_settings``.
+        """
+        self._clear_decoder()
+        self.status_line.setText(tr("rail.echo") + (" ✓" if enabled else " ✗"))
 
     def _clear_decoder(self) -> None:
         self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
@@ -2322,6 +2440,8 @@ class OmniWindow(QMainWindow):
 
     # -------------------------------------------------------------- dialogs
     def open_preferences(self) -> None:
+        from ..plugin_store import configured_catalogs
+
         dialog = PreferencesDialog(
             self, language(),
             log_dir=str(self.settings.value("paths/log_dir", "")) or paths.logs_dir(),
@@ -2331,7 +2451,8 @@ class OmniWindow(QMainWindow):
             ui_family=theme.ui_family(), ui_px=theme.ui_font_px(),
             log_family=theme.log_family(), log_px=self.log.font_px(),
             history_limit=self.send_panel.history_limit(),
-            history_count=len(self.send_panel.history_entries()))
+            history_count=len(self.send_panel.history_entries()),
+            plugin_sources="\n".join(configured_catalogs(self.settings)))
         dialog.languageChanged.connect(self.change_language)
         dialog.logDirChanged.connect(self.apply_log_dir)
         dialog.accentChanged.connect(self.apply_accent)
@@ -2341,7 +2462,18 @@ class OmniWindow(QMainWindow):
         dialog.logFontChanged.connect(self.apply_log_font)
         dialog.historyLimitChanged.connect(self.apply_history_limit)
         dialog.historyCleared.connect(self.clear_history)
+        dialog.pluginSourcesChanged.connect(self.apply_plugin_sources)
         dialog.exec()
+
+    def apply_plugin_sources(self, value: str) -> None:
+        from ..plugin_store import catalog_sources
+
+        urls = catalog_sources(value)
+        self.settings.setValue("plugins/catalogs", "\n".join(urls))
+        self.settings.remove("plugins/catalog")
+        store = getattr(self, "_plugin_store_dialog", None)
+        if store is not None:
+            store.set_sources(urls)
 
     # ------------------------------------------------------- theme + folders
     def apply_log_dir(self, path: str) -> bool:
@@ -2434,6 +2566,7 @@ class OmniWindow(QMainWindow):
         # Painted widgets read the tokens on repaint, so one sweep is enough.
         for widget in [self, *self.findChildren(QWidget)]:
             widget.update()
+        self.plugins.apply_theme()
         label = theme.ACCENTS[key][0 if language() == "zh" else 1]
         self.notify(tr("misc.accent", name=label), "ok")
 
@@ -2452,6 +2585,9 @@ class OmniWindow(QMainWindow):
         self.settings.setValue("ui/language", lang)
         self.retranslate()
         self.plugins.apply_language()
+        store = getattr(self, "_plugin_store_dialog", None)
+        if store is not None:
+            store.retranslate()
 
     def open_docs(self) -> None:
         DocsDialog(self).exec()
@@ -2705,12 +2841,58 @@ class OmniWindow(QMainWindow):
             if key in opts:
                 row.setChecked(bool(opts[key]))
 
+    # -- control lines (R-156) ---------------------------------------------
+    def _control_lines(self, args: dict, _job: dict) -> dict:
+        """Read or drive DTR/RTS through the port this window owns.
+
+        The write path goes through ``set_control_lines`` on the manager, not
+        through ``_serial_opts()``: raising DTR is not a settings change, it must
+        not reopen the port, and it must be visible in the two switches (R-120
+        keeps them off by default, so a CLI raise has to show up or the next
+        click of 打开 silently drops it).
+        """
+        patch = args.get("set") or {}
+        if not isinstance(patch, dict):
+            return self._control_fail(_job, "set 必须是对象")
+        # CTS/DSR belong to the device: they are inputs, so writing them is a
+        # script error, not a no-op.  Silently ignoring the key made a typo look
+        # like a successful reset (R-156).
+        unknown = sorted(key for key in patch if key not in ("dtr", "rts"))
+        if unknown:
+            return self._control_fail(
+                _job, f"控制线只能是 dtr / rts，收到：{', '.join(unknown)}")
+        wanted = {key: bool(value) for key, value in patch.items()
+                  if value is not None}
+        if not wanted:
+            lines = self.bridge.manager.control_lines()
+            return self._control_snapshot(lines=lines)
+        result = self.bridge.set_lines(wanted)
+        self._mirror_lines(result.get("lines") or {})
+        snapshot = self._control_snapshot(lines=result.get("lines") or {},
+                                          applied=wanted)
+        if result.get("error"):
+            snapshot["ok"] = False
+            snapshot["error"] = str(result["error"])
+        return snapshot
+
+    def _mirror_lines(self, lines: dict) -> None:
+        """Show the CLI's line state in the switches without firing a reopen."""
+        for key, row in (("dtr", self.row_dtr), ("rts", self.row_rts)):
+            if key in lines and row.isChecked() != bool(lines[key]):
+                row.blockSignals(True)
+                row.setChecked(bool(lines[key]))
+                row.blockSignals(False)
+
     # -- commands ----------------------------------------------------------
     def _control_ping(self, _args: dict, _job: dict) -> dict:
         return self._control_snapshot()
 
     def _control_state(self, _args: dict, _job: dict) -> dict:
+        # ``lines`` here is the *log* line count (existing contract), so the
+        # hardware pins go out under ``control_lines`` - reusing the name would
+        # have silently turned a number into a dict for every existing caller.
         return self._control_snapshot(lines=self.log.document().blockCount(),
+                                      control_lines=self.bridge.manager.control_lines(),
                                       log_px=self.log.font_px())
 
     def _control_ports(self, args: dict, _job: dict) -> dict:
@@ -3015,6 +3197,36 @@ class OmniWindow(QMainWindow):
             return self._control_snapshot(stats=self.bridge.manager.reset_stats())
         return self._control_snapshot()
 
+    def _control_opts(self, args: dict, _job: dict) -> dict:
+        """Apply a live options patch to the port this window owns (L-206).
+
+        The scripted ``set`` step in ``session`` sent ``cmd=opts`` with no
+        handler on this side, so any script that ran against a window failed at
+        that step with 未知命令：opts - the window mode is the default one, so
+        in practice the verb was unreachable.  Only live-safe keys are accepted:
+        framing changes reopen the port, which the user must not have happen
+        behind their back, so they go through the normal connect path instead.
+        """
+        patch = args.get("opts") or {}
+        if not isinstance(patch, dict) or not patch:
+            return self._control_snapshot()
+        live = {key: value for key, value in patch.items()
+                if key in ("baudrate", "dtr", "rts", "autoReconnect")}
+        if not live:
+            return self._control_fail(
+                _job, "窗口模式下只能在线修改 baudrate / dtr / rts / autoReconnect",
+                applied=[])
+        lines_patch = {key: bool(live[key]) for key in ("dtr", "rts") if key in live}
+        if lines_patch:
+            result = self.bridge.set_lines(lines_patch)
+            self._mirror_lines(result.get("lines") or {})
+            live.pop("dtr", None)
+            live.pop("rts", None)
+        if live:
+            self.bridge.update_opts(live)
+        self._control_apply_opts(patch)
+        return self._control_snapshot(applied=sorted(patch))
+
     def _control_notify(self, args: dict, _job: dict) -> dict:
         self.notify(str(args.get("text") or ""), str(args.get("level") or "info"))
         return {"ok": True}
@@ -3052,15 +3264,6 @@ class OmniWindow(QMainWindow):
     #: Visible padding of the page, *before* the shadow ring is added.
     _SHADOW_BASE_MARGINS = (10, 8, 10, 8)
 
-    def toggle_maximize(self) -> None:
-        if self.isMaximized():
-            self.showNormal()
-        else:
-            self.showMaximized()
-        self.titlebar.sync_max_button()
-        self._apply_window_shadow()
-
-    # ------------------------------------------------------- window motion
     #: A translucent frameless window gets no DWM minimize animation, so the
     #: taskbar icon used to snap the window in and out of existence.  We fade
     #: the layer alpha instead.  Durations match the button motion in
@@ -3073,6 +3276,47 @@ class OmniWindow(QMainWindow):
         if group is not None:
             group.stop()
             group.deleteLater()
+
+    def toggle_maximize(self) -> None:
+        """Maximize or restore, immediately (R-153, reverted 2026-11-02).
+
+        A slide + cross-fade was tried and rejected: any motion on this path
+        re-lays out all three columns, and the user reads the transition as the
+        window "stretching".  Instant ``showMaximized`` / ``showNormal`` is what
+        every earlier version did and what Windows users expect from the button.
+        """
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def _slide_max_rect(self) -> QRect:
+        """Rect a maximized frameless window occupies - its available area.
+
+        Measured (``.artifacts/maxrect_probe.py``): ``geometry(max)`` equals
+        ``frameGeometry(max)`` equals ``screen.availableGeometry()`` for this
+        window style, so a restore needs no guesswork.
+        """
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return self.geometry()
+        return QRect(screen.availableGeometry())
+
+    def _restore_target(self) -> QRect:
+        """Where a restore lands: the remembered rect, never ``geometry()``.
+
+        ``geometry()`` of a maximized window is the *screen*, so using it would
+        make every restore fill the desktop again - and an interrupted motion
+        would hand back a half-way rect and shrink the window a little more on
+        every toggle (L-117).
+        """
+        stored = getattr(self, "_still_rect", None)
+        if stored is not None:
+            return QRect(stored)
+        normal = self.normalGeometry()
+        if normal.width() > 1 and normal.height() > 1:
+            return QRect(normal)
+        return QRect(self._slide_max_rect().adjusted(0, 0, -420, -300))
 
     def _motion_group(self, fade_from: float, fade_to: float,
                       duration: int) -> QParallelAnimationGroup:
@@ -3259,6 +3503,30 @@ class OmniWindow(QMainWindow):
             self.animate_show()
 
     def closeEvent(self, event) -> None:
+        store = getattr(self, "_plugin_store_dialog", None)
+        if store is not None and store.busy():
+            store.cancel()
+            event.ignore()
+            return
+        if getattr(self, "_closing", False):
+            # A second close can arrive while ``processEvents()`` below is
+            # pumping (taskbar "close window", then Alt+F4).  Re-running the
+            # bookkeeping would re-sync the settings files twice and, worse,
+            # release the window slot while it is still in use.
+            event.accept()
+            return
+        self._closing = True
+        # Hide **first** (R-159).  ``closeEvent`` returns before Qt unmaps the
+        # window, so everything below used to be paid while the window was still
+        # on screen: ``QSettings.sync()`` alone measured ~227 ms on Windows, and
+        # the unchanged frame reads as "关闭要等两秒".  Flipping the opacity back
+        # to 1.0 is part of it - an interrupted minimize fade may have left the
+        # layer translucent, and hiding a translucent window leaves a ghost.
+        self._stop_motion()
+        self.setWindowOpacity(1.0)
+        self.hide()
+        QApplication.processEvents()
+        self.plugins.unload()
         self.command_store.flush()
         self.settings.setValue("ui/geometry", self.saveGeometry())
         self._save_settings()
@@ -3267,7 +3535,9 @@ class OmniWindow(QMainWindow):
         self.settings.setValue("ui/split", self.body_split.sizes())
         self.settings.setValue("ui/send_h", self.send_panel.height())
         # Flush this window's file and hand its slot back, so the next launch
-        # (or another window) can claim it immediately (R-088).
+        # (or another window) can claim it immediately (R-088).  This is the
+        # ~227 ms ``QSettings.sync()``; it now runs with nothing to show, which
+        # is why the delay is invisible to the user (L-216).
         self.settings.release()
         if self._transfer is not None and self._transfer.isRunning():
             self._transfer.cancel()

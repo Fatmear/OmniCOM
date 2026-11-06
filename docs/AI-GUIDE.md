@@ -47,7 +47,7 @@ OmniCOM.cmd cli send --port DEMO --data "AT" --expect OK --wait 2
 OmniCOM.cmd cli info
 ```
 ```json
-{"ok": true, "version": "1.1.4", "python": "3.13.14", "pyserial": "3.5",
+{"ok": true, "version": "1.1.5", "python": "3.13.14", "pyserial": "3.5",
  "serial_available": true, "data_dir": "…", "logs_dir": "…",
  "received_dir": "…", "demo_port": "DEMO", "platform": "win32"}
 ```
@@ -136,26 +136,57 @@ OmniCOM.cmd cli session --port COM3 --script -       # read from stdin
 ```
 
 Step kinds: `note`, `delay`, `set` (hot-change `baudrate/bytesize/stopbits/parity/
-dtr/rts/rtscts/xonxoff`), `send` (`send`|`send_hex`, `line_end`, `wait`, `expect[]`,
+dtr/rts/rtscts/xonxoff/dsrdtr`), `line` (move `dtr`/`rts` only — no reopen),
+`lines` (read-only pin state), `pulse` (`{line, low_ms}` reset pulse, returns both
+edges), `send` (`send`|`send_hex`, `line_end`, `wait`, `expect[]`,
 `expect_regex`, `drain_ms`, `raw`, `limit`), `expect` (wait only), `drain`,
 `record` (`start`|`stop`), `send_file`, `transfer`, `reset_input`.
 
 Result: `{"ok":true,"steps_total":N,"steps_run":N,"results":[…],"stats":{…}}`.
 Stops at the first failing step unless `--continue-on-error` is passed; any failed
-required step makes the top level `ok:false` with exit code 1.
+required step makes the top level `ok:false` with exit code 1. Because it stops
+there, `steps_run` can be smaller than `steps_total` — verify two bad steps with
+two scripts.
+
+### `lines` / `reset` — hardware control lines (DTR / RTS / CTS / DSR)
+
+```bash
+OmniCOM.cmd cli lines --port COM3                        # read only
+OmniCOM.cmd cli lines --port COM3 --line-dtr on --line-rts off
+OmniCOM.cmd cli reset --port COM3                        # DTR low 120 ms, then high
+OmniCOM.cmd cli reset --port COM3 --line rts --low-ms 40
+```
+
+```json
+{"ok": true, "via": "direct", "port": "COM3",
+ "lines": {"dtr": true, "rts": false, "cts": false, "dsr": null, "open": true},
+ "applied": {"dtr": true}, "opts": {"baudrate": 115200, "dtr": true, ...}}
+```
+
+* `dtr`/`rts` are ours — always writable, remembered while the port is closed.
+* `cts`/`dsr` belong to the device — **read only**. `null` means "this driver
+  cannot see that line", which is not the same fact as "the line is low".
+* Writing `cts`/`dsr`, or passing `--line-dtr maybe`, is a hard error (`ok:false`),
+  never a silent `off`.
+* `--line-*` changes the pin **in place**: no reopen, no other option touched.
+* `reset` ends with the line high and reports both edges with their state.
+* `opts` is what the port is actually running with, so `opts.dtr` always equals
+  `lines.dtr`.
 
 ### `selftest` — prove the build works, without hardware
 
 ```bash
 OmniCOM.cmd cli selftest
 ```
-28 checks: CRC vectors, XMODEM (128/1024/empty), YMODEM, ZMODEM (4 KB/70 KB/empty)
-over an in-memory loopback, plus a DEMO session (open, `AT`, file send, capture to
-disk). `ok:true` only when everything passes.
+28 checks + 5 control-line checks: CRC vectors, XMODEM (128/1024/empty), YMODEM,
+ZMODEM (4 KB/70 KB/empty) over an in-memory loopback, plus a DEMO session (open,
+`AT`, file send, capture to disk, and DTR/RTS read + drive + pulse).
+`ok:true` only when everything passes.
 
 ## Shared serial options
 
-`send`, `read`, `monitor`, `send-file`, `transfer`, `session` all accept:
+`send`, `read`, `monitor`, `send-file`, `transfer`, `session`, `lines`, `reset`
+all accept:
 
 ```
 --port COM3        port name; DEMO = virtual device
@@ -164,7 +195,10 @@ disk). `ok:true` only when everything passes.
 --stopbits 1       1/1.5/2
 --parity N         N/E/O/M/S
 --flow none        none/rtscts/xonxoff
+--dsrdtr           DSR/DTR hardware handshake (off by default)
 --no-dtr --no-rts  leave the line low after opening
+--line-dtr on|off  move DTR now, without reopening
+--line-rts on|off  move RTS now, without reopening
 --no-auto-reconnect
 --open-timeout 6.0
 ```

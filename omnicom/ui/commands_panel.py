@@ -110,12 +110,14 @@ class DropStrip(QWidget):
     def paintEvent(self, event) -> None:
         if not self._hot:
             return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(QPen(QColor(theme.TEAL), 2))
-        painter.drawLine(4, self.height() // 2, self.width() - 4,
-                         self.height() // 2)
-        painter.end()
+        try:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(QPen(QColor(theme.TEAL), 2))
+            painter.drawLine(4, self.height() // 2, self.width() - 4,
+                             self.height() // 2)
+        finally:
+            painter.end()
 
     # ------------------------------------------------------------- dragging
     def dragEnterEvent(self, event) -> None:
@@ -182,14 +184,16 @@ class BucketBody(QWidget):
     def paintEvent(self, event) -> None:
         if not self._drop_hot:
             return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(QPen(QColor(theme.TEAL), 1.5, Qt.DashLine))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawRoundedRect(
-            QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75),
-            theme.RADIUS_CTRL, theme.RADIUS_CTRL)
-        painter.end()
+        try:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setPen(QPen(QColor(theme.TEAL), 1.5, Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRoundedRect(
+                QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75),
+                theme.RADIUS_CTRL, theme.RADIUS_CTRL)
+        finally:
+            painter.end()
 
 
 class ListHost(QWidget):
@@ -242,13 +246,15 @@ class ElidedLabel(QLabel):
         self.setText(text)
 
     def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setFont(self.font())
-        text = self.fontMetrics().elidedText(self._full, Qt.ElideRight,
-                                             max(10, self.width()))
-        painter.setPen(self.palette().color(self.foregroundRole()))
-        painter.drawText(self.rect(), Qt.AlignVCenter | Qt.AlignLeft, text)
-        painter.end()
+        try:
+            painter = QPainter(self)
+            painter.setFont(self.font())
+            text = self.fontMetrics().elidedText(self._full, Qt.ElideRight,
+                                                 max(10, self.width()))
+            painter.setPen(self.palette().color(self.foregroundRole()))
+            painter.drawText(self.rect(), Qt.AlignVCenter | Qt.AlignLeft, text)
+        finally:
+            painter.end()
 
 
 class PasteBox(QPlainTextEdit):
@@ -505,32 +511,36 @@ class CommandRow(QWidget):
         self._selection_anim.start()
 
     def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        fill = QColor(theme.TEAL_SOFT)
-        fill.setAlphaF(0.18 + 0.62 * self._selection)
-        border = QColor(theme.TEAL)
-        border.setAlphaF(0.12 + 0.20 * self._selection)
-        painter.setPen(QPen(border, 1))
-        painter.setBrush(fill)
-        painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
-                                theme.RADIUS_CTRL, theme.RADIUS_CTRL)
-        accent = QColor(theme.TEAL if not self.item.get("timer") else theme.AMBER)
-        accent.setAlphaF(0.18 + 0.82 * self._selection)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(accent)
-        painter.drawRoundedRect(QRectF(1, 8, 3, self.height() - 16), 1.5, 1.5)
-        if self._drop_hot:
-            # The landing position: a 2 px teal line on the half of the row the
-            # pointer is over, so "before" and "after" are never a guess (R-130).
-            marker = QColor(theme.TEAL)
+        try:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            fill = QColor(theme.TEAL_SOFT)
+            fill.setAlphaF(0.18 + 0.62 * self._selection)
+            border = QColor(theme.TEAL)
+            border.setAlphaF(0.12 + 0.20 * self._selection)
+            painter.setPen(QPen(border, 1))
+            painter.setBrush(fill)
+            painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5),
+                                    theme.RADIUS_CTRL, theme.RADIUS_CTRL)
+            accent = QColor(theme.TEAL if not self.item.get("timer") else theme.AMBER)
+            accent.setAlphaF(0.18 + 0.82 * self._selection)
             painter.setPen(Qt.NoPen)
-            painter.setBrush(marker)
-            y = self.height() - 2 if self._drop_below else 0
-            painter.drawRoundedRect(QRectF(2, y, self.width() - 4, 2), 1, 1)
+            painter.setBrush(accent)
+            painter.drawRoundedRect(QRectF(1, 8, 3, self.height() - 16), 1.5, 1.5)
+            if self._drop_hot:
+                # The landing position: a 2 px teal line on the half of the row the
+                # pointer is over, so "before" and "after" are never a guess (R-130).
+                marker = QColor(theme.TEAL)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(marker)
+                y = self.height() - 2 if self._drop_below else 0
+                painter.drawRoundedRect(QRectF(2, y, self.width() - 4, 2), 1, 1)
+        finally:
+            painter.end()
 
     def contextMenuEvent(self, event) -> None:
         menu = QMenu(self)
+        menu.setStyleSheet(theme.menu_stylesheet())
         menu.addAction(tr("cmd.send"), lambda: self.send.emit(self.item))
         menu.addAction(tr("cmd.edit"), lambda: self.edit.emit(self.item))
         current = self.item.get("group") or ""
@@ -659,6 +669,7 @@ class GroupHeader(QWidget):
 
     def contextMenuEvent(self, event) -> None:
         menu = QMenu(self)
+        menu.setStyleSheet(theme.menu_stylesheet())
         menu.addAction(tr("cmd.addtogroup"),
                        lambda: self.addCommand.emit(self.group["id"]))
         menu.addAction(tr("cmd.dialog.exportgroup"),
@@ -701,15 +712,17 @@ class GroupHeader(QWidget):
         super().paintEvent(event)
         if not self._drop_hot:
             return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        pen = QPen(QColor(theme.TEAL), 1.5, Qt.DashLine)
-        painter.setPen(pen)
-        painter.setBrush(QColor(theme.TEAL_SOFT))
-        painter.drawRoundedRect(
-            QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75),
-            theme.RADIUS_CTRL, theme.RADIUS_CTRL)
-        painter.end()
+        try:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            pen = QPen(QColor(theme.TEAL), 1.5, Qt.DashLine)
+            painter.setPen(pen)
+            painter.setBrush(QColor(theme.TEAL_SOFT))
+            painter.drawRoundedRect(
+                QRectF(self.rect()).adjusted(0.75, 0.75, -0.75, -0.75),
+                theme.RADIUS_CTRL, theme.RADIUS_CTRL)
+        finally:
+            painter.end()
 
 
 # --------------------------------------------------------------------------- #
@@ -1660,6 +1673,7 @@ class CommandsPanel(QWidget):
 
     def remove_group(self, group_id: str) -> None:
         menu = QMenu(self)
+        menu.setStyleSheet(theme.menu_stylesheet())
         keep = menu.addAction(tr("cmd.group.keep"))
         drop = menu.addAction(tr("cmd.group.drop"))
         chosen = menu.exec(self.cursor().pos())

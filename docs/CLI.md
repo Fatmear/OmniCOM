@@ -104,10 +104,27 @@ python -m omnicom.cli info
 打包版要用 `runtime\python.exe OmniCOM.pyz cli ...`；`OmniCOM.cmd cli ...` 没有输出
 （它是 `start` 一个无控制台的进程，stdout 直接丢了）。
 
-### DTR / RTS
+### DTR / RTS / CTS / DSR
 
 默认**都不拉** —— 抬高 DTR 会把 CH340/CP210x 这类板子复位，等于一开串口就重启。
 要拉高：`--dtr` / `--rts`。旧的 `--no-dtr` / `--no-rts` 仍然接受（就是默认行为）。
+
+想在**已经打开**的端口上改这两根线，用 `--line-dtr` / `--line-rts`（见 `lines` / `reset`）：
+`--dtr` 是"打开时用这个值"，`--line-dtr` 是"现在就改"，后者不会重开串口。
+
+硬件流控 `dsrdtr`（用 DSR/DTR 做握手，区别于 `rtscts`）：
+`--dsrdtr` / `--no-dsrdtr`，也出现在 `lines` / `session --opts` 的 `opts` 里。
+
+四根线分两类：
+
+| 线 | 方向 | 说明 |
+| --- | --- | --- |
+| `dtr` / `rts` | 我们 → 设备 | 随时可写，串口关着也会记住，下次打开时生效 |
+| `cts` / `dsr` | 设备 → 我们 | **只读**。驱动看不到时返回 `null`，不是 `false` |
+
+`null` 表示"这块驱动的这个口看不到该线"，和"线是低电平"是两件事，脚本不要混用。
+写 `cts`/`dsr`、或用 `--line-dtr maybe` 这种非法值会被明确报错（`ok:false`），
+不会被静默当成 `off`。
 
 ## 命令
 
@@ -260,7 +277,10 @@ python -m omnicom.cli session --port COM3 --script -   # 从 stdin 读
 | --- | --- | --- |
 | `note` | `note` | 注释，原样返回 |
 | `delay` | `delay` | 秒；>10 时按毫秒处理 |
-| `set` | `set` | 热改参数：`baudrate/bytesize/stopbits/parity/dtr/rts/rtscts/xonxoff` |
+| `set` | `set` | 热改参数：`baudrate/bytesize/stopbits/parity/dtr/rts/rtscts/xonxoff/dsrdtr` |
+| `line` | `line: {dtr, rts}` | **只动控制线**，不重开串口；只接受 `dtr`/`rts`，写 `cts`/`dsr` 报错 |
+| `lines` | `lines: true` | 只读，返回当前四根线状态 |
+| `pulse` | `pulse: {line, low_ms}` | 复位脉冲：拉低 → 等待 → 拉高，返回两个沿 |
 | `send` | `send` 或 `send_hex`、可选 `line_end`、`wait`、`expect[]`、`expect_regex`、`drain_ms`、`raw`、`limit` | 发送并按需等待/断言 |
 | `expect` | `expect[]` 或 `expect_regex`、`timeout`（默认 3s） | 只等不写 |
 | `drain` | `drain`（秒）、`max_bytes`、`limit` | 读一段并返回内容 |
@@ -281,6 +301,43 @@ python -m omnicom.cli session --port COM3 --script -   # 从 stdin 读
 ```
 
 默认遇错即停（`--continue-on-error` 改为继续）；任一必填步骤失败 → 顶层 `ok:false`、退出码 1。
+
+⚠ 「遇错即停」意味着 `steps_run` 可能小于 `steps_total`：想在同一个脚本里验证两个错误步骤，
+必须拆成两个脚本，否则第二个根本不会执行（第一版 R-156 验收就是这么挂的）。
+
+### `lines` — 读/改控制线（不重开串口）
+
+```bash
+python -m omnicom.cli lines --port COM3                    # 只读
+python -m omnicom.cli lines --port COM3 --line-dtr on\     # 就地拉高
+                              --line-rts off
+python -m omnicom.cli lines --port DEMO --direct --dsrdtr  # 顺带验证硬件流控选项
+```
+```json
+{"ok": true, "via": "direct", "port": "COM3",
+ "lines": {"dtr": true, "rts": false, "cts": false, "dsr": null, "open": true},
+ "applied": {"dtr": true}, "opts": {"baudrate": 115200, "dtr": true, ...}}
+```
+`applied` 只包含本次真正改动的线；不带 `--line-*` 时为空对象，等于一次纯读。
+`opts` 是**端口当前实际生效**的参数（不是打开时的请求值），所以 `opts.dtr` 与 `lines.dtr` 永远一致。
+
+默认走窗口（会同步界面上的 DTR/RTS 开关）；没有窗口时 `--direct` 自己开端口。
+**注意**：窗口模式不会继承 `--line-*` 之外的参数改动（波特率等请用 `session --opts` 或 `--direct`）。
+
+### `reset` — 复位脉冲
+
+```bash
+python -m omnicom.cli reset --port COM3                    # DTR 拉低 120ms 再拉高
+python -m omnicom.cli reset --port COM3 --line rts --low-ms 40
+```
+```json
+{"ok": true, "via": "direct", "port": "COM3", "line": "dtr", "low_ms": 120.0,
+ "edges": [{"edge": "low",  "level": false, "lines": {"dtr": false, ...}},
+           {"edge": "high", "level": true,  "lines": {"dtr": true,  ...}}],
+ "lines": {"dtr": true, "rts": false, "cts": false, "dsr": false, "open": true}}
+```
+每个沿都带状态，某个沿没生效时能直接看出来；结束时线保持在**高**电平。
+这就是 CH340/CP210x 板子靠 RESET 电容进下载模式的那一下。
 
 ### `selftest` — 无硬件端到端自检
 

@@ -18,3 +18,6 @@ desktop.ini
 
 # one-off patch/probe scripts (never commit these)
 tools/_*.py
+
+# Chromium/QtWebEngine drops this into the cwd when a render process warns
+debug.log

@@ -11,8 +11,12 @@ launch.  The folder built here contains
     runtime\\python.exe, pythonw.exe      official CPython "embeddable" build
     runtime\\Lib\\site-packages\\         PySide6 + shiboken6 + pyserial, trimmed
     OmniCOM.pyz                          our own code (readable zip)
-    assets\\  plugins\\  logo.png          the same files the source tree uses
+    assets\\  logo.png                    icons and logos
     OmniCOM.cmd / console.cmd            launchers
+
+No ``plugins/\\`` folder is shipped (R-174): every plugin - the data dashboard
+included - is installed from the plugin store, so an update can never shadow the
+copy the user installed or reinstall one they removed.
 
 The embeddable runtime has a ``._pth`` file, which switches off ``site`` and all
 user/site-packages paths, so the app can only import what ships in the folder.
@@ -32,6 +36,7 @@ import contextlib
 import hashlib
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import urllib.request
@@ -53,9 +58,11 @@ EMBED_URL = (f"https://www.python.org/ftp/python/{EMBED_VERSION}/"
 
 #: Qt modules the app never imports.  Their ``.pyd`` wrappers and the matching
 #: ``Qt6*.dll`` are skipped, which is where most of the size sits.
+#: QtWebEngine (and the QtQml/QtQuick core it links against) must stay: the
+#: chart plugin renders its dashboard with offline ECharts inside a
+#: QWebEngineView (R-161), so dropping them broke the plugin at runtime.
 SKIP_MODULES = (
-    "quick", "qml", "designer", "opengl", "openglwidgets", "3d",
-    "webengine", "webenginecore", "webenginewidgets", "webchannel",
+    "designer", "3d",
     "websockets", "multimedia", "multimediawidgets", "charts", "datavisualization",
     "graphs", "sql", "test", "bluetooth", "nfc", "positioning", "location",
     "serialbus", "serialport", "sensors", "remoteobjects", "spatialaudio",
@@ -64,18 +71,24 @@ SKIP_MODULES = (
 )
 #: DLL prefixes that belong to those modules (they are shipped top-level).
 SKIP_DLL_PREFIXES = (
-    "Qt6Quick", "Qt6Qml", "Qt6Designer", "Qt6OpenGL", "Qt6QmlModels",
-    "Qt6QmlCompiler", "Qt6QmlWorkerScript", "Qt6QmlMeta", "Qt6QmlLocalStorage",
-    "Qt6QmlNetwork", "Qt6QmlXmlListModel", "Qt6Labs", "Qt6Lottie",
-    "Qt63D", "Qt6WebEngine", "Qt6WebChannel", "Qt6WebSockets", "Qt6Multimedia",
-    "Qt6Charts", "Qt6DataVisualization", "Qt6Graphs", "Qt6Sql", "Qt6Test",
+    "Qt6Designer",
+    "Qt6Labs", "Qt6Lottie",
+    "Qt63D", "Qt6Charts", "Qt6DataVisualization", "Qt6Graphs", "Qt6Sql", "Qt6Test",
     "Qt6Bluetooth", "Qt6Nfc", "Qt6Positioning", "Qt6Location", "Qt6SerialBus",
-    "Qt6SerialPort", "Qt6Sensors", "Qt6RemoteObjects", "Qt6Spatial", "Qt6TextToSpeech",
+    "Qt6Sensors", "Qt6RemoteObjects", "Qt6Spatial", "Qt6TextToSpeech",
     "Qt6Help", "Qt6UiTools", "Qt6StateMachine", "Qt6Scxml", "Qt6Pdf",
-    "Qt6SvgWidgets", "pyside6qml.abi3.dll",
+    "Qt6SvgWidgets",
 )
 #: Qt plugin folders that must stay (platform integration, styles, images).
-KEEP_PLUGINS = ("platforms", "styles", "imageformats", "iconengines", "platformthemes")
+KEEP_PLUGINS = ("platforms", "styles", "imageformats", "iconengines",
+                "platformthemes", "webview")
+
+#: Chromium resources QtWebEngine cannot start without.  The ``*.debug.*``
+#: variants are ~40 MB of symbols, so they stay out of the portable folder.
+WEBENGINE_RESOURCES = ("icudtl.dat", "qtwebengine_resources.pak",
+                       "qtwebengine_resources_100p.pak",
+                       "qtwebengine_resources_200p.pak",
+                       "v8_context_snapshot.bin")
 
 LAUNCHER = """@echo off
 rem OmniCOM - self-contained build.  Nothing to install: the Python runtime and
@@ -221,31 +234,134 @@ def _skip(name: str, *, is_dll: bool) -> bool:
     return any(lowered.startswith(f"qt{module}".lower()) for module in SKIP_MODULES)
 
 
+def _pe_imports(path: Path) -> list[str]:
+    """Return the DLL names in a PE file's import table (no external tools)."""
+    try:
+        data = path.read_bytes()
+        pe = struct.unpack_from("<I", data, 0x3C)[0]
+        if data[pe:pe + 4] != b"PE\0\0":
+            return []
+        coff = pe + 4
+        sections = struct.unpack_from("<H", data, coff + 2)[0]
+        optional = coff + 20
+        magic = struct.unpack_from("<H", data, optional)[0]
+        if magic == 0x20B:
+            directory = optional + 112
+        elif magic == 0x10B:
+            directory = optional + 96
+        else:
+            return []
+        count = struct.unpack_from("<I", data, directory - 4)[0]
+        if count < 2:
+            return []
+        import_rva = struct.unpack_from("<I", data, directory + 8)[0]
+
+        headers = []
+        for index in range(sections):
+            offset = optional + struct.unpack_from("<H", data, coff + 16)[0] + index * 40
+            vsize, vaddr = struct.unpack_from("<II", data, offset + 8)
+            raw_size, raw = struct.unpack_from("<II", data, offset + 16)
+            headers.append((vaddr, max(vsize, raw_size), raw))
+
+        def to_offset(rva: int) -> int | None:
+            for vaddr, size, raw in headers:
+                if vaddr <= rva < vaddr + size:
+                    return raw + (rva - vaddr)
+            return None
+
+        offset = to_offset(import_rva)
+        if offset is None:
+            return []
+        names = []
+        while True:
+            _original, _stamp, _chain, name_rva, _first = struct.unpack_from(
+                "<IIIII", data, offset)
+            if name_rva == 0:
+                break
+            name_offset = to_offset(name_rva)
+            if name_offset is None:
+                break
+            names.append(data[name_offset:data.index(b"\0", name_offset)].decode(
+                "ascii", "replace"))
+            offset += 20
+        return names
+    except (OSError, struct.error, ValueError):
+        return []
+
+
+def _qt_closure(source: Path) -> tuple[set[str], set[str]]:
+    """Which ``.dll`` / ``.pyd`` files the kept modules really need.
+
+    The skip lists above are hand maintained, so they quietly break the moment
+    a kept module starts linking against a "dropped" one: QtWebEngineWidgets
+    pulls in Qt6Positioning, and without it the bundled ``import
+    QtWebEngineWidgets`` died with "DLL load failed" while every file it was
+    *thought* to need was present (L-223).  The import table is the truth, so
+    the kept set is expanded until it is closed.
+    """
+    available = {item.name for item in source.glob("*.dll")}
+    keep_dll = {name for name in available if not _skip(name, is_dll=True)}
+    keep_pyd = {item.name for item in source.glob("*.pyd")
+                if not _skip(item.name, is_dll=False)}
+    pending = sorted(keep_dll | keep_pyd)
+    while pending:
+        current = pending.pop()
+        for dependency in _pe_imports(source / current):
+            if dependency in available and dependency not in keep_dll:
+                keep_dll.add(dependency)
+                pending.append(dependency)
+    return keep_dll, keep_pyd
+
+
 def _copy_pyside(source: Path, target: Path) -> int:
     """Copy the Qt subset the app needs; returns the number of skipped files."""
     skipped = 0
     target.mkdir(parents=True, exist_ok=True)
+    keep_dll, keep_pyd = _qt_closure(source)
     for item in source.iterdir():
         name = item.name
+        lowered = name.lower()
         if item.is_dir():
             if name in ("plugins", "glue"):
                 continue                       # handled below
+            if name == "resources":
+                continue                       # whitelisted below (Chromium)
             if name in ("doc", "include", "metatypes", "qml", "typesystems",
                         "__pycache__", "support"):
                 skipped += 1
                 continue
             shutil.copytree(item, target / name, dirs_exist_ok=True)
             continue
-        if item.suffix == ".dll" and _skip(name, is_dll=True):
+        if item.suffix == ".dll" and name not in keep_dll:
             skipped += 1
             continue
-        if item.suffix == ".pyd" and _skip(name, is_dll=False):
+        if item.suffix == ".pyd" and name not in keep_pyd:
             skipped += 1
+            continue
+        if item.name in ("python.exe", "pythonw.exe"):
+            shutil.copy2(item, target / name)
+            continue
+        # QtWebEngineProcess.exe is mandatory: without it every
+        # QWebEngineView stays blank (the dashboard, R-161).
+        if name.startswith("QtWebEngineProcess") or (
+                "qtwebengine" in lowered and item.suffix == ".exe"):
+            shutil.copy2(item, target / name)
             continue
         if item.suffix in (".exe", ".a", ".lib"):
             skipped += 1
             continue
         shutil.copy2(item, target / name)
+
+    resources = source / "resources"
+    if resources.is_dir():
+        destination = target / "resources"
+        destination.mkdir(parents=True, exist_ok=True)
+        for name in WEBENGINE_RESOURCES:
+            item = resources / name
+            if item.is_file():
+                shutil.copy2(item, destination / name)
+            else:
+                print(f"WARNING: missing WebEngine resource {name}")
 
     glue = source / "glue"
     if glue.is_dir():
@@ -306,7 +422,7 @@ def build(target: Path, version: str) -> Path:
 
     target.mkdir(parents=True, exist_ok=True)
     print(f"== {NAME} {version}")
-    make_pyz.build(target)                            # pyz + assets + plugins + docs
+    make_pyz.build(target)                            # pyz + assets + docs
     runtime = _prepare_runtime(target)
     _install_dependencies(runtime)
 
@@ -358,11 +474,25 @@ def verify(target: Path) -> int:
         print("packaged selftest FAILED")
         return result.returncode or 1
     print("packaged selftest OK (bundled runtime, no external packages)")
+    from make_plugins import verify_runtime
+
+    if verify_runtime(target) != 0:
+        return 1
+    # The updater suite runs five real installer cycles (local / download /
+    # locked / defer), each one copying the whole 462 MB bundle and then
+    # launching a second interpreter, so it needs ~330 s on a fast machine.
+    # The old 300 s cap fired *after* every assertion had passed and reported
+    # "packaged selftest FAILED" on a perfectly good build (L-225).
+    print("== updater acceptance suite (this takes several minutes)", flush=True)
     installer = subprocess.run(
         [sys.executable, "-X", "utf8", str(ROOT / "tools/acceptance_test.py"),
          "--only", "installer", "--bundle", str(target)],
-        cwd=ROOT, timeout=300)
-    return installer.returncode
+        cwd=ROOT, timeout=1800)
+    if installer.returncode != 0:
+        print("updater acceptance suite FAILED")
+        return installer.returncode or 1
+    print("updater acceptance suite OK (installer, restart, downgrade deferred)")
+    return 0
 
 
 def archive(target: Path, version: str) -> Path:

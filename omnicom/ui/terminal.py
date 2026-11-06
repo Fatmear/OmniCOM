@@ -170,7 +170,7 @@ class TerminalView(QPlainTextEdit):
         while nothing reached the port (R-091).
         """
         menu = QMenu(self)
-        menu.setStyleSheet(theme.app_stylesheet())
+        menu.setStyleSheet(theme.menu_stylesheet())
 
         copy = menu.addAction(tr("term.menu.copy"))
         copy.setShortcut("Ctrl+Shift+C")

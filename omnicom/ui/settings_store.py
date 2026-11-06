@@ -183,7 +183,15 @@ class UiSettings:
 
     # ------------------------------------------------------------- lifetime
     def release(self) -> None:
-        """Flush and give the window slot back (called from ``closeEvent``)."""
+        """Flush and give the window slot back (called from ``closeEvent``).
+
+        ``QSettings.sync()`` measured **~227 ms** on this machine even for INI
+        files of a few hundred bytes (``.artifacts/close_probe2.py``): Windows
+        rewrites the file through a rename, so the cost is per-file, not per
+        byte.  ``closeEvent`` therefore hides the window *before* calling this
+        (R-159 / L-216) - the flush still has to happen, it just must not be
+        paid in front of an unchanged, still-visible frame.
+        """
         self.sync()
         self.slot.release()
 

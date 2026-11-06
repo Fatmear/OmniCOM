@@ -77,6 +77,18 @@ def _show_update_result(window, startup_error: str = "") -> None:
                         tr("update.install.failed", err=error, version=__version__))
 
 
+def prepare_webengine() -> bool:
+    """Make Qt safe for a ``QWebEngineView`` *before* ``QApplication`` exists.
+
+    The rules live in :mod:`omnicom.webengine` so the CLI, the GUI self-test and
+    the plugin share one implementation.  Must run before the application
+    object is created; see that module for the measured reasons.
+    """
+    from .. import webengine
+
+    return webengine.prepare()
+
+
 def run(argv: list[str] | None = None, demo: bool = False) -> int:
     from PySide6.QtCore import Qt, QTimer
     from PySide6.QtGui import QIcon
@@ -90,6 +102,8 @@ def run(argv: list[str] | None = None, demo: bool = False) -> int:
 
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    # Must precede QApplication (see prepare_webengine).
+    prepare_webengine()
     app = QApplication(argv)
     if "--keep-console" not in argv:
         _hide_own_console()

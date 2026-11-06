@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "plugins": [
+    {
+      "id": "chart",
+      "name": {
+        "zh": "数据看板",
+        "en": "Dashboard"
+      },
+      "version": "1.1.2",
+      "author": "OmniCOM",
+      "description": {
+        "zh": "可拖拽布置的数据监控大屏：曲线、仪表盘、数值、进度条、指示灯控件，每个控件单独绑定通道",
+        "en": "Draggable telemetry dashboard with line, gauge, value, progress bar and lamp widgets; each widget binds its own channel"
+      },
+      "entry": "plugin.py",
+      "api": 2,
+      "python": "3.13",
+      "platform": "win_amd64",
+      "icon": "icon.png",
+      "url": "https://github.com/Fatmear/OmniCOM/releases/download/plugin-store/chart-1.1.2.zip",
+      "sha256": "508cb34f8a63812e45a77ae52b056bad0bfb2ee15869348050857cfadbe732d4",
+      "size": 364071,
+      "versions": [
+        {
+          "version": "1.1.2",
+          "api": 2,
+          "url": "https://github.com/Fatmear/OmniCOM/releases/download/plugin-store/chart-1.1.2.zip",
+          "sha256": "508cb34f8a63812e45a77ae52b056bad0bfb2ee15869348050857cfadbe732d4",
+          "size": 364071
+        },
+        {
+          "version": "1.1.0",
+          "api": 2,
+          "url": "https://github.com/Fatmear/OmniCOM/releases/download/plugin-store/chart-1.1.0.zip",
+          "sha256": "4a7d690bdc37bc22fad22d08d4684fe07b2af9d6b3e3ba97720cde4cb1585485",
+          "size": 358809
+        }
+      ]
+    },
+    {
+      "id": "launcher",
+      "name": {
+        "zh": "快捷启动",
+        "en": "Launcher"
+      },
+      "version": "1.0.0",
+      "author": "OmniCOM",
+      "description": {
+        "zh": "把常用软件添加进来，点一下就打开；支持多开计数与聚焦已打开窗口",
+        "en": "Add your favourite apps and open them with one click; tracks multiple instances and can focus an existing window"
+      },
+      "entry": "plugin.py",
+      "icon": "icon.png",
+      "api": 1,
+      "url": "https://github.com/Fatmear/OmniCOM/releases/download/plugin-store/launcher-1.0.0.zip",
+      "sha256": "4a68cd074b1593f9d33e610663e5c0ee84f07a9e6fcccfc132bfa05a79f22ff7",
+      "size": 16585,
+      "versions": [
+        {
+          "version": "1.0.0",
+          "api": 1,
+          "url": "https://github.com/Fatmear/OmniCOM/releases/download/plugin-store/launcher-1.0.0.zip",
+          "sha256": "4a68cd074b1593f9d33e610663e5c0ee84f07a9e6fcccfc132bfa05a79f22ff7",
+          "size": 16585
+        }
+      ]
+    }
+  ]
+}

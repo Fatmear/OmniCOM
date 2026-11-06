@@ -21,9 +21,10 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
         ]),
         ("串口日志页", [
             "每一行的格式是 `[时:分:秒.毫秒]收←◇内容` 或 `发→◇内容`。",
-            "「自动滚动到最新」打开时永远跟着最新一行；关掉后可以自由翻阅历史，底部会浮出「回到最新」气泡。",
-            "「保持屏幕常亮」打开后系统不会因空闲息屏或睡眠，适合长时间盯串口；关闭应用会自动恢复。"
-            "开关每次都从「关」开始，不记忆上次的选择。",
+            "滚动到底部自动跟随最新，上滑离开底部自动停止，开关同步变化；手动开启开关或点「回到最新」恢复跟随。停止跟随不停止接收或打印。",
+            "左栏与发送栏的开关每次都从默认状态开始，不记忆上次的选择（因此不会因为上次关了回显就看不到自己的输入）："
+            "自动重连、时间戳、回显、自动滚动默认开，HEX 显示、控制字符、保持屏幕常亮、回车发送默认关，DTR / RTS 默认不拉。"
+            "波特率、数据位等下拉框仍然记住。",
             "「显示 \\r \\n 等控制字符」对收和发同时生效，能看到真实发出的换行。",
             "「HEX 显示」按 16 字节一行显示偏移 + 十六进制 + ASCII。",
             "「保存视图」把当前日志写到文件；「收发记录」在后台把收发两个方向的原始字节写进同一个文件，"
@@ -45,6 +46,7 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
         ("串口参数", [
             "左侧的 DTR / RTS 默认**都不拉**：很多 USB 串口板子把 DTR 经电容接到 RESET，"
             "拉高等于一开串口就复位；需要时再打开开关。",
+            "这两个开关同样不记忆，每次启动都回到不拉的状态。",
         ]),
         ("文件传输页", [
             "选择 XMODEM / YMODEM / ZMODEM，设置方向与文件，点开始。",
@@ -72,9 +74,26 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
             "选中日志文字后右键「查找」，会替换旧查询并立即按普通文本搜索；多行选区按行匹配任一项。",
             "双击任意一行跳到日志原文并高亮。",
             "匹配方式：普通 / 模糊（字符按顺序出现即可）/ 全词 / 正则表达式；另有「区分大小写」开关。",
+            "勾选「限定时间范围」可以只搜某一段时间：打开时会自动取日志自身的第一条和最后一条时间作为起止，"
+            "也可以手动改，或点「今天」/「全部」快速切换。日志时间戳只显示时分秒，所以过滤按**完整日期时间**比较，"
+            "跨天的同一时刻不会被混在一起；起止写反会直接提示，没有结果时也会说明是时间段内没有数据。",
             "右上角箭头按钮可把结果全窗口显示，Esc 退出。",
+            "侧栏搜索一行一条，长内容可切到全屏完整查看；仅全屏自动按字符换行，不用横向滚动条。全量搜索从首条开始，滚到底自动跟随、上滑停止，搜索结果不提供专用自动滚动开关或最新按钮。全屏与侧栏之间切换不卡顿：行高按字符数直接算并缓存，不再逐行排版。",
         ]),
         ("插件", [
+            "「插件 → 插件商店」展示库中全部插件和已安装插件，列出当前与最新版本；可安装、更新、卸载，有更新时条目右上角亮红点。"
+            "每个条目带版本下拉框，可选择安装指定的历史版本（含降级安装），降级与更新的校验、回滚流程完全一致；顶部搜索框可按名称/作者/描述筛选。"
+            "网络失败保留本地目录，可重试。",
+            "插件仓库地址在「首选项」中配置，每行一个，全部查询；同 ID 优先较新版本，同版本优先靠前仓库。单个仓库失败不影响其他来源，并保留该仓库缓存。默认目录是 Git 仓库 plugins/catalog.json，不放 Releases。",
+            "曲线插件逐行接收 `[OmniCOM-chart] AA=11 BB=1.1`，支持整数、小数、负数和科学计数；变量自动出现并可逐个勾选。看板打开就在刷新，按钮默认显示「暂停」；点它只暂停画面，接收、帧计数和控件数值继续，再点「继续」恢复刷新。"
+            "暂停不记忆：无论上次是暂停还是关闭，重新打开看板一律回到刷新状态，不会一打开就是冻结的画面。",
+            "曲线提供时间窗、每通道点数、坐标重置、清空和 CSV 导出；历史淘汰、无效行、超长行和通道上限均显示计数。时间轴为主机接收相对时间，不是设备采样时钟。",
+            "每通道保留最近 5000 个点，时间窗默认「全部」；只显示不抽稀，实时刷新不会重置缩放。",
+            "控件共五种：曲线、仪表盘、数值、进度条、指示灯。进度条按卡片自己的最小/最大值把当前值折算成填充比例，"
+            "下方显示范围和带单位的读数；低于下限为空、高于上限填满并变红，没有数据时显示 `--`。",
+            "看板没有「编辑」开关：卡片任何时候都能直接拖动，右下角拖拽缩放，网格背景一直显着对位。",
+            "曲线卡片自带横、纵两个缩放滑块，可以只放大时间轴或只放大数值轴；滑条区域按住是缩放，卡片其它位置按住仍然是拖动。看板不做整页 Ctrl+滚轮缩放（那会把卡片和工具栏一起放大，只能重启恢复）。",
+            "商店从独立 HTTPS 插件目录取得安装包，校验 SHA-256、清单与接口后安装到数据目录；卸载保留 plugin-data 用户数据。插件是可信 Python 代码，不是沙箱。插件库需单独发布，主程序无需随插件更新。",
             "插件是一个独立目录，放在 `plugins/` 或 `omnicom-data/plugins/` 下，每个插件在顶部占一个标签页。",
             "把一个插件目录整个复制到另一台电脑的 `plugins/` 下，点「插件 → 刷新插件」就能用。",
             "自带「快捷启动」插件：上方是快捷方式（点一下新开一个窗口），下方是正在运行的窗口（点一下切过去）；",
@@ -92,6 +111,10 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
         ("命令行（给脚本 / AI 用）", [
             "`python -m omnicom.cli ports` 列出串口；`send` 发送并等待应答；`read` 读取；`monitor` 流式输出。",
             "`session --script 文件.json` 可以跑一段脚本化的收发流程。",
+            "控制线也能完整控制：`lines --line-dtr on --line-rts off` 就地改 DTR / RTS（不重开串口），",
+            "`reset --line dtr --low-ms 120` 打一下复位脉冲（低→等待→高，结束时保持高电平）；",
+            "`lines` 同时报告 CTS / DSR，驱动看不到时返回 `null` 而不是 `false`，写 CTS / DSR 或填非法值会直接报错。",
+            "硬件流控用 `--dsrdtr`（与 `--flow rtscts` 不同）。窗口开着时这些命令走窗口，界面上两个开关会同步。",
             "所有命令的 stdout 都是**一个** JSON 文档（`monitor`、`send --repeat N`、`send --ports A,B` 是每行一个），",
             "退出码与 JSON 里的 `ok` 永远一致：成功 0、失败 1、用法错误 2。stdout 固定 UTF-8，中文不会乱码。",
             "等应答用 `--expect OK --wait 2`；设备不回显的命令用 `--settle 0.4`（收到数据后静默 0.4 秒就返回，不必等满 `--wait`）。",
@@ -133,10 +156,11 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
             '端口下拉框显示「端口号 + 设备名」，例如 `COM139  USB-Enhanced-SERIAL CH340`；名字太长时悬浮可看完整名称与硬件 ID。',
             '打开失败常见原因：被别的程序占着（另一个串口助手、虚拟机、厂商烧写工具）；驱动没装；线是充电线没有数据线芯。先点刷新重新枚举，再换一个口试试。',
             '拔插设备时保持「自动重连」打开，OmniCOM 会认回同一个设备，而不是同名的新设备。',
-            'DTR / RTS 默认都不拉；如果板子需要拉高才启动，打开开关即可，这个选择会记住。',
+            'DTR / RTS 默认都不拉；如果板子需要拉高才启动，打开开关即可，但**不会记住**——下次启动又回到不拉，避免一开串口就把板子复位。',
         ]),
         ("多窗口", [
             '可以同时开多个窗口，每个窗口各自一个串口、各自一份日志，互不干扰；窗口的尺寸、分栏、发送框高度分别记住，下次启动复原。',
+            '双击标题栏（或把窗口拖到屏幕顶部）最大/还原时，画面是滑动过渡而不是一下子跳过去；提示栏按钮、Aero Snap 同样会滑动，反复切换尺寸也不会越缩越小。',
             '「快捷启动」插件的上排是快捷方式，点一下就是新开一个窗口——同时调两块板子时，一块板一个窗口，抓日志不会串。',
             '命令行同样能区分：它按**串口名**找窗口。`cli state --port COM5` 只会问开着 COM5 的那个窗口；想指定某个窗口还可以 `--window <PID>`。',
         ]),
@@ -179,11 +203,16 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
             "Each line reads `[hh:mm:ss.mmm]RX←◇payload` (received) or "
             "`TX→◇payload` (sent). Switch the language and the two direction "
             "markers change with it.",
-            "*Auto-scroll to latest* always follows the newest line. Turn it off and a "
-            "*back to latest* bubble appears while you read history.",
+            "Reaching the bottom resumes following; scrolling up stops it and synchronizes the switch. "
+            "Turn the switch on or use the latest bubble to resume. Receiving and printing continue.",
             "*Keep screen awake* stops Windows from blanking or sleeping on idle - handy during a "
             "long capture. It is released automatically when OmniCOM closes, and always starts "
-            "off: the switch is deliberately not remembered.",
+            "off: like every other rail / send-bar switch it is deliberately not remembered.",
+            "Every switch in the left rail and the send bar opens at its default: auto-reconnect, "
+            "timestamps, echo and auto-scroll on; HEX view, control chars, keep-awake and "
+            "Enter-to-send off; DTR / RTS low. Nothing is remembered, so a switch turned off in a "
+            "collapsed rail can never hide your echo on the next launch. The drop-downs (baud, "
+            "data bits, parity, flow) are still remembered.",
             "*Show \\r \\n and other control chars* applies to both directions, so you can see the "
             "line ending that was really sent.",
             "*HEX view* prints 16 bytes per line: offset, hex, ASCII.",
@@ -207,7 +236,7 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
             "Copy with Ctrl+Shift+C, paste with Ctrl+Shift+V (plain Ctrl+C is the interrupt byte).",
         ]),
         ("Serial parameters", [
-            "DTR and RTS start **low**: many USB-serial boards wire DTR to RESET through a capacitor, so raising it would reboot the device every time the port opens. Flip the switch when you need the line high.",
+            "DTR and RTS start **low**: many USB-serial boards wire DTR to RESET through a capacitor, so raising it would reboot the device every time the port opens. Flip the switch when you need the line high - but it is not remembered, so the next launch is safe again.",
         ]),
         ("File transfer", [
             "Pick XMODEM / YMODEM / ZMODEM, choose direction and file, press Start.",
@@ -246,9 +275,27 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
             "Double-click any row to jump to that line in the log; it flashes.",
             "Modes: Plain / Fuzzy (characters in order) / Whole word / Regex, plus a *Match case* "
             "switch.",
+            "Tick *limit to a time range* to search one window of time. Switching it on seeds the "
+            "range from the log's own first and last timestamp, and *Today* / *All* jump to the "
+            "common cases. Rendered timestamps carry no date, so the filter compares the full "
+            "date-time: the same 08:00 on two different days never mixes. An inverted range is "
+            "reported instead of silently returning nothing, and an empty window says so.",
             "The expand arrow blows the results up to the full window; Esc exits.",
+            "Sidebar results use one line per hit; fullscreen results display all text with character wrapping and no horizontal scrollbar. A full search starts at the first hit; reaching the bottom resumes following and scrolling up stops it. Search results have no dedicated auto-scroll switch or latest button. Switching between the sidebar and fullscreen does not stall: row heights are computed from the character count and cached instead of laying out every row.",
         ]),
         ("Plugins", [
+            "Plugins → Plugin Store lists every catalog entry and installed plugin, with installed/latest versions, install/update/uninstall actions and an upper-right red update dot."
+            " Each row carries a version drop-down, so a specific (older) build can be installed; an older build goes through the identical verification and rollback path as an update, and the search box filters by name, author or description."
+            " Offline errors retain the local catalog and allow retry.",
+            "Configure plugin catalog URLs in Preferences, one per line. All sources are queried; newer versions win for the same ID, with the first source winning ties. One source failing does not block the rest and retains its own cache. The default index is the Git repository's plugins/catalog.json, not a Release asset.",
+            "Live Charts receives one ASCII line at a time: `[OmniCOM-chart] AA=11 BB=1.1`. Integers, decimals, negative values and scientific notation are supported. Channels appear dynamically with individual visibility checkboxes. The dashboard refreshes as soon as it opens, so its button reads *Pause*; pausing freezes the picture only - reception, the frame counter and the widget values keep running - and *Resume* brings the refresh back. "
+            "The pause is not remembered: whether the last dashboard was paused or closed, reopening always comes up refreshing instead of a frozen picture.",
+            "Charts offer a time window, per-channel history limit, axis reset, clear and CSV export. Invalid/oversized frames, evicted history and excess channels are counted. The time axis uses relative host receive time, not the device sample clock.",
+            "Each channel keeps its latest 5000 samples and the time window defaults to All; every retained point is drawn, with no down-sampling, and a live refresh never resets the zoom.",
+            "There are five widget kinds: line, gauge, value, progress bar and lamp. A progress bar turns the current value into a fill proportion using the card's own minimum and maximum, with the range and a unit-suffixed readout underneath. Below the minimum the bar is empty, above the maximum it is full and turns red, and a card without data shows `--`.",
+            "The dashboard has no edit switch: every card is draggable at all times, the lower-right corner resizes it, and the snap grid stays visible as a guide.",
+            "Every line card carries two independent zoom sliders - horizontal under the plot, vertical at its right - so you can magnify the time axis alone or the value axis alone. Pressing a strip zooms; pressing anywhere else on the card still drags it. The dashboard has no page-wide Ctrl+wheel zoom, because that scaled the cards and the toolbar together and could only be undone by restarting.",
+            "The store uses a separately published HTTPS catalog and verifies package SHA-256, metadata and API compatibility. It installs into the data directory; uninstall preserves plugin-data. Plugins are trusted Python code, not sandboxed. Plugin releases do not require an application update.",
             "A plugin is a folder under `plugins/` or `omnicom-data/plugins/`; each one gets its own "
             "tab in the top bar.",
             "Copy the whole folder to another machine's `plugins/`, press *Plugins → Reload* and it "
@@ -272,8 +319,13 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
         ("Command line (for scripts / AI)", [
             "`python -m omnicom.cli ports` lists ports; `send` sends and waits for a reply; `read` "
             "reads; `monitor` streams.",
-            "`session --script file.json` runs a scripted exchange.",
-            "Every command writes exactly **one** JSON document to stdout - `monitor`, `send --repeat N` and `send --ports A,B` write one per line.",
+            "`session --script file.json` runs a scripted exchange.",            "Control lines are fully scriptable: `lines --line-dtr on --line-rts off` moves DTR / "
+            "RTS in place (no reopen), and `reset --line dtr --low-ms 120` emits a reset pulse "
+            "(low, wait, high) that ends with the line high. `lines` also reports CTS / DSR; a "
+            "driver that cannot see a line reports `null`, not `false`, and writing CTS / DSR or "
+            "passing a bad value is an error rather than a silent success.",
+            "Use `--dsrdtr` for DSR/DTR hardware handshake (distinct from `--flow rtscts`). With a "
+            "window open these commands go through it, so the two switches follow.",            "Every command writes exactly **one** JSON document to stdout - `monitor`, `send --repeat N` and `send --ports A,B` write one per line.",
             "The exit code always matches `ok`: 0 success, 1 failure, 2 bad usage. stdout is UTF-8, so non-ASCII text survives the pipe.",
             "Wait for a fixed answer with `--expect OK --wait 2`; for commands that do not echo, use `--settle 0.4` to return 0.4 s after the last byte instead of burning the whole `--wait`.",
             "Add `--ok-if-silent` when silence is a valid answer: no bytes at all counts as success, but bytes that lack the expected text still fail.",
@@ -318,10 +370,11 @@ MANUAL: dict[str, list[tuple[str, list[str]]]] = {
             'The port list shows *port number + device name*, e.g. `COM139  USB-Enhanced-SERIAL CH340`; hover for the full name and hardware ID.',
             'Opening usually fails because another program holds the port (another terminal, a VM, a vendor flasher), the driver is missing, or the cable has no data wires. Refresh the list and try another port.',
             'Keep *auto-reconnect* on and unplugging/replugging re-attaches the same device instead of a same-named one.',
-            'DTR / RTS start low (see above); switch them on for boards that need the lines high - the choice is remembered per machine.',
+            'DTR / RTS start low (see above); switch them on for boards that need the lines high - the choice is **not** remembered, so a later launch cannot reset the board.',
         ]),
         ("Multiple windows", [
             'Several windows can run at once, each with its own port and its own log. Size, split and composer height are remembered per window (`window-<n>.ini`).',
+            'Maximising and restoring (title-bar button, double-click, or dragging to the screen top for Aero Snap) slides instead of jumping, and repeated round trips never shrink the window.',
             'The launcher plugin opens a new window per shortcut, so two boards never share a log.',
             'The CLI routes by **port name**: `cli state --port COM5` asks the window that owns COM5 and nothing else; `--window <PID>` pins a specific window.',
         ]),

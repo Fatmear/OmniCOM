@@ -53,7 +53,11 @@ def prepare_files(source: Path, target: Path, progress=None):
                 raise ValueError(f"Refusing symbolic link: {path}")
             if target not in destination.resolve().parents:
                 raise ValueError(f"Unsafe destination: {destination}")
-            if relative.parts[0].lower() == "plugins" and destination.exists():
+            # R-174: plugins are installed from the plugin store, never from an
+            # update archive.  Skipping the folder outright (instead of only
+            # protecting existing files) means an older package cannot smuggle
+            # a bundled plugin back next to the user's own copy.
+            if relative.parts[0].lower() == "plugins":
                 continue
             entries.append((path, relative, destination))
     work = Path(tempfile.mkdtemp(prefix=".omnicom-update-", dir=target))
