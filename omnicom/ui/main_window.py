@@ -862,10 +862,37 @@ class OmniWindow(QMainWindow):
         self.body_split.setStretchFactor(2, 0)
         self._split_ready = False
 
+        # The caption row sits closer to the content than the window's general
+        # 10 px rhythm: it is a caption, not another card, and the extra air was
+        # read as "就绪栏还是太高" (R-198).  ``QVBoxLayout`` has a single spacing
+        # for every gap, so the body -> caption gap gets its own spacer.
         self.status_strip = self._build_status_strip()
         root.addWidget(self.status_strip)
+        self._tighten_status_gap(theme.STATUS_GAP)
 
         self._rebuild_tabs()
+
+    def _tighten_status_gap(self, gap: int) -> None:
+        """Give the body -> caption gap its own (smaller) size (R-199).
+
+        ``QVBoxLayout`` applies one spacing to *every* gap, so the choice is
+        either the roomy 10 px rhythm above the caption (which is what the user
+        kept seeing as "还是太高") or a tighter one for the title bar as well.
+
+        A spacer cannot help - Qt clamps a negative size to 0 (measured) - and
+        pulling the row up with a negative margin squashed the caption text and
+        left it sitting low (R-199, rejected).  What is left, and what actually
+        controls the impression, is the *empty band* around the row: the body ->
+        caption gap and the page margin under it.  Both are trimmed here while
+        the row keeps its own fixed height, so the text stays centred.
+        """
+        root = self._root_layout
+        root.setSpacing(int(gap))
+        # Re-apply the bottom page margin at the same time: the row's height is
+        # unchanged, so only these outer gaps decide how tall the band looks.
+        self._apply_window_shadow()
+        root.invalidate()
+        root.activate()
 
     # ------------------------------------------------------------------ rail
     def _build_rail(self) -> QWidget:
@@ -1154,37 +1181,112 @@ class OmniWindow(QMainWindow):
         self.search_panel = SearchPanel()
         search_layout.addWidget(self.search_panel)
 
-        layout.addWidget(self.cmd_block, 3)
-        layout.addWidget(self.search_block, 2)
+        # A vertical splitter, so the boundary between 扩展命令 and 关键字搜索 is
+        # draggable: with two lists in one fixed-height column the user could not
+        # give either of them more room (R-190).  The two cards are still
+        # ordinary widgets in the sidebar layout *when expanded*, so nothing
+        # else has to know about the splitter.
+        self.sidebar_split = QSplitter(Qt.Vertical)
+        self.sidebar_split.setObjectName("SidebarSplit")
+        self.sidebar_split.setChildrenCollapsible(False)
+        self.sidebar_split.setHandleWidth(8)
+        self.sidebar_split.setStyleSheet(
+            "QSplitter#SidebarSplit::handle { background: transparent; }"
+            "QSplitter#SidebarSplit::handle:hover { background: rgba(11,122,110,40); }")
+        self.sidebar_split.addWidget(self.cmd_block)
+        self.sidebar_split.addWidget(self.search_block)
+        self.sidebar_split.setStretchFactor(0, 3)
+        self.sidebar_split.setStretchFactor(1, 2)
+        self.sidebar_split.setSizes([3, 2])
+        self._sidebar_split_ready = False
+        #: Last sizes the user dragged to (None = default 3:2).  Persisted so a
+        #: restart keeps the panel split they chose (R-190).
+        self._sidebar_sizes: list[int] | None = None
+        self._applying_sidebar_sizes = False
+        self.sidebar_split.splitterMoved.connect(self._on_sidebar_split)
+        layout.addWidget(self.sidebar_split, 1)
         self.sidebar_box = layout
         self._sidebar_widget = sidebar
         return sidebar
 
     def relayout_sidebar(self) -> None:
-        """Give the remaining expanded block all the vertical space."""
+        """Give the remaining expanded block all the vertical space.
+
+        The two cards live in ``sidebar_split`` (R-190), so the collapsed one is
+        pinned through the **splitter sizes** rather than a maximum height: the
+        splitter owns the geometry and would otherwise stretch a collapsed card
+        straight back to its half of the column.
+        """
         cmd_open = not self.commands_panel._collapsed
         search_open = not self.search_panel._collapsed
+        # ``header.height()`` is **not** usable here: once the body is hidden the
+        # header is the only visible child and stretches to the whole card, so
+        # measuring it returned 215 px for a 38 px strip (measured, L-253).
+        cmd_h = self.commands_panel.header.sizeHint().height() + 6
+        search_h = self.search_panel.header.sizeHint().height() + 6
         big = 1 << 20
+        # A collapsed card is capped as well as sized: the splitter stretches
+        # whatever final size it is given, and an uncapped card turned the
+        # collapsed strip into a tall blank plate.
+        self.cmd_block.setMaximumHeight(big if cmd_open else cmd_h)
+        self.search_block.setMaximumHeight(big if search_open else search_h)
+
+        total = max(1, self.sidebar_split.height())
+        if not (cmd_open or search_open):
+            # Both collapsed: two header-height strips and nothing to drag.
+            self._set_sidebar_sizes([cmd_h, search_h])
+            return
         if cmd_open and search_open:
-            self.sidebar_box.setStretchFactor(self.cmd_block, 3)
-            self.sidebar_box.setStretchFactor(self.search_block, 2)
-            self.cmd_block.setMaximumHeight(big)
-            self.search_block.setMaximumHeight(big)
-        elif cmd_open:
-            self.sidebar_box.setStretchFactor(self.cmd_block, 1)
-            self.sidebar_box.setStretchFactor(self.search_block, 0)
-            self.cmd_block.setMaximumHeight(big)
-            self.search_block.setMaximumHeight(self.search_panel.header.height() + 6)
-        elif search_open:
-            self.sidebar_box.setStretchFactor(self.cmd_block, 0)
-            self.sidebar_box.setStretchFactor(self.search_block, 1)
-            self.cmd_block.setMaximumHeight(self.commands_panel.header.height() + 6)
-            self.search_block.setMaximumHeight(big)
+            # Restore the user's own proportion, defaulting to 3:2.
+            sizes = self._sidebar_sizes or [3, 2]
+            self._set_sidebar_sizes(sizes)
+            return
+        if cmd_open:
+            self._set_sidebar_sizes([max(1, total - search_h), search_h])
         else:
-            self.sidebar_box.setStretchFactor(self.cmd_block, 0)
-            self.sidebar_box.setStretchFactor(self.search_block, 0)
-            self.cmd_block.setMaximumHeight(self.commands_panel.header.height() + 6)
-            self.search_block.setMaximumHeight(self.search_panel.header.height() + 6)
+            self._set_sidebar_sizes([cmd_h, max(1, total - cmd_h)])
+
+    def _set_sidebar_sizes(self, sizes: list[int]) -> None:
+        """Apply splitter sizes without letting Qt redistribute them back."""
+        values = [max(1, int(value)) for value in sizes]
+        self._applying_sidebar_sizes = True
+        try:
+            self.sidebar_split.setSizes(values)
+        finally:
+            self._applying_sidebar_sizes = False
+
+    def _on_sidebar_split(self, *_args) -> None:
+        """Remember what the user dragged to, unless we are the ones moving it.
+
+        The write is **debounced**: ``QSettings.setValue()`` costs ~0.03 ms but
+        the ``window-<n>.ini`` rewrite it schedules is not, and inside the
+        splitter's own move loop that rewrite lands in the next
+        ``processEvents()``.  Measured with the write in place the drag cost
+        118-132 ms per move; with it removed, 7.9 ms (L-254).  Dragging emits a
+        move for every mouse pixel, so the value is kept in memory while the
+        user drags and flushed once they stop.
+        """
+        if getattr(self, "_applying_sidebar_sizes", False):
+            return
+        if self.commands_panel._collapsed or self.search_panel._collapsed:
+            return
+        self._sidebar_sizes = list(self.sidebar_split.sizes())
+        timer = getattr(self, "_sidebar_save_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(350)
+            timer.timeout.connect(self._save_sidebar_split)
+            self._sidebar_save_timer = timer
+        timer.start()
+
+    def _save_sidebar_split(self) -> None:
+        """Persist the split the user settled on (debounced, see above)."""
+        if not self._sidebar_sizes:
+            return
+        self.settings.setValue(
+            "ui/sidebar_split",
+            ",".join(str(value) for value in self._sidebar_sizes))
 
     def toggle_sidebar(self) -> None:
         visible = self._sidebar_widget.isHidden()
@@ -1202,7 +1304,13 @@ class OmniWindow(QMainWindow):
         which belongs to the glyphs instead of to a box behind them.
         """
         strip = CaptionStrip()
-        strip.setFixedHeight(26)
+        # The caption row was pinned to 26 px and read as a spare toolbar under
+        # the content; 22 px still left a visible empty band.  What the eye
+        # measures is the *whole* stack below the last card - gap above the row,
+        # the row, and the page margin below - so the fix is to trim the outer
+        # gaps, not to squeeze the row itself: shrinking the row or pulling it up
+        # made the text look squashed and sit too low (R-199).
+        strip.setFixedHeight(theme.STATUS_H)
         layout = QHBoxLayout(strip)
         layout.setContentsMargins(14, 0, 14, 0)
         layout.setSpacing(14)
@@ -1464,6 +1572,12 @@ class OmniWindow(QMainWindow):
             self._sidebar_widget.hide()
         with contextlib.suppress(TypeError, ValueError):
             self._saved_send_h = int(s.value("ui/send_h", 0) or 0)
+        sizes = s.value("ui/sidebar_split")
+        if isinstance(sizes, str) and sizes.strip():
+            with contextlib.suppress(TypeError, ValueError):
+                parsed = [int(part) for part in sizes.split(",") if part.strip()]
+                if len(parsed) == 2 and all(value > 0 for value in parsed):
+                    self._sidebar_sizes = parsed
         sizes = s.value("ui/split")
         self._saved_split = False
         if isinstance(sizes, list) and len(sizes) == 3:
@@ -1576,6 +1690,9 @@ class OmniWindow(QMainWindow):
         s.setValue("ui/wallpaper", theme.wallpaper() or "")
         s.setValue("ui/font_family", theme.ui_family())
         s.setValue("ui/font_px", theme.ui_font_px())
+        if self._sidebar_sizes:
+            s.setValue("ui/sidebar_split",
+                       ",".join(str(value) for value in self._sidebar_sizes))
         s.setValue("display/log_family", theme.log_family())
         s.setValue("display/log_px", self.log.font_px())
 
@@ -2005,7 +2122,12 @@ class OmniWindow(QMainWindow):
         if overlay is None:
             return
         self.search_block.setParent(self.sidebar)
-        self.sidebar_box.addWidget(self.search_block, 2)
+        # Back into the splitter, not into the plain layout: re-adding it as a
+        # layout item left the card outside the splitter, where it grew to fill
+        # the whole column and the divider disappeared (R-190 / L-253).
+        self.sidebar_split.addWidget(self.search_block)
+        self.sidebar_split.setStretchFactor(0, 3)
+        self.sidebar_split.setStretchFactor(1, 2)
         self.relayout_sidebar()
         overlay.deleteLater()
         self._search_overlay = None
@@ -2525,6 +2647,12 @@ class OmniWindow(QMainWindow):
         self.settings.setValue("ui/font_px", used)
         # Widgets that pinned a font in their own stylesheet keep it by design
         # (the log, the terminal); everything else follows the new stylesheet.
+        #
+        # ``refresh_all_sheets`` is what actually makes the change reach the
+        # 40+ inline ``font-size`` literals: a per-widget sheet is applied once
+        # and Qt never re-polishes it when the application sheet changes, which
+        # is why HEX / 扩展命令 / hints used to stay at the old size (R-187).
+        theme.refresh_all_sheets(self)
         for widget in [self, *self.findChildren(QWidget)]:
             widget.update()
         self.notify(tr("misc.font", size=used), "ok")
@@ -3261,8 +3389,11 @@ class OmniWindow(QMainWindow):
             central.shadow_px = self.window_shadow_px()
             central.update()
 
-    #: Visible padding of the page, *before* the shadow ring is added.
-    _SHADOW_BASE_MARGINS = (10, 8, 10, 8)
+    #: Visible padding of the page, *before* the shadow ring is added.  The
+    #: bottom was 8 px, which together with the caption row and its gap made the
+    #: stack under the content 48 px tall (R-198); 4 px leaves the caption row
+    #: sitting just off the window edge without touching it.
+    _SHADOW_BASE_MARGINS = (10, 8, 10, 4)
 
     #: A translucent frameless window gets no DWM minimize animation, so the
     #: taskbar icon used to snap the window in and out of existence.  We fade

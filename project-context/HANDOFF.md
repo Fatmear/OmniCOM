@@ -1,161 +1,122 @@
 # Current handoff
 
-Updated: 2026-11-06（1.1.5 已提交 / 打标签 / 发布 / 插件商店资产已上线；
-发布工具超时修复与 `tools/publish_plugin_store.py` 待随收尾提交）
+Updated: 2026-11-13（issue #1~#11 → R-184..R-194；追加 #12/#13 → R-195/R-196；
+吸顶条背景 → R-197；就绪栏空带 → R-186 修订 + R-199；
+`ui_selftest` 785 项，`acceptance_test` 194 需求全 PASS）
 
 ## Latest State
 
-- 版本 **1.1.5**（`omnicom/__init__.py`），发版已完成：
-  - 提交 `9f7d826`（58 文件，+11828 / -1244）已推送到 `origin/main`。
-  - 标签 `v1.1.5` 已从 `8d947ae` 重指到 `9f7d826` 并推送。
-  - Release **#436341099**：`draft=false`、`prerelease=false`，附件
-    `OmniCOM-1.1.5-win64.zip` 190 682 634 B，`state=uploaded`，`latest` = `v1.1.5`。
-  - 插件商店资产桶 **#436347358**（tag `plugin-store`，`make_latest=false`）：
-    `chart-1.1.2.zip` / `chart-1.1.0.zip` / `launcher-1.0.0.zip` / `catalog.json`
-    全部 `uploaded`，三个下载地址 `Range: bytes=0-3` 均返回 206。
-- 本轮共 8 件事，全部闭环（前 6 件已随 `9f7d826` 发布，后 2 件是发布侧修复与资产桶）：
+- **第一轮（2026-11-12）**：GitHub issue #1 ~ #11 全部修复，新增 R-184..R-194。
+- **第二轮（2026-11-13）**：用户对上一轮的两处结果不满意，已重做：
+  - **#13 吸顶组头做错了**：上一版另画了一条「简化提示条」，用户明确说
+    「不是重新换一种表达方式，是原本那个文件夹变到顶部，就是原本那个栏目，
+    包括新建命令那些按钮的」。→ 改为把**真实 `GroupHeader` 对象**搬进吸顶槽，
+    文件夹箭头 / 组名 / 计数 / 新增 / 编辑 / 删除 全部保留可点；离开时放回列表
+    （占位条保证行不跳）。需求 **R-195**，取代 R-191。
+  - **#12 拖动侧栏高度卡顿**：这次是**同步写盘**。每移一个像素就
+    `QSettings.setValue("ui/sidebar_split", …)`，而写入 `window-N.ini` 会立刻
+    触发整文件重写（实测 ~125 ms），落在紧接着的 `processEvents()` 里。
+    → 内存里记值 + 350 ms 防抖落盘。**实测 118-132 ms/move → 10-13 ms/move**。
+    需求 **R-196**（R-190 保留拖动/折叠/持久化，流畅度单独成一条）。
 
-### R-181 插件商店「检查更新」闪一个空白小窗（FIXED）
+- **第三轮（2026-11-13）**：吸顶组头本身做对了，但**背景是一块突兀的纯白**。
+  → 侧栏卡片是 `GlassFrame`（半透明白 `255,255,255,244`，有壁纸时叠磨砂玻璃），
+  吸顶栏却用了不透明的 `theme.CARD`。改为 `WA_TranslucentBackground` + 自绘
+  `paintEvent`，复用 `widgets.paint_glass()` 与同一个 244 alpha，只多画一条底边细线。
+  需求 **R-197**。
 
-- 用户原话「插件检查更新怎么会有弹窗」，追问后确认是「一闪而过的空白小窗口」。
-- **先证明刷新链路根本不弹框**：全仓 grep 商店相关代码只有 `confirm_remove` 一处对话框。
-- 真根因：刷新完成后 `rebuild()` 重建列表，作者徽标与「已安装 vX」徽标用
-  `widgets.Badge(...)` 创建时 `parent=None` —— **Qt 里没有父对象的 `QLabel` 本身就是顶层窗口** ——
-  而 `show_text()` 在 `addWidget()` 把它们挂进布局**之前**就调了 `show()`，于是每个徽标都
-  变成真实小窗口闪现一帧，紧接着被 reparent 才消失。
-- 修法：`Badge.show_text()` 在还没有父对象时只记下显示意图，等 `showEvent()`（插入布局之后）
-  再真正显示。
+  顺带修掉一个更要紧的隐性缺陷：吸顶槽里写过 `self.layout = QHBoxLayout(self)`，
+  而 `layout` 是 `QWidget.layout()` 的方法名 —— PySide6 上赋值**不生效**，
+  `self.layout.addWidget()` 抛 `AttributeError`，但它发生在 `valueChanged`
+  的信号处理器里，Qt 只把异常打到 stderr、界面「什么都没发生」，测试也照样绿。
+  改名 `self._box` 后吸顶才真正工作（L-257）。
 
-### R-182 看板五种控件都必须显示真实数值（测试兜底，FIXED）
+- **第四轮（2026-11-13）**：就绪栏「还是太高」。关键点是**用户量的是整条空带**——
+  内容与就绪栏之间的间隙 + 栏本身 + 页面底边距，实测共 **48 px**。第一版只把
+  `STATUS_H` 从 22 压到 18，另外 26 px 一点没动，所以看不出变化；随后试的
+  「负边距把整行上提」把文字挤变形、位置偏低（用户当场否掉）。
+  → 最终只压**外侧间隙**：间隙 10 → 6、底部基础边距 8 → 4、栏定 20 px，
+  合计 **38 px**（-21 %），文字仍有 2.5 px 上下余量并保持垂直居中。
+  需求 **R-186 修订** + 新增 **R-199**。
 
-- 文档里写「五种控件都有数据」，但这句话**以前只靠肉眼**：`plugin_selftest` 只验证控件挂上去了。
-- 新增 `chart_readout_checks()` 8 项：把 `chart.layout_data["widgets"]` 设成五张各绑一个通道的卡片，
-  喂一帧 `AA=1 BB=2 CC=3.25 DD=42 EE=1`，然后用 `runJavaScript(..., callback)` 从 DOM 读回：
-  五类控件齐全、数值卡片显示 `3.25`、进度条 `42.00` + 宽度 `42%`、指示灯 `ON`、
-  **没有任何卡片留着 `--`**、曲线与仪表盘真的画出了像素（9737 / 4167）。
-  再喂 `DD=0 EE=0` 证明 **`0` 是读数不是「没有数据」**（`OFF` 而不是 `--`），最后清空控件。
-- 两处坑写进了 L-245：`paint()` 读的是 `widget.channel`（单数），而夹具原来只设了 `channels`；
-  `0` 被判成「无数据」是这类控件的经典错误。
-- 顺带把 `make_plugins.py` 的 `verify_chart()` 装成一票否决：任何卡片 `--`、空 `0%`、
-  缺 `lampText`、卡片被压到 `< 160x110` 都**直接让打包失败**。
+  一个数字坑：`QFontMetrics.height()` 对 11 px 中文字形返回 **15**（含行距），
+  不是 11。按 11 估算会把栏压到 18 px、只剩 1.5 px 余量，看着就是「挤」（L-259）。
 
-### R-183 快捷启动插件首个回归测试（FIXED）
+## What changed this round (files)
 
-- 该插件此前**零测试覆盖**。新增 `launcher_checks()` 9 项：写 3 个快捷方式 → 3 块瓦片 + 计数胶囊
-  含「3」；喂一份合成进程快照 → 下排出现 2 块运行中瓦片、空提示隐藏、计数出现「2 个窗口」；
-  按窗口改名 A 后下排标题变成 `["甲窗口", "A"]`；`hide()` 停表、`show()` 起表。
-- **必须打桩**：真实 `refresh_running()` 在工作线程里枚举本机窗口，会覆盖合成快照，
-  所以先 `page.refresh_running = page._scan_processes = lambda: None` 再直接调 `_apply_processes()`。
+- `omnicom/ui/theme.py` — `STATUS_H = 20`、`STATUS_GAP = 6`（去掉 `STATUS_PULL`，
+  负边距方案已撤销）。
+- `omnicom/ui/main_window.py` — `_tighten_status_gap()` 改为
+  `root.setSpacing(STATUS_GAP)` + 重算底边距（不再用负 `contentsMargins`）；
+  `_SHADOW_BASE_MARGINS` 底部 8 → 4。
+- `omnicom/ui/main_window.py` — `_on_sidebar_split` 只更新内存并启动
+  `_sidebar_save_timer`（350 ms 单次）；新增 `_save_sidebar_split()`。
+- `omnicom/ui/commands_panel.py` — `StickyGroupHeader` 改为透明底 + 自绘
+  `paintEvent`（复用 `paint_glass()`，与卡片同为 244 alpha）；布局字段改名
+  `_box`（`layout` 是 `QWidget.layout()` 的方法名，赋值静默失效）；
+  `StickyGroupHeader` 重写为**承载真实组头的槽**
+  （`occupy()` / `take()` / `occupant`）；新增 `_pin_group_header()` /
+  `_unpin_group_header()` / `_insert_index_of()`；`_update_sticky_header()`
+  改为「移动真实控件 + 占位条保高度」，带 `_sticky_busy` 重入保护；
+  `rebuild()` 开头先 `_unpin_group_header()`。
+- `omnicom/ui/terminal.py` — 光标聚焦状态抽成可写字段 `_caret_focused`
+  （`focusInEvent` / `focusOutEvent` 维护），`_paint_caret()` 读它，使两种外观可测。
+- `tools/ui_selftest.py` — R-195（8 项，对象同一性断言）、R-196（3 项 + 流畅度取
+  三次最好值）、R-190 保留 6 项；R-193 改为「接近实心墨色的像素数」区分实心/空心。
+- `tools/acceptance_test.py` — `TITLES` 去掉 R-191（被取代）、加入 R-195 / R-196。
+- `project-context/` — REQUIREMENTS：R-191 标 SUPERSEDED，新增 R-195 / R-196；
+  LEDGER 新增 L-254 / L-255 / L-256。
 
-### 插件说明文档与实机图（本轮新增文件）
-
-- `docs/PLUGINS.md`（约 250 行）：两个插件各自一节，含控件含义、通道绑定、快捷启动两排怎么用、
-  catalog / 打包 / 发版说明。
-- `README.md` / `README.en.md` 由 `tools/make_readme.py` 重新生成，都多了「插件」章节。
-- 实机图 `docs/images/plugin-chart.png`（1180x760）与 `docs/images/plugin-launcher.png`（1000x620），
-  由新工具 `tools/make_plugin_screenshots.py` 用**真实插件**跑出来（不是画图），并在写盘前自检：
-  `verify_chart()` 逐张卡片确认没有 `--`，`verify_launcher()` 确认下排真有运行中窗口。
-- 隐私坑（L-245）：最初用 `notepad.exe` 做运行中示例，截图里把本机
-  「编译命令.txt - 记事本」「66.txt」等真实文档标题拍了进去 ⇒ 换成 `charmap.exe`。
-- `make_pyz.py` 会把包内 `PLUGINS.md` 的 `](images/` 改写成 `](docs/images/`（该文件落在包根）。
-
-### R-034 守卫扩到「文档里的图不能是坏图」
-
-- `acceptance_test.py` 新增 `broken_images(doc, base)`，对 `README.md`、`README.en.md`、
-  `docs/PLUGINS.md` 逐个解析 `![](…)` 与 `<img src=…>`，要求相对路径真实存在；
-  另加一条「README 至少展示一张界面截图」，防止把插图删光后守卫静默通过。
-
-### R-174 打包校验回归（FIXED）
-
-- `make_dist --check` 在**最后一步** `StopIteration` 失败，可前面每一行都写着 PASS。
-- 根因：`make_plugins.verify_runtime()` 还留着 `for mode in ("bundled", "native")` 两个模式，
-  而 R-174 改成「发布包不含 `plugins/`」之后 `bundled` 那一遍仍在包内找 `plugins/chart`。
-- 改成单一 store 模式：先 `assert not (root/'plugins').exists()`（把 R-174 钉进打包校验），
-  再把仓库里的 chart 打成 zip、用 `PluginStore().install()` 装进临时数据目录后才断言；
-  卸载前写的 `plugin-data` 文件卸载后必须还在（用户数据不能被卸载删掉）。→ L-246。
-
-### 发布工具超时（L-247，`tools/make_release.py`）
-
-- `--publish` 上传 182 MB 时 `TimeoutError: The write operation timed out`，而 release 已建好。
-- 根因：`urlopen(..., timeout=120)` 是**套接字级**截止时间，每次 `sendall()` 都受它约束；
-  182 MB 在慢速上行里根本写不完 120 s。
-- 修法：`api()` 增加 `timeout` 形参，上传走 `UPLOAD_TIMEOUT = 1800`，并加一行 flush 的进度提示
-  （stdout 重定向到文件时是全缓冲，否则看起来像卡死）。重跑复用已有 release 并上传成功。
-
-### 插件商店资产桶（L-248，`tools/publish_plugin_store.py`）
-
-- `plugins/catalog.json` 里每个包的下载地址都指向 `releases/download/plugin-store/…`，
-  但那个 tag 根本没有 release ⇒ 用户点安装只会拿到 404。缺的是**资产**，不是代码。
-- 新工具 `tools/publish_plugin_store.py`：上传前逐个核对本地 zip 的 size/sha256 与目录声明，
-  有出入就拒绝上传；release 用 find-or-create 并始终 PATCH `make_latest=false`；
-  已存在且一致的资产直接跳过（幂等）；上传后逐个地址 `Range: bytes=0-3` 回读，
-  并断言 `latest` 没有被挪到资产桶（L-167）。`--check` 只核对不上传。
-
-## Verification
-
-全部闸门绿（本轮顺序跑完，日志在 `.artifacts/`）：
+## Verification (all green)
 
 ```
 python -m ruff check .                    # All checks passed!
-python tools/acceptance_test.py           # 1082 项检查，失败 0，未覆盖需求 0；ALL REQUIREMENTS VERIFIED
-python tools/ui_selftest.py               # 711/711 项通过 / ALL GUI SELFTESTS PASSED
-python tools/plugin_selftest.py           # PLUGIN SELFTEST OK: 174 checks
-python tools/contrast_audit.py            # ALL 15 CONTRAST PAIRS >= 4.5:1
+python tools/ui_selftest.py               # 785/785 项通过 / ALL GUI SELFTESTS PASSED
+python tools/acceptance_test.py           # 194 需求全 PASS，1152 项检查，失败 0，uncovered 空
 python tools/protocol_selftest.py         # 23/23 ALL PROTOCOL SELFTESTS PASSED
-python tools/make_dist.py --check --zip   # DIST=0；packaged selftest OK / PLUGIN CYCLE OK / updater acceptance suite OK
+python tools/contrast_audit.py            # ALL 15 CONTRAST PAIRS >= 4.5:1
 ```
 
-`acceptance.json` 里 R-182 判 PASS（8 项）、R-183 判 PASS（9 项），`uncovered` 为空。
-`make_plugin_screenshots.py` 两次实跑 exit 0。
+关键实测数字：
 
-## What changed (files)
-
-- `omnicom/ui/widgets.py` — R-181：`Badge.show_text()` 延迟到有父对象后再显示。
-- `omnicom/ui/plugin_store.py` — R-181 的同源加固（徽标创建顺序）。
-- `tools/plugin_selftest.py` — R-182（8 项）、R-183（9 项），共 **174 checks**。
-- `tools/acceptance_test.py` — `broken_images()` + R-034 四条新检查；`TITLES` 加 R-182 / R-183。
-- `tools/make_plugins.py` — `verify_runtime()` 改单一 store 模式（R-174 回归修复）。
-- `tools/make_plugin_screenshots.py`（新）— 真实插件跑图 + 写盘前自检。
-- `tools/make_readme.py` / `make_pyz.py` — 插件章节、包内图片链接改写。
-- `docs/PLUGINS.md`（新）、`docs/images/plugin-*.png`（新）。
-- `CHANGELOG.md` — v1.1.5 段补上插件文档条目并更新验证数字（1082 / 174）。
-- `tools/make_release.py` — 上传超时（L-247）：`api(timeout=...)` + `UPLOAD_TIMEOUT = 1800`。
-- `tools/publish_plugin_store.py`（新）— 插件商店资产桶的幂等发布 + 自校验（L-248）。
-- `project-context/` — LEDGER 补 L-247 / L-248，L-188 由 OPEN 改为 FIXED-verified。
+| 项目 | 修复前 | 修复后 |
+|---|---|---|
+| 侧栏分隔条拖动 | 118–132 ms/move（`splitterMoved` 未断开时） | **10–13 ms/move** |
+| 吸顶组头 | 另画一条简化条 | 真实 `GroupHeader`（对象同一性断言通过） |
+| 终端光标断言 | 偶发 6 像素失败 | 30 vs 1 稳定区分 |
+| 吸顶条背景 | 不透明纯白 `#FFFFFF` | alpha 244 半透明白 / 有壁纸时玻璃色，与背后卡片同色 |
+| 就绪栏空带 | 48 px（间隙 10 + 栏 22 + 底边 16） | **38 px**（间隙 6 + 栏 20 + 底边 12），文字居中 |
 
 ## Known open
 
-- 无阻塞项。`plugin-store` 资产桶已上线，后续**新版本插件**必须同步：
-  改 `plugins/catalog.json` → `python tools/make_plugins.py` 产出 `dist/plugin-store/*.zip`
-  → `python tools/publish_plugin_store.py`（会核对哈希再上传）。
-  **永远不要** `make_latest=true`、`--hide-old`，或把旧版本资产下架 ——
-  `chart-1.1.0.zip` 是降级目标，必须一直在。
-- `dist/` 里并存 1.1.3 / 1.1.4 历史 zip，仅供回溯；发出去的必须是 1.1.5。
-- **`docs/PLUGINS.md` 不要加进 R-142 的随包版本扫描**：它里面的 `"version": "1.1.2"` /
-  `"1.1.0"` 是**插件版本**，不是应用版本，加进去必然误报。
+- 无阻塞项。
+- 还没跑 `make_dist --check --zip`（上一轮跑过，本轮只改了 UI 与测试，若发版前
+  请按 R-083 再跑一次）。
+- 版本仍是 `1.1.5`；下一轮发版时把 R-184..R-196 一起写进 `CHANGELOG.md`。
 
 ## Conventions that bit us this round (now in LEDGER)
 
-- **L-245**：`QLabel` 没有父对象就 `show()` = 真顶层窗口。凡是「先建控件、后挂布局」的代码，
-  第一次 `show()` 必须发生在 `addWidget()` 之后；同理 `paint()` 读 `widget.channel`（单数）
-  而夹具只设 `channels` 时，界面会「有卡片没数字」，这种缺陷以前完全靠肉眼。
-  `0` 是读数，不是「没有数据」。
-- **L-246**：**删掉一个发布形态时，要同时删掉所有断言该形态存在的校验**。另外这类
-  「只剩最后一步报错」的日志要看**第一个 Traceback**，别被满屏 `[PASS]` 误导。
-- **L-197 是工具坑不是 bug**：PowerShell 把子进程 UTF-8 按 GBK 解码并追加 `NativeCommandError`，
-  通过的运行看起来像乱码。**重定向到文件时默认是 UTF-16**（`> log 2>&1`），
-  Python 侧要用 `open(path, encoding='utf-16')` 才读得到。
-- **PowerShell 不支持 `python - <<'PY'` heredoc**，也不吃 `python -c` 里的中文引号；
-  一律写脚本文件到 `.artifacts/` 再执行，并用 `& python` 调用避免 `>>>` 进 REPL。
-
-## Next up
-
-1. 把本轮收尾改动（`tools/make_release.py` 超时、`tools/publish_plugin_store.py`、CHANGELOG 措辞、
-   `project-context/`）用富文本提交信息提交并推送。**不要再重指 `v1.1.5`** —— 它已经指向
-   已发布的 `9f7d826`，这次只是工具与台账改动。
-2. 下次发版顺序（本次已跑通，可直接照抄）：闸门全绿 → 版本号 + CHANGELOG →
-   `make_dist.py --check --zip` → 提交 → `git tag -f vX.Y.Z` → push 标签 →
-   `make_release.py --check` → `--publish` → 回读 `/releases/latest`；插件有变化再跑
-   `publish_plugin_store.py`。
-3. 每次发版后**重读** `/releases/latest`：GitHub 的 latest 是时间序不是语义序，
-   任何重发布 / 重传都会让它漂移，只能用 `PATCH /releases/<id> {"make_latest":"true"}` 拉回（L-167）。
+- **L-254**：`QSettings.setValue()` 本身只要 0.03 ms，代价在**下一次
+  `processEvents()`**——写 INI 会触发整个文件重写（~125 ms）。任何「每次鼠标移动
+  都会跑」的回调都不得同步写设置，必须防抖。
+- **L-255**：`QScrollArea` 只管理一个子控件；把吸顶栏也 `setParent(self.scroll)`
+  会让两个子控件互相 negotiation size hint，进入 L-041 同款死循环（窗口卡死 +
+  满屏 `propagateSizeHints()`）。吸顶栏要挂在**面板**上，按 viewport 坐标定位。
+  另外 pin/unpin 改变内容高度会再次触发 `valueChanged`，必须有重入保护。
+- **L-259**：用户说「太高」时先量**整条带**（间隙 + 控件 + 边距），不要只改控件高度。
+  另一个数字坑：`QFontMetrics.height()` 对 11 px 中文给 15（含行距），按 11 估会压出
+  1.5 px 余量、看着就挤。
+- **L-260**：**不要用负边距压布局间隙**。`QSpacerItem.changeSize(0, -4)` 会被 Qt 夹成 0，
+  压根不生效；给控件设负 `contentsMargins` 会把文字整体上提、上下留白不对称，
+  直接被用户否掉。`QVBoxLayout` 只有一个 spacing，要局部分开只能改结构或压外侧间隙。
+- **L-257**：给 `QWidget` 子类加属性时**避开 Qt 已有方法名**（`layout` /
+  `width` / `parent` / `event` / `size`…）。`self.layout = QHBoxLayout(self)` 在
+  PySide6 上赋值不生效，读回来仍是绑定方法，`addWidget` 抛 `AttributeError`；
+  又因为它在信号处理器里，Qt 吞掉异常、界面只是「什么都没发生」，测试还是绿的。
+  这类缺陷只能靠**像素断言**（吸顶条真的出现了吗）才能抓住。
+- **L-258**：吸顶/浮层的底色不能写 `theme.CARD`——卡片是**半透明白 (244)**，
+  还可能有磨砂玻璃。要复用 `widgets.paint_glass()` + 同一个 alpha，否则就是一块
+  突兀的白条。
+- **L-256**：堆栈里**不可见**的页面 `cursorRect()` 返回被裁到 y=0 的矩形，像素断言
+  会量到文字；而实心块与 2 px 宽空心框在同一小块矩形里**总像素数相同**，
+  只能按「接近实心墨色的像素数」区分（30 vs 1）。offscreen 下别依赖 `hasFocus()`。

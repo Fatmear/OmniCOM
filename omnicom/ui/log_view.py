@@ -244,6 +244,9 @@ class LogView(QPlainTextEdit):
         """
         family = theme.resolve_mono()
         self.setFont(theme.mono_font(self._font_px))
+        # The log owns its own face and size (R-096): a UI-font sweep must not
+        # drag it along, or "界面字号" would also resize the serial dump.
+        theme.lock_ui_font(self)
         self.setStyleSheet(
             f"QPlainTextEdit#Log {{ background: transparent; border: 0;"
             f' font-family: "{family}"; font-size: {self._font_px}px;'

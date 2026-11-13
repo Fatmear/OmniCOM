@@ -229,7 +229,14 @@ class SearchPanel(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addWidget(self._build_header())
+        #: The header is kept as an attribute because the window needs its
+        #: height: a collapsed panel is pinned to exactly header + 6 px so the
+        #: other card can take the rest of the column (R-184).  Relying on
+        #: ``commands_panel.header`` existing in *both* panels is what made
+        #: exiting full screen throw ``AttributeError: 'SearchPanel' object has
+        #: no attribute 'header'`` and leave the sidebar unusable (L-249).
+        self.header = self._build_header()
+        root.addWidget(self.header)
 
         self.body = QWidget()
         body = QVBoxLayout(self.body)
@@ -510,6 +517,12 @@ class SearchPanel(QWidget):
             GlyphButton.SHRINK if self._fullscreen else GlyphButton.EXPAND)
         self.btn_full.setToolTip(tr("search.exitfull") if self._fullscreen
                                  else tr("search.fullscreen"))
+        # A collapsed panel keeps only its header, so entering full screen on it
+        # would open a window-sized overlay showing nothing.  Full screen is an
+        # explicit "show me the results" request, so the body is forced visible
+        # while the overlay is up and the collapsed state returns on exit
+        # (R-184).
+        self.body.setVisible(self._fullscreen or not self._collapsed)
         self.fullscreenToggled.emit(self._fullscreen)
 
     # ------------------------------------------------------- row width (R-158)
@@ -944,6 +957,9 @@ class SearchPanel(QWidget):
     def apply_font(self) -> None:
         """Follow the log font: one notch smaller than the log itself (R-096)."""
         size = max(8, theme.log_px() - 1)
+        # The results list carries log text, so it follows the *log* size and a
+        # UI-font sweep must leave it alone (R-096 / R-187).
+        theme.lock_ui_font(self.results)
         self.results.setFont(theme.mono_font(size))
         self.results.setStyleSheet(
             f"QListWidget#Results {{ background: {theme.CARD};"

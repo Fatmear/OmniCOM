@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import codecs
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
+from PySide6.QtCore import QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -76,6 +76,9 @@ class TerminalView(QPlainTextEdit):
         self.setLineWrapMode(QPlainTextEdit.WidgetWidth)
         self.setFrameShape(QPlainTextEdit.NoFrame)
         self.setFont(theme.mono_font(theme.log_px()))
+        # Terminal text follows the *log* font setting (R-096), so the interface
+        # font sweep has to skip it.
+        theme.lock_ui_font(self)
         self.setStyleSheet(
             f"QPlainTextEdit#Terminal {{ background: {theme.TERM_BG};"
             f" border: 0; border-radius: 14px; padding: 8px 12px;"
@@ -89,6 +92,41 @@ class TerminalView(QPlainTextEdit):
         self._fg = DEFAULT_FG
         self._bold = False
         self._esc = ""
+        # ---- cursor (R-193)
+        # A read-only ``QPlainTextEdit`` paints **no** caret at all: measured, the
+        # caret rect of a focused read-only edit is background colour only, which
+        # is exactly the "终端模式不显示光标" the user reported.  A serial console
+        # needs a cursor anyway - it shows where the device's next character will
+        # land - so the widget draws its own block caret at ``_col``.
+        self._caret_on = True
+        #: Whether the cursor is drawn *solid*.  Mirrors ``hasFocus()`` but is
+        #: settable, so the GUI selftest can verify both appearances on an
+        #: offscreen platform where the widget is never the active one (L-256).
+        self._caret_focused = False
+        self._caret_timer = QTimer(self)
+        self._caret_timer.setInterval(530)
+        self._caret_timer.timeout.connect(self._blink_caret)
+        self._caret_timer.start()
+
+    def _blink_caret(self) -> None:
+        # Only the caret moves, and a focused terminal is what the eye is on; an
+        # unfocused one keeps a hollow block instead of blinking (see
+        # ``_paint_caret``), so no repaint is wasted while the page is hidden.
+        if not self.isVisible():
+            return
+        self._caret_on = not self._caret_on
+        self.viewport().update()
+
+    def focusInEvent(self, event) -> None:
+        super().focusInEvent(event)
+        self._caret_focused = True
+        self._caret_on = True
+        self.viewport().update()
+
+    def focusOutEvent(self, event) -> None:
+        super().focusOutEvent(event)
+        self._caret_focused = False
+        self.viewport().update()
 
     def apply_font(self) -> None:
         """Follow the log font preference (same monospace face, same size)."""
@@ -141,6 +179,12 @@ class TerminalView(QPlainTextEdit):
             self.keyBytes.emit(b"\t")
             event.accept()
             return
+        if key == Qt.Key_Backtab:
+            # Shift+Tab is "backwards tabulation": a real tty sends CSI Z, and
+            # shell completion (bash/zsh) relies on it.
+            self.keyBytes.emit(b"\x1b[Z")
+            event.accept()
+            return
         if key == Qt.Key_Escape:
             self.keyBytes.emit(b"\x1b")
             event.accept()
@@ -159,6 +203,17 @@ class TerminalView(QPlainTextEdit):
 
     IGNORED_KEYS = (Qt.Key_Shift, Qt.Key_Control, Qt.Key_Alt, Qt.Key_Meta,
                     Qt.Key_CapsLock, Qt.Key_NumLock)
+
+    def focusNextPrevChild(self, next_child: bool) -> bool:
+        """Keep Tab inside the terminal instead of tabbing to the next widget.
+
+        ``QFocusEvent`` / ``QWidget::focusNextPrevChild`` runs **before**
+        ``keyPressEvent``: Qt treats Tab as a focus gesture, so a console that
+        only handled ``Qt.Key_Tab`` in ``keyPressEvent`` never saw it and Tab did
+        nothing at all on a serial console (L-250).  Returning ``False`` makes Qt
+        deliver the key, and the ``Qt.Key_Tab`` branch below emits ``\\t``.
+        """
+        return False
 
     # ------------------------------------------------------------------ menu
     def contextMenuEvent(self, event) -> None:
@@ -254,6 +309,9 @@ class TerminalView(QPlainTextEdit):
             self._write(text[index:end])
             index = end
         self._scroll_to_end()
+        # The console cursor moved with the write, so it has to be repainted now
+        # rather than on the next blink tick (R-193).
+        self.viewport().update()
 
     # -- cursor primitives --------------------------------------------------
     def _fmt(self) -> QTextCharFormat:
@@ -311,6 +369,56 @@ class TerminalView(QPlainTextEdit):
     def _scroll_to_end(self) -> None:
         bar = self.verticalScrollBar()
         bar.setValue(bar.maximum())
+
+    # -- cursor (R-193) -----------------------------------------------------
+    def _caret_rect(self) -> QRect:
+        """Where the console cursor is: the current write column of the last block."""
+        block_no = max(0, self.document().blockCount() - 1)
+        cursor = self._cursor_at(block_no, self._col)
+        return self.cursorRect(cursor)
+
+    def _paint_caret(self, painter: QPainter) -> None:
+        """Draw the terminal cursor: solid while focused, hollow otherwise.
+
+        Drawn by hand because ``QPlainTextEdit`` skips the caret entirely when it
+        is read-only (R-193), and because a console cursor marks the *write*
+        position rather than a text selection anchor.
+
+        ``self._caret_focused`` exists so the state is testable without stealing
+        the window's real focus: the GUI selftest runs on an offscreen platform
+        where a widget often never becomes the active one, and keying the
+        appearance off ``hasFocus()`` alone would leave the solid state
+        unverifiable (L-256).
+        """
+        rect = self._caret_rect()
+        if rect.isNull() or rect.height() <= 0:
+            return
+        column = QRectF(rect.x(), rect.y(), max(2.0, rect.width()),
+                        float(rect.height()))
+        painter.save()
+        try:
+            colour = QColor(theme.TERM_INK)
+            if self._caret_focused and self._caret_on:
+                colour.setAlpha(215)
+                painter.setPen(Qt.NoPen)
+                painter.fillRect(column, colour)
+            else:
+                # Unfocused or in the dark half of the blink: an outline keeps
+                # the position visible without looking like a text selection.
+                colour.setAlpha(150)
+                painter.setPen(QPen(colour, 1))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRect(column.adjusted(0.5, 0.5, -0.5, -0.5))
+        finally:
+            painter.restore()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self.viewport())
+        try:
+            self._paint_caret(painter)
+        finally:
+            painter.end()
 
     # -- escape sequences ---------------------------------------------------
     def _consume_escape(self, text: str, index: int) -> int:
@@ -427,11 +535,23 @@ class TerminalPage(QWidget):
         self.btn_clear.setToolTip(tr("term.clear"))
         bar.addWidget(self.btn_clear)
 
+        # 清屏并重置终端状态 is a *reset*, so it carries the circular-arrow glyph;
+        # it used to be drawn as an expand frame, which made the two actions
+        # indistinguishable and left the page with no full-screen control at all
+        # (R-188).
+        self.btn_reset = GlyphButton(GlyphButton.RESET, self, size=theme.ICON_MD,
+                                     object_name="IconBtn")
+        self.btn_reset.setToolTip(tr("term.reset"))
+        bar.addWidget(self.btn_reset)
+
         self.btn_full = GlyphButton(GlyphButton.EXPAND, self, size=theme.ICON_MD,
-                                   object_name="IconBtn")
-        self.btn_full.setToolTip(tr("term.reset"))
+                                    object_name="IconBtn")
+        self.btn_full.setToolTip(tr("term.fullscreen"))
         bar.addWidget(self.btn_full)
         card_layout.addLayout(bar)
+
+        self.card = card
+        self._overlay: QWidget | None = None
 
         self.view = TerminalView(self)
         self.view.keyBytes.connect(self.keyBytes.emit)
@@ -445,7 +565,8 @@ class TerminalPage(QWidget):
         layout.addWidget(card, 1)
 
         self.btn_clear.clicked.connect(self.view.reset)
-        self.btn_full.clicked.connect(self.view.reset)
+        self.btn_reset.clicked.connect(self.view.reset)
+        self.btn_full.clicked.connect(self.toggle_fullscreen)
 
     # ------------------------------------------------------------------ api
     def feed(self, data: bytes) -> None:
@@ -458,11 +579,77 @@ class TerminalPage(QWidget):
         """Terminal text follows the log font setting (R-096)."""
         self.view.apply_font()
 
+    # ------------------------------------------------------------ full screen
+    def toggle_fullscreen(self) -> None:
+        """Grow the terminal card over the whole window, and back (R-188)."""
+        self.set_fullscreen(self._overlay is None)
+
+    def set_fullscreen(self, value: bool) -> None:
+        """Move the card into a window-sized overlay, or put it back.
+
+        The button used to be wired to ``view.reset`` with the tooltip 清屏并重置
+        ... and the expand glyph, so the page had *no* full-screen action while
+        looking like it did.  Full screen reuses the search overlay pattern: the
+        card is reparented (not copied), so the console keeps its scrollback and
+        keystrokes land in the same widget (R-188).
+        """
+        window = self.window()
+        if value:
+            if self._overlay is not None:
+                return
+            overlay = QWidget(window.centralWidget() or window)
+            overlay.setObjectName("TermOverlay")
+            overlay.setStyleSheet(
+                f"QWidget#TermOverlay {{ background: {theme.TERM_BG};"
+                f" border-radius: {theme.RADIUS_CARD}px; }}")
+            layout = QVBoxLayout(overlay)
+            layout.setContentsMargins(0, 0, 0, 0)
+            self.card.setParent(overlay)
+            layout.addWidget(self.card)
+            rect = self._overlay_rect(window)
+            overlay.setGeometry(rect)
+            overlay.show()
+            overlay.raise_()
+            self._overlay = overlay
+        else:
+            overlay = self._overlay
+            if overlay is None:
+                return
+            self.card.setParent(self)
+            self.layout().addWidget(self.card)
+            overlay.deleteLater()
+            self._overlay = None
+        self.btn_full.set_glyph(
+            GlyphButton.SHRINK if self._overlay is not None else GlyphButton.EXPAND)
+        self.btn_full.setToolTip(
+            tr("term.exitfull") if self._overlay is not None else tr("term.fullscreen"))
+        self.view.setFocus()
+
+    def _overlay_rect(self, window) -> QRect:
+        """Body area of the window: the title bar and the caption row stay put."""
+        central = window.centralWidget()
+        if central is None:
+            return self.rect()
+        title = getattr(window, "titlebar", None)
+        strip = getattr(window, "status_strip", None)
+        top = (title.geometry().bottom() + 10) if title is not None else 10
+        bottom = (strip.geometry().top() - 4) if strip is not None else (central.height() - 10)
+        area = central.rect()
+        return QRect(area.left() + 10, top, max(200, area.width() - 20),
+                     max(160, bottom - top))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._overlay is not None:
+            self._overlay.setGeometry(self._overlay_rect(self.window()))
+
     def retranslate(self) -> None:
         self.title.setText(tr("term.title"))
         self.enter_label.setText(tr("term.enter"))
         self.btn_clear.setToolTip(tr("term.clear"))
-        self.btn_full.setToolTip(tr("term.reset"))
+        self.btn_reset.setToolTip(tr("term.reset"))
+        self.btn_full.setToolTip(tr("term.exitfull") if self._overlay is not None
+                                 else tr("term.fullscreen"))
         self.hint.setText(tr("term.hint"))
 
     def _enter_changed(self, _index: int) -> None:

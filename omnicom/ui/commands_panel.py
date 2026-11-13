@@ -10,6 +10,7 @@ from collections.abc import Callable
 from PySide6.QtCore import (
     Property,
     QEasingCurve,
+    QEvent,
     QMimeData,
     QPoint,
     QPropertyAnimation,
@@ -18,7 +19,14 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QColor, QDrag, QPainter, QPen
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QDrag,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -40,7 +48,7 @@ from .. import paths
 from ..commands import UNGROUPED, CommandStore, payload_for
 from ..i18n import tr
 from . import theme
-from .widgets import Badge, Combo, GlyphButton
+from .widgets import Badge, Combo, GlyphButton, paint_glass
 from .widgets import Button as QPushButton
 
 FILE_FILTER = "OmniCOM (*.json);;All files (*)"
@@ -224,6 +232,100 @@ class ListHost(QWidget):
             return
         event.acceptProposedAction()
         self.dropRequested.emit(ids)
+
+
+class StickyGroupHeader(QWidget):
+    """Holds the *real* group header while it is pinned to the top (R-195).
+
+    The user was explicit that this must not be "another, plainer bar": the
+    group strip that slides up has to be **the original one**, "包括新建命令那些
+    按钮的".  So this widget owns no label of its own - it is a pinned slot that
+    :meth:`CommandsPanel._pin_group_header` reparents the genuine
+    :class:`GroupHeader` into.  Because the same widget moves, the folder
+    chevron, the name, the count badge and the 新增 / 编辑 / 删除 buttons all
+    keep working while it is stuck to the top.
+
+    It is a child of the **panel** (not of the ``QScrollArea``: two managed
+    children there fight the size-hint negotiation - L-255), and it paints the
+    same surface as the card underneath it.  A plain ``background: #FFFFFF``
+    showed up as an obvious white patch, because the sidebar cards are a
+    *translucent* white (``244/255``) over the page / blurred wallpaper
+    (R-197).
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("StickyGroup")
+        # Painted by hand (see ``paintEvent``): the card it covers is translucent
+        # white and may also show the frosted wallpaper, so a flat QSS colour
+        # cannot match it.
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        # NOT ``self.layout``: that name is ``QWidget.layout()`` and PySide6 keeps
+        # returning the bound method, so ``self.layout.addWidget(...)`` raised
+        # ``AttributeError`` inside a queued scroll signal - where Qt swallows it
+        # and the strip simply never appeared (L-257).
+        self._box = layout
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        #: The header currently borrowed from the list, if any.
+        self.occupant = None
+        self.hide()
+
+    def paintEvent(self, event) -> None:
+        """Repaint the covered slice of the card, not a white box (R-197).
+
+        Mirrors :class:`widgets.GlassFrame`: with a wallpaper it repaints the
+        blurred slice of that photo plus a translucent wash, without one it is
+        the same ``255, 255, 255, 244`` card surface.  Only the bottom edge gets
+        a hairline - the top corners keep the card's radius.
+        """
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            radius = theme.RADIUS_CARD
+            rect = QRectF(self.rect())
+            path = QPainterPath()
+            path.moveTo(rect.left(), rect.bottom())
+            path.lineTo(rect.left(), rect.top() + radius)
+            path.quadTo(rect.left(), rect.top(), rect.left() + radius, rect.top())
+            path.lineTo(rect.right() - radius, rect.top())
+            path.quadTo(rect.right(), rect.top(), rect.right(), rect.top() + radius)
+            path.lineTo(rect.right(), rect.bottom())
+            path.closeSubpath()
+
+            if not paint_glass(self, painter, rect, path):
+                painter.setPen(Qt.NoPen)
+                painter.fillPath(path, QBrush(QColor(255, 255, 255, 244)))
+
+            painter.setPen(QPen(QColor(18, 26, 43, 18), 1))
+            painter.drawLine(rect.left(), rect.bottom() - 0.5,
+                             rect.right(), rect.bottom() - 0.5)
+        finally:
+            # ``end()`` in a ``finally``: one exception would otherwise kill the
+            # process with no traceback (L-163).
+            painter.end()
+
+    def take(self) -> QWidget | None:
+        """Hand the borrowed header back (the caller re-inserts it)."""
+        widget, self.occupant = self.occupant, None
+        if widget is not None:
+            self._box.removeWidget(widget)
+            widget.setParent(None)
+        return widget
+
+    def occupy(self, header: QWidget) -> None:
+        """Borrow ``header`` and show it in the pinned slot."""
+        if self.occupant is header:
+            return
+        self.take()
+        self.occupant = header
+        header.setParent(self)
+        self._box.addWidget(header)
+        self.setFixedHeight(header.sizeHint().height())
+        header.show()
 
 
 def payload_of(item: dict) -> bytes:
@@ -993,6 +1095,11 @@ class CommandsPanel(QWidget):
         self._scope: set[str] | None = None
         self._scope_key: tuple | None = None
         self._group_headers: dict[str, GroupHeader] = {}
+        #: The group whose real header is currently borrowed by the sticky slot
+        #: (R-195), plus the spacer that keeps its vacated height.
+        self._sticky_group_id = ""
+        self._sticky_placeholder: QWidget | None = None
+        self._sticky_busy = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1025,6 +1132,17 @@ class CommandsPanel(QWidget):
         self.list_host.dropRequested.connect(self._drop_at_end)
         self.scroll.setWidget(self.list_host)
         body_layout.addWidget(self.scroll, 1)
+        # 吸顶组头 (R-195): the *real* group header is moved into this slot while
+        # its own position has scrolled past the top, so the folder strip the
+        # user is reading stays on top "包括新建命令那些按钮的".
+        #
+        # It is a child of **this panel**, not of ``self.scroll``: a
+        # ``QScrollArea`` has exactly one managed child (its widget), and adding
+        # another one there fights the size-hint negotiation - the looping
+        # ``propagateSizeHints()`` warning plus a frozen event loop (L-041/L-255).
+        self.sticky_header = StickyGroupHeader(self)
+        self.scroll.verticalScrollBar().valueChanged.connect(
+            lambda _value: self._update_sticky_header())
 
         self.empty = QLabel(tr("empty.commands"))
         self.empty.setAlignment(Qt.AlignCenter)
@@ -1456,7 +1574,57 @@ class CommandsPanel(QWidget):
         self.notify(tr("cmd.imported", n=len(entries)), "ok")
 
     # ------------------------------------------------------------------- rows
+    def _scroll_anchor(self) -> tuple[str, int] | None:
+        """The row currently at the top of the viewport, plus its pixel offset.
+
+        ``rebuild()`` destroys and re-creates every row, so the scroll bar's
+        ``value()`` means a different line afterwards.  Anchoring on the *line*
+        is what the user asked for: "增删改之后保持在我原本的位置" (R-189).
+
+        The offset is the **distance from the row's top to the viewport top**,
+        which is what has to be reproduced: storing the row's absolute content
+        position instead loses the fact that the row was partially scrolled off
+        (measured, L-252).  Returns ``(item id, offset)``.
+        """
+        bar = self.scroll.verticalScrollBar()
+        if bar.value() <= 0:
+            return None
+        for row in self.rows():
+            mapped = row.mapTo(self.list_host, QPoint(0, 0))
+            if mapped.y() + row.height() > bar.value():
+                return row.item["id"], bar.value() - mapped.y()
+        return None
+
+    def _restore_scroll(self, anchor: tuple[str, int] | None) -> None:
+        """Put the anchored row back at the same offset from the top (R-189)."""
+        if anchor is None:
+            return
+        item_id, offset = anchor
+        row = next((entry for entry in self.rows()
+                    if entry.item["id"] == item_id), None)
+        if row is None:
+            # The anchored row is gone (deleted, or moved into a collapsed
+            # group): stay put rather than jumping to the top.
+            return
+        # The scroll range still reads 0 until the re-created rows have been
+        # laid out, and a ``setValue`` clamped to a maximum of 0 is silently
+        # dropped - the list then stayed at the top even though the anchor was
+        # captured correctly (measured, L-252).  Force the layout first.
+        self.list_layout.activate()
+        self.list_host.adjustSize()
+        bar = self.scroll.verticalScrollBar()
+        top = row.mapTo(self.list_host, QPoint(0, 0)).y()
+        bar.setValue(max(0, min(bar.maximum(), top + offset)))
+        self._update_sticky_header()
+
     def rebuild(self) -> None:
+        # A borrowed header must go back before its row objects are destroyed,
+        # or the pinned slot would keep pointing at a deleted widget (R-195).
+        self._unpin_group_header()
+        # The scroll position has to be captured *before* the rows go away and
+        # restored after the layout has settled, otherwise every edit snapped
+        # the list back to the top (R-189).
+        anchor = self._scroll_anchor()
         while self.list_layout.count() > 1:
             item = self.list_layout.takeAt(0)
             widget = item.widget()
@@ -1546,8 +1714,128 @@ class CommandsPanel(QWidget):
         self.empty.setVisible(count == 0)
         self.scroll.setVisible(count > 0)
         self.sync_timers()
+        # After the layout pass: widget geometry is only final once Qt has laid
+        # the new rows out, so the scroll restore is queued behind it (R-189).
+        if anchor is not None:
+            QTimer.singleShot(0, lambda: self._restore_scroll(anchor))
+        QTimer.singleShot(0, self._update_sticky_header)
 
     # ---------------------------------------------------------------- groups
+    def _insert_index_of(self, group_id: str) -> int:
+        """Layout index where ``group_id``'s header belongs in the list."""
+        header = self._group_headers.get(group_id)
+        if header is None:
+            return -1
+        for index in range(self.list_layout.count()):
+            if self.list_layout.itemAt(index).widget() is header:
+                return index
+        return -1
+
+    def _update_sticky_header(self) -> None:
+        """Pin the group being read to the top by moving its *own* header there.
+
+        The user rejected the earlier "a different, simpler strip" design: what
+        has to stick is the original group bar, "包括新建命令那些按钮的".  So the
+        genuine :class:`GroupHeader` is reparented into the pinned slot and put
+        back into the list the moment its own position becomes visible again -
+        which keeps exactly one header on screen and every button live (R-195).
+
+        A ``_sticky_placeholder`` keeps the vacated slot's height while the
+        header is away, so the rows below do not jump up by one header height.
+        """
+        sticky = getattr(self, "sticky_header", None)
+        if sticky is None or self._sticky_busy:
+            return
+        # Pinning changes the content height, which can raise ``valueChanged``
+        # again; without this guard the handler re-enters itself forever and the
+        # window stops responding (L-255).
+        self._sticky_busy = True
+        try:
+            self._update_sticky_header_locked(sticky)
+        finally:
+            self._sticky_busy = False
+
+    def _update_sticky_header_locked(self, sticky) -> None:
+        bar = self.scroll.verticalScrollBar()
+        if not self._group_headers or bar.value() <= 0:
+            self._unpin_group_header()
+            return
+        viewport = self.scroll.viewport()
+        top = bar.value()
+        # The pinned slot covers the top of the viewport, so a header is only
+        # *visible* once it has scrolled below that band.  Comparing against
+        # ``top`` alone would pin a header that is still half covered, and the
+        # two copies would fight each other on every scroll step (R-195).
+        covered = sticky.height() if self._sticky_group_id else 0
+        current = None
+        for group_id, header in self._group_headers.items():
+            # A borrowed header now lives in the pinned slot, so its own
+            # coordinates say nothing about its position in the list; the
+            # spacer left behind is what marks where the group starts.
+            widget = (self._sticky_placeholder
+                      if group_id == self._sticky_group_id
+                      and self._sticky_placeholder is not None else header)
+            mapped = widget.mapTo(self.list_host, QPoint(0, 0))
+            if mapped.y() + widget.height() <= top + covered:
+                current = group_id
+            else:
+                break
+        if current is None:
+            self._unpin_group_header()
+            return
+        header = self._group_headers[current]
+        self._pin_group_header(current, header)
+        # Anchor to the scroll area's viewport top-left, mapped into this panel.
+        origin = self.scroll.viewport().mapTo(self, QPoint(0, 0))
+        sticky.setGeometry(origin.x(), origin.y(), viewport.width(),
+                           sticky.height())
+        sticky.show()
+        sticky.raise_()
+
+    def _pin_group_header(self, group_id: str, header: QWidget) -> None:
+        """Move ``header`` into the pinned slot, leaving a same-height spacer."""
+        sticky = self.sticky_header
+        if self._sticky_group_id == group_id and sticky.occupant is header:
+            return
+        self._unpin_group_header()
+        index = self._insert_index_of(group_id)
+        if index < 0:
+            return
+        placeholder = QWidget()
+        placeholder.setFixedHeight(header.sizeHint().height())
+        self.list_layout.insertWidget(index, placeholder)
+        self._sticky_placeholder = placeholder
+        self._sticky_group_id = group_id
+        sticky.occupy(header)
+
+    def _unpin_group_header(self) -> None:
+        """Give the borrowed header back to the list, in its original place."""
+        sticky = getattr(self, "sticky_header", None)
+        if sticky is None:
+            return
+        header = sticky.take()
+        group_id = self._sticky_group_id
+        self._sticky_group_id = ""
+        placeholder, self._sticky_placeholder = self._sticky_placeholder, None
+        index = -1
+        if placeholder is not None:
+            for position in range(self.list_layout.count()):
+                if self.list_layout.itemAt(position).widget() is placeholder:
+                    index = position
+                    break
+            self.list_layout.removeWidget(placeholder)
+            placeholder.setParent(None)
+            placeholder.deleteLater()
+        if header is None:
+            return
+        if index < 0:
+            index = self._insert_index_of(group_id)
+        if index < 0:
+            index = max(0, self.list_layout.count() - 1)
+        self.list_layout.insertWidget(index, header)
+        header.show()
+        sticky.hide()
+
     def toggle_group(self, group_id: str) -> None:
         group = self.store.group_by_id(group_id)
         if group is None:
@@ -1577,7 +1865,15 @@ class CommandsPanel(QWidget):
                 if (item.get("group") or UNGROUPED) == target]
 
     def _start_drag(self, item_id: str) -> None:
-        """Begin a command drag, carrying the whole batch when one is picked."""
+        """Begin a command drag, carrying the whole batch when one is picked.
+
+        ``QDrag.exec()`` runs a **nested event loop**, and inside it the scroll
+        area never receives the wheel: the drag grab owns the mouse.  Holding a
+        command near the edge therefore used to do nothing, so a command had to
+        be re-ordered in several passes (R-192).  A timer polls the cursor while
+        the drag is up and scrolls the list itself, which is what every file
+        manager does.
+        """
         ids = [item_id]
         if self._batch:
             picked = self.picked_ids()
@@ -1594,11 +1890,102 @@ class CommandsPanel(QWidget):
         # delete - the very widget that owns this drag, so the actual reorder
         # is queued until the loop has unwound (R-130).
         self._in_drag = True
+        self._begin_drag_autoscroll()
         try:
             drag.exec(Qt.MoveAction)
         finally:
             self._in_drag = False
+            self._end_drag_autoscroll()
         self.clear_drop_hints()
+
+    # ------------------------------------------------- drag auto-scroll (R-192)
+    #: How close to the top/bottom edge the pointer has to be, in px.
+    AUTOSCROLL_EDGE = 34
+    #: Fastest scroll speed near the edge, in px per tick.
+    AUTOSCROLL_STEP = 14
+    #: ms between two scroll ticks while dragging.
+    AUTOSCROLL_MS = 30
+
+    def _begin_drag_autoscroll(self) -> None:
+        timer = getattr(self, "_autoscroll_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setInterval(self.AUTOSCROLL_MS)
+            timer.timeout.connect(self.drag_autoscroll_tick)
+            self._autoscroll_timer = timer
+        self._autoscroll_speed = 0.0
+        timer.start()
+        # The **wheel** is the gesture the user actually asked for: "长按拖动时
+        # 滚动滚轮，预期能对扩展命令页进行滚动".  Inside ``QDrag.exec()`` Qt runs a
+        # nested loop and the wheel event goes to the drag source's grab, so the
+        # scroll area never sees it.  An application-wide filter is the only
+        # place that still receives it (R-192).
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
+    def _end_drag_autoscroll(self) -> None:
+        timer = getattr(self, "_autoscroll_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._autoscroll_speed = 0.0
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+
+    def eventFilter(self, watched, event) -> bool:
+        """Scroll this list from a wheel event raised during a command drag.
+
+        Installed only while ``QDrag.exec()`` is on the stack, so it cannot take
+        wheel input away from the rest of the window at any other time.
+        """
+        if event.type() == QEvent.Wheel and getattr(self, "_in_drag", False):
+            steps = event.angleDelta().y() or event.angleDelta().x()
+            if steps:
+                bar = self.scroll.verticalScrollBar()
+                # 120 units is one notch; three lines per notch matches the
+                # platform convention for a plain list.
+                bar.setValue(int(max(0, min(bar.maximum(),
+                                            bar.value() - steps / 120.0 * 60))))
+                self._update_sticky_header()
+                return True
+        return super().eventFilter(watched, event)
+
+    def drag_autoscroll_tick(self) -> None:
+        """One edge auto-scroll step, based on where the pointer is right now.
+
+        The position comes from the cursor rather than from a drag event: Qt
+        delivers drag-move events to the widget under the pointer, so nothing
+        that reaches this panel says where the edge is.  ``QCursor.pos()`` is the
+        one source that keeps working inside the nested loop.
+        """
+        viewport = self.scroll.viewport()
+        if not viewport.isVisible():
+            return
+        local = viewport.mapFromGlobal(self.drag_pointer())
+        height = max(1, viewport.height())
+        speed = 0.0
+        edge = self.AUTOSCROLL_EDGE
+        if local.y() >= height - edge:
+            depth = (local.y() - (height - edge)) / float(edge)
+            speed = min(1.0, depth) * self.AUTOSCROLL_STEP
+        elif local.y() <= edge:
+            depth = (edge - local.y()) / float(edge)
+            speed = -min(1.0, depth) * self.AUTOSCROLL_STEP
+        if local.x() < 0 or local.x() > viewport.width():
+            speed = 0.0
+        self._autoscroll_speed = speed
+        if not speed:
+            return
+        bar = self.scroll.verticalScrollBar()
+        bar.setValue(int(max(0, min(bar.maximum(), bar.value() + speed))))
+        self._update_sticky_header()
+
+    def drag_pointer(self) -> QPoint:
+        """Global pointer position during a drag (seam for the GUI selftest)."""
+        from PySide6.QtGui import QCursor
+
+        return QCursor.pos()
 
     def clear_drop_hints(self) -> None:
         for row in self.rows():

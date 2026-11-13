@@ -484,6 +484,14 @@ def probe_endpoint(endpoint: dict, timeout: float = 6.0) -> dict | None:
         return None
 
 
+#: ``pick_endpoint`` reasons.  They are used as *decisions*, not just messages:
+#: "a window exists but did not answer" must never be treated like "no window",
+#: or the CLI quietly opens the port behind the window's back (L-251).
+REASON_NO_WINDOW = "没有正在运行的窗口"
+REASON_NO_RESPONSE = "窗口没有响应"
+REASON_ALL_BUSY = "所有窗口都在用别的串口"
+
+
 def pick_endpoint(port: str, pid: int | None = None) -> tuple[dict | None, str]:
     """Choose the window that should serve ``port``.
 
@@ -497,28 +505,41 @@ def pick_endpoint(port: str, pid: int | None = None) -> tuple[dict | None, str]:
     4. otherwise ``None``: every window is busy with a *different* port,
        so the CLI takes the port itself instead of hijacking a session.
 
-    Returns ``(endpoint, why)``; ``why`` explains a ``None``.
+    Returns ``(endpoint, why)``; ``why`` explains a ``None`` and doubles as the
+    caller's decision key (see the ``REASON_*`` constants).
     """
     if pid:
         endpoint = window_endpoint(pid)
         return (endpoint, "") if endpoint else (None, f"没有 pid={pid} 的窗口")
     items = control.endpoints()
     if not items:
-        return None, "没有正在运行的窗口"
+        return None, REASON_NO_WINDOW
     states = []
     for endpoint in items:
         reply = probe_endpoint(endpoint)
         if reply is not None:
             states.append((endpoint, reply))
     if not states:
-        return None, "窗口没有响应"
+        # A GUI thread that is busy (a log clear, a plugin loading, a maximise)
+        # does not answer ``/state`` for as long as it takes, and the old code
+        # then silently fell back to direct mode: the port was opened by the CLI
+        # process and the window never showed it, so the user saw a connection
+        # that the window knew nothing about (L-251).  Ride out a short stall
+        # before deciding, instead of guessing on the first miss.
+        time.sleep(0.4)
+        for endpoint in items:
+            reply = probe_endpoint(endpoint, timeout=10.0)
+            if reply is not None:
+                states.append((endpoint, reply))
+    if not states:
+        return None, REASON_NO_RESPONSE
     for endpoint, reply in states:
         if reply.get("connected") and control.same_port(reply.get("port"), port):
             return endpoint, "owner"
     for endpoint, reply in states:
         if not reply.get("connected") and not reply.get("reconnecting"):
             return endpoint, "idle"
-    return None, "所有窗口都在用别的串口"
+    return None, REASON_ALL_BUSY
 
 
 def new_session(args, port: str, opts: dict) -> PortSession | WindowSession:
@@ -528,17 +549,27 @@ def new_session(args, port: str, opts: dict) -> PortSession | WindowSession:
     With two windows on COM3 and COM5, ``--port COM5`` lands in the second one
     and its log stays clean; and because a window is never asked to reopen a
     port another window owns, no session gets torn down underneath the user
-    (R-119).
+    (R-119 / R-185).
+
+    Falling back to direct mode is only allowed when there is **no window**, or
+    when every window is busy with a different port.  A window that merely did
+    not answer must raise instead: opening the port in this process leaves the
+    visible window showing "closed", which is exactly the bug the user
+    reported (L-251).
     """
     if getattr(args, "direct", False):
         return PortSession(port, opts)
     if not port:
         return PortSession(port, opts)
-    endpoint, _why = pick_endpoint(port, getattr(args, "window", None))
+    endpoint, why = pick_endpoint(port, getattr(args, "window", None))
     if endpoint is not None:
         with contextlib.suppress(control.ControlError):
             return WindowSession(port, opts, control.Client(endpoint),
                                  endpoint=endpoint)
+    if why == REASON_NO_RESPONSE:
+        raise PortNotOpen(
+            f"窗口没有响应，无法确认它是否已打开 {port}（窗口不会同步到窗口界面）。"
+            "稍后重试；确实要绕开窗口就用 --direct")
     return PortSession(port, opts)
 
 
@@ -1845,6 +1876,10 @@ def main(argv: list[str] | None = None) -> int:
         return int(args.func(args))
     except KeyboardInterrupt:
         return fail("用户中断")
+    except PortNotOpen as exc:
+        # A routing refusal ("the window exists but would not answer") is a
+        # *decision*, not a crash: one clean JSON document, exit 1 (L-251).
+        return fail(str(exc))
     except Exception as exc:
         return fail(f"{type(exc).__name__}: {exc}")
     finally:

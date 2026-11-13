@@ -13,6 +13,7 @@ clip their own labels.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from typing import Any
 
@@ -91,6 +92,23 @@ BTN_PAD = "0 14px"
 ICON_SM = 24           # dense icon buttons (command rows)
 ICON_MD = 26           # panel headers
 ICON_SIZE = 28         # toolbar icon buttons
+#: Height of the bottom caption row.  It was 26 px and read as a spare-empty
+#: band; 22 px still left too much air under the content, because the row is
+#: only *part* of what sits below it - there is also the gap above the row and
+#: the page margin below (R-198).  The *outer* gaps are what gets trimmed, not
+#: the row: squeezing the row itself (or pulling it up with a negative margin)
+#: made the caption text look squashed and sit too low (R-199).
+#:
+#: 20 px, not 18: the row's font metrics report 15 px of height (11 px glyphs
+#: plus line spacing), so 18 px left 1.5 px above and below the text and the
+#: line read as cramped (measured, L-259).  20 px gives it 2.5 px of air while
+#: still being 6 px shorter than the original 26 px band.
+#: ``OmniWindow._overlay_rect`` measures against this constant, so the
+#: full-screen search overlay cannot drift away from the row it sits on.
+STATUS_H = 20
+#: Gap between the body and the caption row.  The window gives only this one
+#: gap a smaller size than the title bar's 10 px rhythm (R-199).
+STATUS_GAP = 6
 FONT_PX = 13
 #: Everything that is *not* the log: window, rail, buttons, dialogs.  The log
 #: and the terminal get their own face and size (R-095/R-096/R-097), because the
@@ -103,6 +121,8 @@ _ui_px = FONT_PX
 _ui_family = ""
 _log_family = ""
 _log_px = 13
+#: True while a font-size sweep is running (see ``refresh_all_sheets``).
+_refreshing = False
 
 # Radii: the user asked for two very different feelings.
 #   * toggles / checkboxes -> a third of their size (soft, round)
@@ -640,7 +660,7 @@ QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::su
 QLabel#Dim {{ color: {DIM}; }}
 QLabel#SectionTitle {{
   color: {DIM};
-  font-size: 10px;
+  font-size: {font_px(10)}px;
   font-weight: 600;
   letter-spacing: 1.4px;
 }}
@@ -658,7 +678,7 @@ QLabel#Badge {{
   border: 1px solid {LINE_SOFT};
   border-radius: 9px;
   padding: 1px 8px;
-  font-size: 11px;
+  font-size: {font_px(11)}px;
 }}
 QLabel#BadgeWarn {{
   color: {AMBER};
@@ -666,7 +686,7 @@ QLabel#BadgeWarn {{
   border: 1px solid rgba(180, 83, 9, 90);
   border-radius: 9px;
   padding: 2px 9px;
-  font-size: 11px;
+  font-size: {font_px(11)}px;
 }}
 
 /* ------------------------------------------------------------------- lists */
@@ -750,6 +770,117 @@ QMenu::scroller {{ background: {CARD}; border: 0; height: 14px; }}
 
 def ui_font_px() -> int:
     return _ui_px
+
+
+def font_px(design: float) -> int:
+    """Scale a size authored at ``FONT_PX`` to the current interface size.
+    Widgets used to bake ``font-size: 11px`` into their own stylesheet.  A
+    per-widget sheet is applied once, at construction, so raising the interface
+    font in Preferences left every one of those labels at its old size while
+    buttons and inputs grew - the user's "字号没有应用到界面所有字" (R-187).
+    Every inline size therefore goes through this helper and every widget that
+    owns a sheet re-applies it from ``refresh_style()``, which
+    ``OmniWindow.apply_ui_font`` calls over the whole widget tree.
+    """
+    return max(7, round(float(design) * _ui_px / FONT_PX))
+
+
+#: ``font-size: 11.5px`` inside a widget's own sheet.  Those literals are what
+#: used to ignore the interface size (R-187); Qt's QSS has no ``em`` unit (it is
+#: silently dropped, so relative sizing has to be done in Python).
+_SHEET_FONT_RE = re.compile(r"font-size:\s*([0-9]*\.?[0-9]+)px")
+
+
+def font_scale() -> float:
+    """Current interface size divided by the size the sheets were authored at."""
+    return _ui_px / float(FONT_PX)
+
+
+def scale_sheet_fonts(sheet: str, factor: float) -> str:
+    """Rewrite every ``font-size`` in ``sheet`` by ``factor`` (clamped, rounded).
+
+    Used to re-apply a widget's *design-time* sheet after the interface font
+    changed: the sheet is kept as authored and regenerated from that baseline
+    every time, so repeated changes cannot compound (R-187).
+    """
+    if not sheet:
+        return sheet
+    factor = float(factor)
+    if abs(factor - 1.0) < 1e-6:
+        return sheet
+
+    def replace(match: re.Match[str]) -> str:
+        size = max(7, round(float(match.group(1)) * factor))
+        return f"font-size: {size}px"
+
+    return _SHEET_FONT_RE.sub(replace, sheet)
+
+
+#: Attribute used to remember a widget's authored sheet.  Kept on the widget (not
+#: in a module dict) so it dies with the widget and cannot leak (R-187).
+BASE_SHEET_ATTR = "_omnicom_base_sheet"
+#: The scale that was in force when the sheet was last written.
+SHEET_SCALE_ATTR = "_omnicom_sheet_scale"
+#: Set on widgets whose font is *not* the interface font (log, terminal and the
+#: search result list own their own face/size - R-096).  A UI-font sweep must
+#: leave them alone or the log would follow the rail's size.
+UI_FONT_LOCK = "ui_font_locked"
+
+
+def lock_ui_font(widget) -> None:
+    """Mark a widget as owning a non-interface font; sweeps skip it (R-096)."""
+    setattr(widget, UI_FONT_LOCK, True)
+
+
+def refresh_all_sheets(root) -> int:
+    """Re-apply every widget sheet under ``root`` scaled to the interface size.
+
+    A per-widget sheet is *applied once* and Qt never re-polishes it when the
+    application sheet changes, which is why 40+ literals such as
+    ``font-size: 11px`` ignored the Preferences size (R-187).  Those literals are
+    all authored against ``FONT_PX``, so the fix is to re-express each sheet at
+    the current scale.
+
+    The baseline is discovered lazily and self-corrected: a widget that replaced
+    its own sheet at runtime (a status pill changing state, a search hint
+    changing text) no longer matches what the stored baseline would produce, so
+    the *new* sheet becomes the baseline.  That is what keeps this sweep honest
+    without touching every ``setStyleSheet`` call site.
+    """
+    global _refreshing
+    if root is None or _refreshing:
+        return 0
+    from PySide6.QtWidgets import QWidget
+
+    widgets = [root]
+    finder = getattr(root, "findChildren", None)
+    if finder is not None:
+        widgets.extend(finder(QWidget))
+    scale = font_scale()
+    _refreshing = True
+    try:
+        changed = 0
+        for widget in widgets:
+            if getattr(widget, UI_FONT_LOCK, False):
+                continue
+            current = widget.styleSheet()
+            base = getattr(widget, BASE_SHEET_ATTR, None)
+            if base is not None:
+                previous = getattr(widget, SHEET_SCALE_ATTR, 1.0)
+                if current != scale_sheet_fonts(base, previous):
+                    # The widget wrote a new sheet itself: adopt it as baseline.
+                    base = None
+            if base is None:
+                base = current
+                setattr(widget, BASE_SHEET_ATTR, base)
+            setattr(widget, SHEET_SCALE_ATTR, scale)
+            scaled = scale_sheet_fonts(base, scale)
+            if current != scaled:
+                widget.setStyleSheet(scaled)
+                changed += 1
+        return changed
+    finally:
+        _refreshing = False
 
 
 def set_ui_font_px(pixel_size: int) -> int:

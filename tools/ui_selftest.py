@@ -6599,6 +6599,660 @@ def main() -> int:
               os.path.isfile(os.path.join(ROOT, "create-shortcut.cmd")))
         next_()
 
+    # ------------------------------------------------ GitHub issue regressions
+    def step_terminal_caret_tab(next_):
+        """R-193 / R-194: a read-only console still shows a cursor and sends Tab."""
+        # The caret rect is only meaningful once the page is really laid out: on
+        # a hidden stack page ``cursorRect()`` returns a clipped rect at y=0 and
+        # the pixel probe would count text glyphs instead of the cursor
+        # (measured, L-256).
+        window.switch_page("console")
+        app.processEvents()
+        view = window.console.view
+        view.setFocus()
+        view.feed(b"login: root\r\n# ")
+        app.processEvents()
+
+        rect = view._caret_rect()
+        check("R-193 终端光标位置随写入列推进",
+              rect.isValid() and rect.x() > 10 and rect.y() >= 0,
+              f"{rect.getRect()} visible={view.isVisible()}")
+
+        # A read-only QPlainTextEdit paints **no** caret at all, so this is the
+        # assertion that would have caught issue #10.  Both appearances are
+        # checked explicitly rather than through the real focus: the offscreen
+        # platform often never makes the widget the active one (L-256).
+        def caret_census() -> tuple[int, int]:
+            """``(inked pixels, pixels close to the solid ink colour)``."""
+            view.viewport().repaint()
+            image = view.viewport().grab().toImage()
+            solid_ink = QColor(theme.TERM_INK)
+            inked = dense = 0
+            for dx in range(rect.width() + 1):
+                for dy in range(max(1, rect.height())):
+                    colour = image.pixelColor(rect.x() + dx, rect.y() + dy)
+                    if colour.name().lower() == theme.TERM_BG.lower():
+                        continue
+                    inked += 1
+                    if abs(colour.red() - solid_ink.red()) < 40 and \
+                            abs(colour.green() - solid_ink.green()) < 40 and \
+                            abs(colour.blue() - solid_ink.blue()) < 40:
+                        dense += 1
+            return inked, dense
+
+        view._caret_focused = True
+        view._caret_on = True
+        solid_inked, solid_dense = caret_census()
+        check("R-193 终端真的把光标画出来了（只读框本身不画）", solid_inked > 8,
+              f"{solid_inked} 像素")
+
+        view._caret_focused = False
+        hollow_inked, hollow_dense = caret_census()
+        check("R-193 失焦时仍用空心框标出光标位置", hollow_inked > 4,
+              f"{hollow_inked} 像素")
+        # The hollow box is a 1 px outline, so it has far fewer *dense* pixels
+        # than the filled block even though both cover the same rect corner.
+        check("R-193 聚焦时是实心块，失焦时是空心框",
+              solid_dense > hollow_dense * 2,
+              f"dense {solid_dense} vs {hollow_dense}")
+        view._caret_focused = view.hasFocus()
+        view._caret_on = True
+        app.processEvents()
+
+        sent: list[bytes] = []
+        view.keyBytes.connect(sent.append)
+        try:
+            QTest.keyClick(view, Qt.Key_Tab)
+            QTest.keyClick(view, Qt.Key_Backtab, Qt.ShiftModifier)
+            app.processEvents()
+        finally:
+            view.keyBytes.disconnect(sent.append)
+        check("R-194 Tab 键真正发往串口（Qt 先用它切焦点）",
+              b"\t" in sent, str(sent))
+        check("R-194 Shift+Tab 发送 CSI Z",
+              b"\x1b[Z" in sent, str(sent))
+        check("R-194 Tab 不会把焦点移出终端",
+              view.focusNextPrevChild(True) is False,
+              f"focus={type(app.focusWidget()).__name__}")
+        check("R-194 普通 Tab 与 Shift+Tab 发出的字节不同（\\t / CSI Z）",
+              b"\t" in sent and b"\x1b[Z" in sent and b"\t" != b"\x1b[Z]",
+              str(sent))
+        view.reset()
+        window.switch_page("terminal")
+        app.processEvents()
+        next_()
+
+    def step_terminal_buttons(next_):
+        """R-188: reset and full screen are two different, working actions."""
+        from omnicom.i18n import tr
+        from omnicom.ui.widgets import GlyphButton
+
+        page = window.console
+        check("R-188 重置状态使用独立的回转箭头图标",
+              page.btn_reset.glyph == GlyphButton.RESET
+              and page.btn_reset.glyph != page.btn_full.glyph,
+              f"{page.btn_reset.glyph} / {page.btn_full.glyph}")
+        check("R-188 全屏按钮的提示说的是全屏，不是重置",
+              page.btn_full.toolTip() == tr("term.fullscreen"),
+              page.btn_full.toolTip())
+
+        window.switch_page("console")
+        app.processEvents()
+        page.feed(b"keep me\r\n")
+        before = page.view.toPlainText()
+        page.toggle_fullscreen()
+        app.processEvents()
+        check("R-188 全屏后卡片进入覆盖层", page._overlay is not None
+              and page.card.parentWidget() is page._overlay)
+        check("R-188 全屏图标切换为还原", page.btn_full.glyph == GlyphButton.SHRINK,
+              page.btn_full.glyph)
+        overlay = page._overlay
+        body = window.centralWidget().rect()
+        check("R-188 覆盖层铺满窗口正文区",
+              overlay is not None and overlay.width() > body.width() * 0.8,
+              f"{overlay.width()} / {body.width()}" if overlay else "none")
+        check("R-188 全屏不丢回滚内容", page.view.toPlainText() == before)
+        page.toggle_fullscreen()
+        app.processEvents()
+        check("R-188 退出全屏把卡片放回终端页",
+              page._overlay is None and page.card.parentWidget() is page,
+              type(page.card.parentWidget()).__name__)
+        check("R-188 退回后图标恢复为展开",
+              page.btn_full.glyph == GlyphButton.EXPAND, page.btn_full.glyph)
+        check("R-188 退出全屏同样保留回滚内容",
+              page.view.toPlainText() == before)
+        page.view.reset()
+        window.switch_page("terminal")
+        app.processEvents()
+        next_()
+
+    def step_search_collapsed_fullscreen(next_):
+        """R-184: collapse -> full screen -> exit must leave a usable sidebar."""
+        panel = window.search_panel
+        split = window.sidebar_split
+        if not panel._collapsed:
+            panel.toggle_collapsed()
+        app.processEvents()
+        collapsed_max = window.search_block.maximumHeight()
+        check("R-184 折叠后搜索卡片被压到标题高度",
+              collapsed_max <= panel.header.sizeHint().height() + 8,
+              f"{collapsed_max}px")
+
+        panel.set_fullscreen(True)
+        app.processEvents()
+        check("R-184 折叠状态下也能进全屏（正文强制显示）",
+              window._search_overlay is not None and panel.body.isVisible())
+        panel.set_fullscreen(False)
+        app.processEvents()
+        check("R-184 退出全屏不抛异常且搜索卡片回到分栏里",
+              split.widget(1) is window.search_block,
+              type(window.search_block.parentWidget()).__name__)
+        check("R-184 退出后恢复折叠状态",
+              window.search_block.maximumHeight()
+              <= panel.header.sizeHint().height() + 8,
+              f"{window.search_block.maximumHeight()}px")
+        check("R-184 折叠状态没有被退出全屏改写", panel._collapsed)
+        panel.toggle_collapsed()
+        app.processEvents()
+        check("R-184 再展开后两块都可用",
+              split.sizes()[0] > 40 and split.sizes()[1] > 40, str(split.sizes()))
+        next_()
+
+    def step_sidebar_splitter(next_):
+        """R-190: the boundary between commands and search is draggable."""
+        split = window.sidebar_split
+        order = split.orientation()
+        check("R-190 侧栏两块之间是可拖动的垂直分隔条",
+              order == Qt.Vertical and split.count() == 2
+              and split.widget(0) is window.cmd_block
+              and split.widget(1) is window.search_block,
+              f"count={split.count()}",)
+        check("R-190 分隔条有可抓取的宽度", split.handleWidth() >= 6,
+              f"{split.handleWidth()}px")
+
+        total = sum(split.sizes())
+        before = list(split.sizes())
+        split.moveSplitter(int(total * 0.72), 1)
+        app.processEvents()
+        after = list(split.sizes())
+        check("R-190 拖动分隔条能改变两块的高度",
+              after[0] > before[0] and after[1] < before[1],
+              f"{before} -> {after}")
+        check("R-190 拖动后的比例被记住",
+              window._sidebar_sizes == after, str(window._sidebar_sizes))
+        # The write must be **debounced**: a synchronous ``QSettings.setValue``
+        # per splitter move cost 118-132 ms per move (measured, L-254).
+        check("R-196 拖动时只记在内存里，没有逐次写盘",
+              window._sidebar_save_timer.isActive()
+              or str(window.settings.value("ui/sidebar_split")) ==
+              ",".join(str(v) for v in after),
+              f"timer={window._sidebar_save_timer.isActive()}")
+        QTest.qWait(450)
+        check("R-196 停手后才把比例写进设置",
+              str(window.settings.value("ui/sidebar_split")) ==
+              ",".join(str(v) for v in after),
+              str(window.settings.value("ui/sidebar_split")))
+
+        # Dragging must stay responsive with a full result list on screen.
+        import time as _time
+
+        panel = window.search_panel
+        for index in range(300):
+            window.log.append_line(8 * 3600 * 1000.0, "RX",
+                                   f"R190-{index} response line", "rx")
+        app.processEvents()
+        panel.input.setText("R190")
+        panel.run_search()
+        app.processEvents()
+        moves = 16
+        best = None
+        # A busy machine can inflate a single window (the same reason R-054 keeps
+        # a retry); the *best* of three runs is the measurement of this machine's
+        # capability, exactly like the other timing steps here.
+        for _attempt in range(3):
+            started = _time.perf_counter()
+            for step in range(moves):
+                split.moveSplitter(int(total * (0.3 + 0.4 * step / moves)), 1)
+                app.processEvents()
+            per_move = (_time.perf_counter() - started) * 1000 / moves
+            best = per_move if best is None else min(best, per_move)
+            if best < 40.0:
+                break
+        check("R-196 拖动分隔条流畅（不是每动一次就等一次写盘）",
+              best < 60.0, f"{best:.1f} ms/move")
+        QTest.qWait(450)
+        panel.input.clear()
+        panel.run_search()
+        app.processEvents()
+
+        after = list(split.sizes())
+        # A collapsed card must not stretch back to half the column.
+        window.search_panel.toggle_collapsed()
+        app.processEvents()
+        check("R-190 折叠搜索后命令栏吃掉整列高度",
+              split.sizes()[0] > total * 0.7
+              and split.sizes()[1] <= window.search_panel.header.sizeHint().height() + 8,
+              str(split.sizes()))
+        window.search_panel.toggle_collapsed()
+        app.processEvents()
+        check("R-190 重新展开恢复用户拖出来的比例",
+              split.sizes() == after, f"{split.sizes()} vs {after}")
+        next_()
+
+    def step_sticky_group_header(next_):
+        """R-195: the *real* group bar is what sticks to the top.
+
+        The user rejected a rewritten strip ("不是重新换一种表达方式，是原本那个
+        文件夹变到顶部，就是原本那个栏目，包括新建命令那些按钮的"), so the check
+        compares object identity: the very ``GroupHeader`` the panel registered
+        must be the widget inside the pinned slot, with its buttons still there.
+        """
+        store = window.command_store
+        panel = window.commands_panel
+        bar = panel.scroll.verticalScrollBar()
+        first = store.add_group("StickyOne", "")
+        second = store.add_group("StickyTwo", "")
+        try:
+            store.add([f"S1-{i}" for i in range(26)], {"group": first["id"]})
+            store.add([f"S2-{i}" for i in range(26)], {"group": second["id"]})
+            panel.rebuild()
+            for _ in range(3):
+                app.processEvents()
+                QTest.qWait(40)
+
+            header = panel._group_headers[first["id"]]
+            header2 = panel._group_headers[second["id"]]
+            check("R-195 顶部时组头还在列表里（没有被吸到上面）",
+                  not panel.sticky_header.isVisible()
+                  and header.parentWidget() is panel.list_host,
+                  type(header.parentWidget()).__name__)
+
+            top = header.mapTo(panel.list_host, header.rect().topLeft()).y()
+            bar.setValue(top + header.height() + 50)
+            for _ in range(3):
+                app.processEvents()
+                QTest.qWait(40)
+            sticky = panel.sticky_header
+            check("R-195 滚到组中间时吸顶的是原来那个组头对象",
+                  sticky.isVisible() and sticky.occupant is header,
+                  f"occupant={type(sticky.occupant).__name__}")
+            check("R-195 吸顶的组头带着新建/编辑/删除按钮",
+                  header.add_btn.isVisible() and header.edit_btn.isVisible()
+                  and header.trash_btn.isVisible() and header.pick is not None,
+                  "add/edit/trash")
+            check("R-195 吸顶组头显示的是该组自己的名字与计数",
+                  header.label.text() == "StickyOne",
+                  header.label.text())
+
+            held = sticky.geometry()
+            bar.setValue(bar.value() + 40)
+            for _ in range(3):
+                app.processEvents()
+                QTest.qWait(40)
+            check("R-195 继续滚动时吸顶组头本身不动",
+                  sticky.geometry() == held,
+                  f"{held.getRect()} -> {sticky.geometry().getRect()}")
+
+            # R-197: it must look like the card it covers, not a white patch.
+            # The sidebar cards are translucent white (255,255,255,244) over the
+            # page / blurred wallpaper, so a flat ``#FFFFFF`` stands out.
+            image = sticky.grab().toImage()
+            alpha = image.pixelColor(4, max(1, sticky.height() // 2)).alpha()
+            check("R-197 吸顶条沿用卡片的半透明白，不是不透明白块",
+                  alpha < 252, f"alpha={alpha}")
+            panel_image = panel.grab().toImage()
+            origin = sticky.mapTo(panel, sticky.rect().topLeft())
+            behind = panel_image.pixelColor(origin.x() + 4,
+                                            origin.y() + sticky.height() // 2)
+            inside = image.pixelColor(4, max(1, sticky.height() // 2))
+            check("R-197 吸顶条颜色与背后的卡片一致",
+                  abs(inside.red() - behind.red()) <= 3
+                  and abs(inside.green() - behind.green()) <= 3
+                  and abs(inside.blue() - behind.blue()) <= 3,
+                  f"{inside.name()} vs {behind.name()}")
+            check("R-197 吸顶条自己不做纯白填充",
+                  theme.CARD.lower() != inside.name().lower()
+                  or inside.alpha() < 252,
+                  inside.name())
+
+            top2 = header2.mapTo(panel.list_host, header2.rect().topLeft()).y()
+            bar.setValue(top2 + header2.height() + 40)
+            for _ in range(3):
+                app.processEvents()
+                QTest.qWait(40)
+            check("R-195 滚到下一组时换成第二组原本的组头",
+                  sticky.occupant is header2 and header2.label.text() == "StickyTwo",
+                  f"occupant={type(sticky.occupant).__name__}")
+            check("R-195 第一组的组头被放回列表原位",
+                  header.parentWidget() is panel.list_host
+                  and any(panel.list_layout.itemAt(i).widget() is header
+                          for i in range(panel.list_layout.count())),
+                  type(header.parentWidget()).__name__)
+
+            bar.setValue(0)
+            for _ in range(3):
+                app.processEvents()
+                QTest.qWait(40)
+            check("R-195 回到顶部后吸顶栏隐藏，组头回到列表",
+                  not sticky.isVisible() and sticky.occupant is None
+                  and header.parentWidget() is panel.list_host,
+                  f"{sticky.isVisible()} / {type(header.parentWidget()).__name__}")
+        finally:
+            store.remove_group(first["id"], drop_commands=True)
+            store.remove_group(second["id"], drop_commands=True)
+            panel.rebuild()
+            app.processEvents()
+        next_()
+
+    def step_command_scroll_kept(next_):
+        """R-189: adding/editing/deleting a command must not jump to the top."""
+        store = window.command_store
+        panel = window.commands_panel
+        bar = panel.scroll.verticalScrollBar()
+        added = store.add([f"KS-{i:02d}" for i in range(40)])
+        ids = [item["id"] for item in added]
+        try:
+            panel.rebuild()
+            app.processEvents()
+            # A short library leaves nothing to scroll: the panel only overflows
+            # once its rows are taller than the viewport, so the assertion above
+            # is about the *fixture*, not about the fix.  Grow it until it does.
+            extra: list[dict] = []
+            if bar.maximum() <= 0:
+                extra = store.add([f"KX-{i:02d}" for i in range(40)])
+                ids.extend(item["id"] for item in extra)
+            panel.rebuild()
+            for _ in range(3):
+                app.processEvents()
+                QTest.qWait(40)
+            check("R-189 命令库足够长才能测滚动", bar.maximum() > 0,
+                  f"max={bar.maximum()}")
+            bar.setValue(bar.maximum() // 2)
+            app.processEvents()
+            start = bar.value()
+
+            store.add(["KS-NEW"])
+            app.processEvents()
+            after_add = bar.value()
+
+            store.update(ids[-1], {"lineend": "cr"})
+            app.processEvents()
+            after_edit = bar.value()
+
+            store.remove(ids[-1])
+            app.processEvents()
+            after_del = bar.value()
+
+            check("R-189 新增命令后列表停在原位置",
+                  abs(after_add - start) <= 2, f"{start} -> {after_add}")
+            check("R-189 修改命令后列表停在原位置",
+                  abs(after_edit - start) <= 2, f"{start} -> {after_edit}")
+            check("R-189 删除命令后列表停在原位置",
+                  abs(after_del - start) <= 2, f"{start} -> {after_del}")
+        finally:
+            store.remove_many(ids + [item["id"] for item in store.items
+                                     if item.get("text") == "KS-NEW"])
+            panel.rebuild()
+            app.processEvents()
+        next_()
+
+    def step_drag_wheel_scroll(next_):
+        """R-192: the wheel scrolls the list while a command drag is running."""
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QWheelEvent
+
+        panel = window.commands_panel
+        bar = panel.scroll.verticalScrollBar()
+        added = panel.store.add([f"DW-{i:02d}" for i in range(50)])
+        ids = [item["id"] for item in added]
+        try:
+            panel.rebuild()
+            for _ in range(3):
+                app.processEvents()
+                QTest.qWait(40)
+            # Same fixture note as R-189: a short library leaves nothing to
+            # scroll, so grow it until the panel really overflows.
+            if bar.maximum() <= 200:
+                more = panel.store.add([f"DX-{i:02d}" for i in range(50)])
+                ids.extend(item["id"] for item in more)
+                panel.rebuild()
+                for _ in range(3):
+                    app.processEvents()
+                    QTest.qWait(40)
+            check("R-192 列表足够长才能测滚动", bar.maximum() > 200,
+                  f"max={bar.maximum()}")
+
+            def wheel(dy: int) -> None:
+                event = QWheelEvent(QPointF(12, 12), QPointF(12, 12),
+                                    QPoint(0, 0), QPoint(0, dy), Qt.NoButton,
+                                    Qt.NoModifier, Qt.NoScrollPhase, False)
+                QApplication.sendEvent(panel.scroll.viewport(), event)
+                app.processEvents()
+
+            bar.setValue(0)
+            app.processEvents()
+            wheel(-360)
+            plain = bar.value()
+            check("R-192 平时滚轮本来就能滚动列表", plain > 0, f"{plain}px")
+
+            bar.setValue(0)
+            app.processEvents()
+            panel._in_drag = True
+            panel._begin_drag_autoscroll()
+            try:
+                check("R-192 拖动期间安装滚轮过滤器", panel._autoscroll_timer.isActive())
+                start = bar.value()
+                wheel(-360)
+                during_down = bar.value() - start
+                start = bar.value()
+                wheel(240)
+                during_up = bar.value() - start
+            finally:
+                panel._end_drag_autoscroll()
+                panel._in_drag = False
+            check("R-192 长按拖动时滚轮向下能滚动列表", during_down > 40,
+                  f"{during_down}px")
+            check("R-192 长按拖动时滚轮向上能滚回去", during_up < 0,
+                  f"{during_up}px")
+            check("R-192 松手后不再拦截滚轮",
+                  not panel._autoscroll_timer.isActive())
+
+            # Edge auto-scroll: pointer parked on the bottom edge.
+            bar.setValue(0)
+            app.processEvents()
+            panel._in_drag = True
+            panel._begin_drag_autoscroll()
+            original = panel.drag_pointer
+            try:
+                viewport = panel.scroll.viewport()
+                edge = viewport.mapToGlobal(QPoint(viewport.width() // 2,
+                                                   viewport.height() - 3))
+                panel.drag_pointer = lambda: edge
+                for _ in range(12):
+                    panel.drag_autoscroll_tick()
+                auto = bar.value()
+            finally:
+                panel.drag_pointer = original
+                panel._end_drag_autoscroll()
+                panel._in_drag = False
+            check("R-192 拖到边缘时自动滚动", auto > 60, f"{auto}px")
+        finally:
+            panel.store.remove_many(ids)
+            panel.rebuild()
+            app.processEvents()
+        next_()
+
+    def step_status_strip_height(next_):
+        """R-186 / R-199: the caption band under the content is compact.
+
+        The user reported it twice.  The first fix only shrank the row, which
+        left the *band* looking tall because the gap above it and the page margin
+        below are part of what the eye measures; the attempt after that pulled
+        the row up with a negative margin, which squashed the caption and left it
+        sitting low.  So both things are asserted: the band is small **and** the
+        text is centred inside a non-squeezed row (R-199).
+        """
+        strip = window.status_strip_frame
+        check(f"R-186 就绪栏高度降到 {theme.STATUS_H} px",
+              strip.height() == theme.STATUS_H,
+              f"{strip.height()} / {theme.STATUS_H}")
+
+        caption = window.status_line
+        caption.ensurePolished()
+        metrics = caption.fontMetrics()
+        check("R-186 高度仍然容得下说明文字，上下都留出余量",
+              strip.height() >= metrics.height() + 4,
+              f"text={metrics.height()} rail={strip.height()}")
+        check("R-199 说明文字在栏内垂直居中，没有被挤压",
+              abs(caption.geometry().top()
+                  - (strip.height() - caption.height() - caption.geometry().top()))
+              <= 2,
+              f"label_y={caption.geometry().top()} label_h={caption.geometry().height()} "
+              f"rail={strip.height()}")
+        margins = strip.layout().contentsMargins()
+        check("R-199 就绪栏自身的布局边距不为负（文字不会被挤变形）",
+              margins.top() >= 0 and margins.bottom() >= 0,
+              f"{margins.top()}/{margins.bottom()}")
+
+        # What the eye measures: gap above + row + page margin below.
+        root = window._root_layout
+        body = window.body_split
+        band = (strip.geometry().top() - body.geometry().bottom() - 1) + strip.height()
+        check("R-186 内容与就绪栏之间的间隙收到 6 px",
+              abs((strip.geometry().top() - body.geometry().bottom() - 1)
+                  - theme.STATUS_GAP) <= 1,
+              f"{strip.geometry().top() - body.geometry().bottom() - 1}px")
+        check("R-199 就绪栏外上下间隙合起来不再是一块空带",
+              band <= theme.STATUS_GAP + theme.STATUS_H,
+              f"gap+row={band}px (target {theme.STATUS_GAP + theme.STATUS_H})")
+        check("R-199 之前 48 px 的空带已经收窄",
+              band <= 40, f"gap+row={band}px")
+        check("R-199 标题栏区域没有被一起压窄（仍用 6 px 节奏）",
+              root.spacing() == theme.STATUS_GAP, f"spacing={root.spacing()}")
+
+        # The full-screen overlay measures against this constant.
+        rect = window._overlay_rect()
+        expected_bottom = window.status_strip.geometry().top() - 4
+        check("R-186 覆盖层底边跟着就绪栏一起上移",
+              abs(rect.bottom() - expected_bottom) <= 2,
+              f"{rect.bottom()} vs {expected_bottom}")
+        next_()
+
+    def step_ui_font_everywhere(next_):
+        """R-187: the interface size must reach inline font sizes too."""
+        targets = {
+            "扩展命令标题": window.commands_panel.title,
+            "左侧分区标题": window.sec_conn,
+            "HEX 开关文字": window.row_hex.label,
+            "日志提示": window.log_hint,
+            "搜索提示": window.search_panel.hint,
+            "终端标题": window.console.title,
+            "文件提示": window.send_panel.file_hint,
+        }
+        for widget in targets.values():
+            widget.ensurePolished()
+        before = {name: widget.font().pixelSize() for name, widget in targets.items()}
+        log_before = window.log.font().pixelSize()
+        original = theme.ui_font_px()
+        try:
+            window.apply_ui_font("", 20)
+            app.processEvents()
+            for widget in targets.values():
+                widget.ensurePolished()
+            after = {name: widget.font().pixelSize()
+                     for name, widget in targets.items()}
+            grew = [name for name in before if after[name] > before[name]]
+            check("R-187 界面字号调大后每一处内联字号都跟随（含 HEX / 扩展命令）",
+                  len(grew) == len(before),
+                  f"{len(grew)}/{len(before)} {sorted(set(before) - set(grew))}")
+            check("R-187 日志字号不被界面字号带走（R-096）",
+                  window.log.font().pixelSize() == log_before,
+                  f"{log_before} -> {window.log.font().pixelSize()}")
+
+            window.apply_ui_font("", original)
+            app.processEvents()
+            for widget in targets.values():
+                widget.ensurePolished()
+            restored = {name: widget.font().pixelSize()
+                        for name, widget in targets.items()}
+            check("R-187 调回去时精确复原，不会越调越大",
+                  restored == before,
+                  str({k: (before[k], restored[k]) for k in before
+                       if before[k] != restored[k]}))
+        finally:
+            window.apply_ui_font("", original)
+            app.processEvents()
+        next_()
+
+    def step_cli_window_sync(next_):
+        """R-185: a CLI must never open the port behind the window's back."""
+        from omnicom import cli
+        from omnicom.i18n import tr
+
+        check("R-185 窗口存在但无响应时不再静默降级为直连",
+              cli.REASON_NO_RESPONSE != cli.REASON_NO_WINDOW
+              and cli.REASON_NO_RESPONSE != cli.REASON_ALL_BUSY,
+              cli.REASON_NO_RESPONSE)
+        check("R-185 「无响应」有独立的判定原因（不是「没有窗口」）",
+              "没有响应" in cli.REASON_NO_RESPONSE)
+
+        # Directly drive the decision: a window exists, it does not answer.
+        class Args:
+            direct = False
+            window = None
+
+        original = cli.pick_endpoint
+        cli.pick_endpoint = lambda _port, _pid=None: (None, cli.REASON_NO_RESPONSE)
+        try:
+            raised = ""
+            try:
+                cli.new_session(Args(), "COM9", {})
+            except Exception as exc:
+                raised = str(exc)
+            check("R-185 窗口无响应时拒绝自己打开串口并说明原因",
+                  "没有响应" in raised and "--direct" in raised, raised[:60])
+
+            cli.pick_endpoint = lambda _port, _pid=None: (None, cli.REASON_NO_WINDOW)
+            session = cli.new_session(Args(), "COM9", {})
+            check("R-185 没有窗口时仍然可以直接打开串口",
+                  session.mode == "direct", session.mode)
+
+            cli.pick_endpoint = lambda _port, _pid=None: (None, cli.REASON_ALL_BUSY)
+            session = cli.new_session(Args(), "COM9", {})
+            check("R-185 每个窗口都在用别的串口时仍然直连",
+                  session.mode == "direct", session.mode)
+        finally:
+            cli.pick_endpoint = original
+
+        # And the live window really does report a CLI-opened port, so the
+        # button text follows instead of staying on 打开串口.
+        from omnicom import control
+
+        window.bridge.open("DEMO", {"baudrate": 115200})
+        for _ in range(40):
+            app.processEvents()
+            if window._status.get("connected"):
+                break
+            QTest.qWait(20)
+        check("R-185 窗口自己打开串口后按钮变成「关闭」",
+              window._status.get("connected")
+              and window.btn_connect.text() == tr("rail.close"),
+              f"{window._status.get('connected')} / {window.btn_connect.text()}")
+        check("R-185 端点文件同步广播了占用的串口",
+              any(item["serial"] == "DEMO" and item["connected"]
+                  for item in control.endpoints()),
+              str([(i["serial"], i["connected"]) for i in control.endpoints()]))
+        window.bridge.close()
+        for _ in range(40):
+            app.processEvents()
+            if not window._status.get("connected"):
+                break
+            QTest.qWait(20)
+        check("R-185 关闭后按钮回到「打开」",
+              window.btn_connect.text() == tr("rail.open"),
+              window.btn_connect.text())
+        next_()
+
     runner.add("ports", step_ports)
     runner.add("connected", step_connected)
     runner.add("rx", step_rx)
@@ -6722,6 +7376,16 @@ def main() -> int:
     runner.add("R-156 control_lines", step_control_lines)
     runner.add("R-157 pref_wheel", step_pref_wheel)
     runner.add("R-107 update", step_update)
+    runner.add("R-184 search_collapsed_fullscreen", step_search_collapsed_fullscreen)
+    runner.add("R-185 cli_window_sync", step_cli_window_sync)
+    runner.add("R-186 status_strip_height", step_status_strip_height)
+    runner.add("R-187 ui_font_everywhere", step_ui_font_everywhere)
+    runner.add("R-188 terminal_buttons", step_terminal_buttons)
+    runner.add("R-189 command_scroll_kept", step_command_scroll_kept)
+    runner.add("R-190 sidebar_splitter", step_sidebar_splitter)
+    runner.add("R-195 sticky_real_header", step_sticky_group_header)
+    runner.add("R-192 drag_wheel_scroll", step_drag_wheel_scroll)
+    runner.add("R-193 terminal_caret_tab", step_terminal_caret_tab)
 
     if "--only" in sys.argv:
         target = sys.argv[sys.argv.index("--only") + 1]

@@ -729,6 +729,11 @@ class GlyphButton(Button):
     CHEVRON_RIGHT = "chevron_right"
     DOWN = "down"
     CLEAR = "clear"
+    #: Circular arrow: "reset to the initial state", which is a different job
+    #: from 清屏 (CLEAR).  The terminal carried CLEAR *and* an expand glyph wired
+    #: to the same reset, so the button that resets the state looked like a
+    #: full-screen toggle and the real full-screen gesture was missing (R-188).
+    RESET = "reset"
     EXPAND = "expand"
     SHRINK = "shrink"
     REFRESH = "refresh"
@@ -877,6 +882,18 @@ class GlyphButton(Button):
                 tip = QPointF(cx + half, cy)
                 painter.drawLine(tip, QPointF(cx + half, cy - half * 0.8))
                 painter.drawLine(tip, QPointF(cx + half * 0.2, cy))
+            elif glyph == self.RESET:
+                # Circular arrow with a filled arrow head: "back to the initial
+                # state".  Distinct from CLEAR (a crossed-out circle) so the two
+                # terminal buttons no longer look like the same action.
+                rect = QRectF(cx - half, cy - half, half * 2, half * 2)
+                painter.drawArc(rect, 55 * 16, 290 * 16)
+                head_x = cx + half * 0.72
+                head_y = cy - half * 0.62
+                painter.drawLine(QPointF(head_x - half * 0.5, head_y - half * 0.1),
+                                 QPointF(head_x, head_y))
+                painter.drawLine(QPointF(head_x, head_y),
+                                 QPointF(head_x + half * 0.05, head_y + half * 0.55))
             elif glyph == self.FOLDER:
                 path = QPainterPath()
                 path.moveTo(cx - half, cy - half * 0.7)

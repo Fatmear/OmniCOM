@@ -168,7 +168,7 @@ _TABLE: dict[str, tuple[str, str]] = {
     "log.filter.text": ("日志文件 (*.log);;文本文件 (*.txt);;所有文件 (*)",
                         "Log files (*.log);;Text files (*.txt);;All files (*)"),
     # --------------------------------------------------------------- console
-    "console.title": ("终端模式 · 键盘直达串口", "Terminal · keystrokes go straight to the port"),
+    "console.title": ("终端模式", "Terminal"),
     "console.enter": ("回车发送", "Enter sends"),
     "console.clearscreen": ("清屏", "Clear screen"),
     "console.reset": ("清屏并重置终端状态", "Clear and reset the terminal"),
@@ -525,7 +525,7 @@ _TABLE: dict[str, tuple[str, str]] = {
     "send.filedone": ("文件发送完成：{name}（{size}）",
                       "File sent: {name} ({size})"),
     # ---- terminal page
-    "term.title": ("终端模式 · 键盘直达串口", "Terminal · keystrokes go straight to the port"),
+    "term.title": ("终端模式", "Terminal"),
     "term.menu.copy": ("复制", "Copy"),
     "term.menu.paste": ("粘贴到串口", "Paste to port"),
     "term.menu.selectall": ("全选", "Select all"),
@@ -533,6 +533,8 @@ _TABLE: dict[str, tuple[str, str]] = {
     "term.enter": ("回车发送", "Enter sends"),
     "term.clear": ("清屏", "Clear screen"),
     "term.reset": ("清屏并重置终端状态", "Clear screen and reset terminal state"),
+    "term.fullscreen": ("终端全屏", "Full-screen terminal"),
+    "term.exitfull": ("退出全屏", "Exit full screen"),
     "term.hint": (
         "点击终端区域后直接用键盘输入：Enter 发送回车，Ctrl+C 发送 0x03，方向键发送 ANSI 序列。"
         "复制用 Ctrl+Shift+C。",
