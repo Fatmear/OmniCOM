@@ -488,7 +488,17 @@ class LogView(QPlainTextEdit):
             cursor.insertText(text[position:], base)
 
     # ---------------------------------------------------------------- pending
-    def set_pending(self, text: str) -> None:
+    def set_pending(self, text: str, stamped: bool = False) -> None:
+        """Show the not-yet-complete last line.
+
+        ``stamped`` renders it with the ordinary body format instead of the
+        greyed-out "pending" tint.  The HEX view uses it for its tail row: that
+        row already carries a real timestamp prefix, so drawing it grey made the
+        *oldest* text look dimmer than the rows below and read as a glitch
+        (R-201).  The block is still replaceable in place - only its colour
+        changes.
+        """
+        self._pending_stamped = bool(stamped)
         with self._tail_follow.updating():
             self._set_pending(text)
 
@@ -502,7 +512,10 @@ class LogView(QPlainTextEdit):
         else:
             cursor.movePosition(QTextCursor.End)
             cursor.movePosition(QTextCursor.StartOfBlock, QTextCursor.KeepAnchor)
-        cursor.insertText(text, self._pending_format)
+        fmt = (self._make_format(_TEXT_COLORS.get("rx", theme.INK))
+               if getattr(self, "_pending_stamped", False)
+               else self._pending_format)
+        cursor.insertText(text, fmt)
         self._follow()
 
     def clear_pending(self) -> None:

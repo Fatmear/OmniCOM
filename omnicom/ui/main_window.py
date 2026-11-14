@@ -106,6 +106,62 @@ BAUD_RATES = ["9600", "19200", "38400", "57600", "115200", "230400", "460800",
 PARITIES = [("N", "None"), ("E", "Even"), ("O", "Odd"), ("M", "Mark"), ("S", "Space")]
 FLOW_KEYS = [("none", "flow.none"), ("rtscts", "flow.rtscts"), ("xonxoff", "flow.xonxoff")]
 
+# ------------------------------------------------------- native resize border
+#: ``WM_NCHITTEST`` and the ``HT*`` results it may return.  A frameless window
+#: has no system resize border, so the edge grab has to be reported by hand -
+#: which is what gives the same feel as any other application (R-204).
+WM_NCHITTEST = 0x0084
+#: ``WM_GETMINMAXINFO``: the system asks before a sizing gesture, and a
+#: frameless window has to answer or it can be dragged smaller than its layout
+#: allows (R-035 needs 980x620).
+WM_GETMINMAXINFO = 0x0024
+#: ``WM_NCCALCSIZE``: the frame a ``WS_THICKFRAME`` window would draw.  The window
+#: needs that style to be *resizable*, but must not show the frame - so the
+#: non-client area is recalculated away (R-205).
+WM_NCCALCSIZE = 0x0083
+#: ``WM_SETCURSOR``: without handling it Qt sets the arrow in the client area and
+#: the system never draws the resize cursor, so the edge looked inert even after
+#: the hit test was correct (R-205 / L-268).
+WM_SETCURSOR = 0x0020
+GWL_STYLE = -16
+WS_THICKFRAME = 0x00040000
+HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT = 10, 11, 12, 13, 14
+HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT = 15, 16, 17
+#: Standard cursor identifiers (``IDC_*``) for the sizing arrows.  Verified by
+#: loading each one and reading the returned handle - mixing these up produces
+#: the wrong arrow (a left edge showing a corner cursor):
+#:   IDC_SIZEWE 32644 (left-right), IDC_SIZENS 32645 (up-down),
+#:   IDC_SIZENWSE 32642, IDC_SIZENESW 32643.
+IDC_SIZEWE, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZENESW = 32644, 32645, 32642, 32643
+
+
+class _MinMaxInfo(ctypes.Structure):
+    """``MINMAXINFO`` from ``winuser.h``.
+
+    ``ctypes.wintypes`` does not ship it, and without the real layout the
+    ``ptMinTrackSize`` write would land in the wrong offset - the earlier
+    implementation silently fell through to ``except`` for that reason (L-265).
+    """
+
+    _fields_ = [
+        ("ptReserved", ctypes.wintypes.POINT),
+        ("ptMaxSize", ctypes.wintypes.POINT),
+        ("ptMaxPosition", ctypes.wintypes.POINT),
+        ("ptMinTrackSize", ctypes.wintypes.POINT),
+        ("ptMaxTrackSize", ctypes.wintypes.POINT),
+    ]
+
+
+class _NCCALCSIZE_PARAMS(ctypes.Structure):
+    """``NCCALCSIZE_PARAMS`` from ``winuser.h`` (``rgrc[3]`` + ``WINDOWPOS*``)."""
+
+    _fields_ = [
+        ("rgrc", ctypes.wintypes.RECT * 3),
+        ("lppos", ctypes.c_void_p),
+    ]
+
+
+
 def bytes_per_ms(baud: int) -> float:
     return max(0.5, baud / 10.0 / 1000.0)
 
@@ -750,6 +806,15 @@ class OmniWindow(QMainWindow):
         self._pending_text = ""
         self._pending_ts = 0.0
         self._hex_partial = b""
+        #: Timestamp of the first byte of the incomplete HEX row, so a column
+        #: switch can re-render that row with the time it really arrived (R-201).
+        self._hex_ts = 0.0
+        #: Raw bytes received while HEX view is on.  ``_on_hex_columns()``
+        #: replays them so switching a column keeps the history instead of
+        #: wiping it (R-202).  Capped, because the log itself is capped (R-081).
+        self._hex_session = bytearray()
+        self._hex_session_ts = 0.0
+        self.HEX_SESSION_MAX = 1 << 20          # 1 MB, the same budget as the ring
         self._hex_offset = 0
         self._appended = 0
         self._status: dict = {}
@@ -1015,12 +1080,24 @@ class OmniWindow(QMainWindow):
         self.sec_display = SectionTitle(tr("rail.display"))
         layout.addWidget(self.sec_display)
         self.row_hex = SwitchRow(tr("rail.hex"), False)
+        # Two HEX columns, both off by default (R-202).  They are **only shown
+        # while HEX view is on**: the left rail has no vertical slack (R-118
+        # allows one extra heading line and nothing more, measured 44 px of
+        # overflow when these were always visible), and a column switch that
+        # does nothing in text mode is noise anyway.
+        self.row_hex_offset = SwitchRow(tr("rail.hex.offset"), False,
+                                        tooltip=tr("rail.hex.offset.tip"))
+        self.row_hex_ascii = SwitchRow(tr("rail.hex.ascii"), False,
+                                       tooltip=tr("rail.hex.ascii.tip"))
+        self.row_hex_offset.setVisible(False)
+        self.row_hex_ascii.setVisible(False)
         self.row_ts = SwitchRow(tr("rail.ts"), True)
         self.row_ctrl = SwitchRow(tr("rail.ctrl"), False, tooltip=tr("rail.ctrl.tip"))
         self.row_echo = SwitchRow(tr("rail.echo"), True)
         self.row_scroll = SwitchRow(tr("rail.scroll"), True, tooltip=tr("rail.scroll.tip"))
         self.row_awake = SwitchRow(tr("rail.awake"), False, tooltip=tr("rail.awake.tip"))
-        for row_widget in (self.row_hex, self.row_ts, self.row_ctrl,
+        for row_widget in (self.row_hex, self.row_hex_offset, self.row_hex_ascii,
+                           self.row_ts, self.row_ctrl,
                            self.row_echo, self.row_scroll, self.row_awake):
             layout.addWidget(row_widget)
         layout.addWidget(self._divider())
@@ -1500,6 +1577,11 @@ class OmniWindow(QMainWindow):
         self.baud.lineEdit().editingFinished.connect(self._commit_baud)
 
         self.row_hex.toggled.connect(self._on_hex_mode)
+        # The two HEX columns change how a row is drawn, so only the tail row is
+        # re-rendered - the history stays, which is the point of the switches
+        # (R-202).
+        self.row_hex_offset.toggled.connect(lambda _value: self._on_hex_columns())
+        self.row_hex_ascii.toggled.connect(lambda _value: self._on_hex_columns())
         self.row_ts.toggled.connect(lambda value: setattr(self.log, "show_ts", value))
         self.row_ctrl.toggled.connect(self._on_ctrl_mode)
         # 回显 is session state (R-155), so it no longer writes the settings on
@@ -1635,6 +1717,8 @@ class OmniWindow(QMainWindow):
         ("row_dtr", "serial/dtr"),
         ("row_rts", "serial/rts"),
         ("row_hex", "display/hex"),
+        ("row_hex_offset", "display/hex_offset"),
+        ("row_hex_ascii", "display/hex_ascii"),
         ("row_ts", "display/ts"),
         ("row_ctrl", "display/ctrl"),
         ("row_echo", "display/echo"),
@@ -1968,6 +2052,28 @@ class OmniWindow(QMainWindow):
             return escape_control(raw + ("" if pending else "\n"))
         return raw.rstrip("\r")
 
+    def settle_hex_partial(self) -> None:
+        """Turn the incomplete HEX row into a normal line before anything else.
+
+        ``LogView.append_line()`` starts by clearing the pending block, so any
+        line written while a HEX row is still half-full (a TX echo, a system
+        notice, another RX packet) **deleted those bytes from the view** - the
+        reported "收又不显示这个": the tail row silently vanished on the next send
+        (R-203).  Bytes may never be dropped (R-017), so the half row is closed
+        out with the timestamp it already carries.
+
+        The bytes stay in ``_hex_session`` (the replay buffer), so the next
+        packet continues the *same* 16-byte alignment rather than starting a
+        fresh row - the offset column therefore keeps counting up.
+        """
+        if not self._hex_partial or not self.row_hex.isChecked():
+            return
+        partial, self._hex_partial = self._hex_partial, b""
+        ts, self._hex_ts = self._hex_ts, 0.0
+        self.log.clear_pending()
+        self._log_line(ts or time.time() * 1000, "RX",
+                       self._hex_row(self._hex_offset, partial), "rx")
+
     def _log_line(self, ts: float, direction: str, text: str, kind: str = "rx",
                   keywords=None) -> int:
         """Append a rendered line **and** keep the live search results in step.
@@ -1976,6 +2082,11 @@ class OmniWindow(QMainWindow):
         to append on its own and never told the search panel, so results stopped
         growing while sending - that was the reported bug (L-089).
         """
+        # Anything written while a HEX row is still half-full would wipe that
+        # row (``append_line`` clears the pending block first), so it is closed
+        # out here - one gate for every caller (R-203).
+        if kind != "rx":
+            self.settle_hex_partial()
         words = self.search_panel.keywords if keywords is None else keywords
         composed = self.log.compose_line(ts, direction, text)
         block = self.log.append_line(ts, direction, text, kind, keywords=words)
@@ -1999,6 +2110,16 @@ class OmniWindow(QMainWindow):
         merged = self._hex_partial + data
         index = 0
         keywords = self.search_panel.keywords
+        # ``_hex_session`` is the replay buffer for a column switch (R-202);
+        # it must hold the *original* byte order, so it is appended before the
+        # splitting below can consume ``merged``.
+        if not self._hex_session_ts:
+            self._hex_session_ts = ts
+        self._hex_session += data
+        overflow = len(self._hex_session) - self.HEX_SESSION_MAX
+        if overflow > 0:
+            del self._hex_session[:overflow]
+            self._hex_session_ts = ts
         while len(merged) - index >= 16:
             row = merged[index:index + 16]
             text = self._hex_row(self._hex_offset, row)
@@ -2008,16 +2129,53 @@ class OmniWindow(QMainWindow):
             index += 16
         self._hex_partial = merged[index:]
         if self._hex_partial:
-            self.log.set_pending(self._hex_row(self._hex_offset, self._hex_partial))
+            if not self._hex_ts:
+                self._hex_ts = ts
+            self._show_hex_pending(self._hex_ts)
         else:
+            self._hex_ts = 0.0
             self.log.clear_pending()
 
-    @staticmethod
-    def _hex_row(offset: int, row: bytes) -> str:
+    def _show_hex_pending(self, ts: float) -> None:
+        """Show the not-yet-complete row, timestamped like every other line.
+
+        The tail row used to be inserted as bare payload through
+        ``set_pending()``, so it had no ``[hh:mm:ss.mmm]`` prefix while every
+        finished row did - the user saw one line without a timestamp, and the
+        timestamp only appeared once the *next* packet completed the row and
+        turned it into a normal line (R-201).  The prefix is composed here with
+        the same ``compose_line()`` the finished rows use, so the two cannot
+        disagree.
+        """
+        row = self._hex_row(self._hex_offset, self._hex_partial)
+        self.log.set_pending(self.log.compose_line(ts, "RX", row),
+                             stamped=True)
+
+    def _hex_row(self, offset: int, row: bytes) -> str:
+        """One HEX line: ``offset  bytes  |ascii|``, each column optional (R-202).
+
+        The offset and the ASCII column are separate switches and both default
+        **off**: an offset column is noise while a session is only a few rows
+        long, and the ``|.U:|`` column only helps when a payload is actually
+        text.
+        """
+        parts: list[str] = []
+        if self._hex_option("row_hex_offset"):
+            parts.append(f"{offset:08x}")
         hex_part = " ".join(f"{byte:02x}" for byte in row)
-        hex_part = hex_part.ljust(47)
-        ascii_part = "".join(chr(byte) if 32 <= byte < 127 else "." for byte in row)
-        return f"{offset:08x}  {hex_part}  |{ascii_part}|"
+        # Every row pads to a full 16-byte line, so a short trailing row keeps
+        # the ASCII column of the rows above it aligned.
+        parts.append(hex_part.ljust(47))
+        if self._hex_option("row_hex_ascii"):
+            ascii_part = "".join(
+                chr(byte) if 32 <= byte < 127 else "." for byte in row)
+            parts.append(f"|{ascii_part}|")
+        return "  ".join(parts).rstrip()
+
+    def _hex_option(self, name: str) -> bool:
+        """Read one HEX column switch, tolerating a window without it."""
+        row = getattr(self, name, None)
+        return bool(row is not None and row.isChecked())
 
     def _check_trim(self) -> None:
         # The log owns the count: it is the only thing that knows how many lines
@@ -2204,6 +2362,11 @@ class OmniWindow(QMainWindow):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        if not getattr(self, "_native_resize_ready", False):
+            # The HWND exists once the first show has happened; WS_THICKFRAME has
+            # to be added at that point (R-205 / L-267).
+            self._native_resize_ready = True
+            self._native_resize_ok = self._enable_native_resize()
         if not getattr(self, "_main_split_ready", False):
             self._main_split_ready = True
             self._apply_main_split()
@@ -2237,6 +2400,11 @@ class OmniWindow(QMainWindow):
         self.log.trimmed = 0
         self._pending_text = ""
         self._hex_partial = b""
+        # The replay buffer goes with the log it mirrors, or a column switch
+        # would resurrect rows the user had just cleared (R-202).
+        self._hex_session = bytearray()
+        self._hex_session_ts = 0.0
+        self._hex_ts = 0.0
         self._hex_offset = 0
         self.trim_badge.hide()
         self.status_trim.setText("")
@@ -2244,15 +2412,50 @@ class OmniWindow(QMainWindow):
         self.scroll_pill.hide_pill()
         self.search_panel.clear_results()
 
+    def _set_hex_column_rows_visible(self, visible: bool) -> None:
+        """Show the two HEX column switches only while HEX view is on (R-202).
+
+        The rail has no vertical slack (R-118), and these two rows cost 44 px of
+        it - so they appear with the mode they belong to and vanish with it.
+        """
+        for row in (self.row_hex_offset, self.row_hex_ascii):
+            if row.isVisible() != visible:
+                row.setVisible(visible)
+
     def _on_hex_mode(self, enabled: bool) -> None:
         # No settings write: the switch is session state (R-155).  An INI flush
         # on a click was also a needless 30 ms disk hit on a large settings file.
         self._clear_decoder()
+        self._set_hex_column_rows_visible(enabled)
         if self._appended > 0:
             self.clear_log()
             self._log_line(time.time() * 1000, "··",
                           tr("log.clear"), "sys")
         self.status_line.setText(tr("rail.hex") + (" ✓" if enabled else " ✗"))
+
+    def _on_hex_columns(self) -> None:
+        """Re-render the HEX log after an offset/ASCII column switch (R-202).
+
+        The log is a rendered document, not a byte buffer, so the columns cannot
+        be repainted line by line.  The raw bytes of the session are therefore
+        kept in ``_hex_session`` while HEX view is on, and a switch replays them
+        through the same ``_feed_hex()`` that produced the original rows - which
+        is the only way the history keeps the *same* bytes with the new columns
+        instead of being thrown away (the earlier attempt simply cleared the log,
+        destroying exactly what the user flipped the switch to read).
+        """
+        if not self.row_hex.isChecked():
+            return
+        session, last_ts = self._hex_session, self._hex_session_ts
+        self.clear_log()
+        self._hex_session = bytearray()
+        self._hex_session_ts = 0.0
+        if not session:
+            return
+        self._log_line(time.time() * 1000, "··", tr("log.reflow"), "sys")
+        self._feed_hex(last_ts or time.time() * 1000, bytes(session))
+        self._hex_session = session
+        self._hex_session_ts = last_ts
 
     def _on_ctrl_mode(self, enabled: bool) -> None:
         self._clear_decoder()
@@ -2536,12 +2739,30 @@ class OmniWindow(QMainWindow):
         self.notify(tr("log.saved", n=lines, name=os.path.basename(path)), "ok")
 
     # ----------------------------------------------------------------- toast
+    #: The stack of notifications may not stand taller than this fraction of the
+    #: *window*, so a burst of messages can never cover most of the screen.  The
+    #: user asked for "比一半屏幕少一点" after a dozen messages filled 85 % of it
+    #: (R-200).
+    TOAST_STACK_FRACTION = 0.45
+    #: Gap between two stacked notifications.
+    TOAST_GAP = 10
+    #: Bottom margin of the stack (clears the caption row).
+    TOAST_BOTTOM = 54
+
     def notify(self, text: str, level: str = "info", timeout: int = 3600) -> None:
+        """Show a notification card, newest at the bottom of the stack (R-200).
+
+        The previous version stacked *upwards from the newest*, so every message
+        pushed the whole stack higher and a burst covered 85 % of the window with
+        the oldest card at the bottom - the newest message, the one being read,
+        ended up furthest from the content.  Now the newest sits at the bottom
+        and pushes the older ones up, and the stack is capped: when the next card
+        would not fit, the oldest is retired to make room.
+        """
         if not text:
             return
         if level in ("warn", "error"):
             self._log_line(time.time() * 1000, "!!", text, "evt")
-        toast = Toast(self, text, level, timeout)
         # A dismissed toast has already been deleteLater()'d, so touching it
         # raises RuntimeError("Internal C++ object already deleted").
         alive = []
@@ -2552,13 +2773,61 @@ class OmniWindow(QMainWindow):
             except RuntimeError:
                 continue
         self._toasts = alive
-        offset = sum(item.height() + 10 for item in self._toasts)
-        x = max(16, self.width() - toast.width() - 26)
-        y = max(70, self.height() - toast.height() - 54 - offset)
-        toast.move(x, y)
+
+        # Ask the new card for its size first: its height is the room it needs.
+        toast = Toast(self, text, level, timeout)
+        limit = max(120, int(self.height() * self.TOAST_STACK_FRACTION))
+        # Retire the oldest until the whole stack (new card included) fits inside
+        # the cap.  The sums are recomputed from the live list each round: a
+        # running total drifts as soon as a card leaves, and a stale total kept
+        # more cards on screen than the cap allows (measured, R-200).
+        def stack_height() -> int:
+            total = toast.height() + self.TOAST_GAP
+            for item in self._toasts:
+                total += item.height() + self.TOAST_GAP
+            return total
+
+        while self._toasts and stack_height() > limit:
+            oldest = self._toasts.pop(0)
+            with contextlib.suppress(RuntimeError):
+                oldest.dismiss()
+
+        # One pass, bottom-up: newest lowest, each older card one step higher.
+        #
+        # These moves are **not animated**.  ``QPropertyAnimation`` needs the
+        # event loop to advance, so with a burst of notifications the next
+        # ``notify()`` runs while every card is still mid-slide; measuring or
+        # continuing from ``pos()`` then stacked them unevenly and the last two
+        # ended up exactly on top of each other (measured, L-261).  A settled
+        # stack is also what the user actually wants to read - only the arriving
+        # card animates, via ``play_in()``.
+        bottom = self.height() - self.TOAST_BOTTOM
+        y = max(70, bottom - toast.height())
+        toast.move_to(QPoint(max(16, self.width() - toast.width() - 26), y),
+                      animate=False)
         toast.play_in()
+        cursor = y
+        for item in reversed(self._toasts):
+            cursor -= item.height() + self.TOAST_GAP
+            with contextlib.suppress(RuntimeError):
+                item.move_to(QPoint(item.x(), max(70, cursor)), animate=False)
         self._toasts.append(toast)
         QTimer.singleShot(timeout, toast.dismiss)
+
+    def clear_toasts(self) -> None:
+        """Drop every notification on screen.
+
+        Used when the window closes (a toast is a child of the central widget
+        and would otherwise flash during the fade) and by the GUI selftest, which
+        must start from an empty stack instead of inheriting whatever earlier
+        steps happened to show (R-200).  Dismissal is skipped: these cards are
+        being removed deliberately, not expired.
+        """
+        toasts, self._toasts = getattr(self, "_toasts", []), []
+        for toast in toasts:
+            with contextlib.suppress(RuntimeError):
+                toast.hide()
+                toast.deleteLater()
 
     # -------------------------------------------------------------- dialogs
     def open_preferences(self) -> None:
@@ -2797,11 +3066,16 @@ class OmniWindow(QMainWindow):
         for index, (_key, label_key) in enumerate(FLOW_KEYS):
             self.flow.setItemText(index, tr(label_key))
         self.sec_display.setText(tr("rail.display"))
-        for row, key in ((self.row_hex, "rail.hex"), (self.row_ts, "rail.ts"),
+        for row, key in ((self.row_hex, "rail.hex"),
+                         (self.row_hex_offset, "rail.hex.offset"),
+                         (self.row_hex_ascii, "rail.hex.ascii"),
+                         (self.row_ts, "rail.ts"),
                          (self.row_ctrl, "rail.ctrl"), (self.row_echo, "rail.echo"),
                          (self.row_scroll, "rail.scroll"), (self.row_awake, "rail.awake")):
             row.label.setText(tr(key))
         self.row_ctrl.setToolTip(tr("rail.ctrl.tip"))
+        self.row_hex_offset.setToolTip(tr("rail.hex.offset.tip"))
+        self.row_hex_ascii.setToolTip(tr("rail.hex.ascii.tip"))
         self.row_scroll.setToolTip(tr("rail.scroll.tip"))
         self.row_awake.setToolTip(tr("rail.awake.tip"))
         self.sec_record.setText(tr("rail.record"))
@@ -3593,6 +3867,26 @@ class OmniWindow(QMainWindow):
             native = ctypes.wintypes.MSG.from_address(int(message))
         except Exception:
             return super().nativeEvent(event_type, message)
+        if native.message == WM_NCCALCSIZE and self._strip_frame(
+                int(native.lParam), bool(native.wParam)):
+            # The client area now covers the whole window, so the frame that
+            # WS_THICKFRAME would draw is gone (R-205).
+            return True, 0
+        if native.message == WM_NCHITTEST:
+            hit = self._resize_hit_test(int(native.lParam))
+            if hit is not None:
+                return True, hit
+        if native.message == WM_SETCURSOR and self._apply_resize_cursor(
+                int(native.lParam)):
+            # Qt answers WM_SETCURSOR itself (returns TRUE), so Windows never
+            # draws the sizing cursor - "都没有那个箭头" (R-205 / L-268).  The
+            # cursor is set from the *same* hit test that drives the resize,
+            # instead of trusting the default handler's idea of the zone (it was
+            # measured returning SIZENWSE for a left edge).
+            return True, 1
+        if native.message == WM_GETMINMAXINFO and self._apply_minmax_info(
+                int(native.lParam)):
+            return True, 0
         if native.message == 0x0112:
             command = int(native.wParam) & 0xFFF0
             if command == 0xF020:                      # SC_MINIMIZE
@@ -3605,6 +3899,222 @@ class OmniWindow(QMainWindow):
                 self._cancel_minimize()
                 return True, 0
         return super().nativeEvent(event_type, message)
+
+    def _enable_native_resize(self) -> bool:
+        """Add ``WS_THICKFRAME`` so the system offers a resize border (R-205).
+
+        Answering ``WM_NCHITTEST`` is **not enough**: Windows only hit-tests a
+        sizing border for a window whose style contains ``WS_THICKFRAME``.  A
+        ``Qt.FramelessWindowHint`` window is created as ``WS_POPUP`` **without**
+        it, so the handler was never called during real mouse movement (measured:
+        0 invocations while the pointer crossed all four edges, L-267) - which is
+        exactly why no resize arrow ever appeared.
+
+        The border is then removed again by ``WM_NCCALCSIZE`` (see
+        ``_strip_frame``), so the window stays visually frameless.
+        """
+        try:
+            hwnd = int(self.winId())
+            user32 = ctypes.windll.user32
+            style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+            if style & WS_THICKFRAME:
+                return True
+            user32.SetWindowLongW(hwnd, GWL_STYLE, style | WS_THICKFRAME)
+            # A style change only takes effect after a frame recalculation.
+            SWP_FRAMECHANGED = 0x0020
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE
+                                | SWP_NOZORDER | SWP_NOACTIVATE)
+            return bool(user32.GetWindowLongW(hwnd, GWL_STYLE) & WS_THICKFRAME)
+        except Exception:
+            # A window that cannot resize is still a working window.
+            return False
+
+    def _apply_resize_cursor(self, lparam: int) -> bool:
+        """Set the cursor for the edge under the pointer; True when it was one.
+
+        ``WM_SETCURSOR`` is the message that decides the pointer shape, and Qt
+        answers it itself (measured: returns TRUE), so Windows never got to draw
+        a sizing cursor even though the hit test already reported ``HTLEFT`` -
+        which is exactly why the user saw "都没有那个箭头" (R-205 / L-268).
+
+        **The ``lParam`` is not a point**: its low word is the ``HT*`` code of the
+        message and the high word is the mouse message.  Reading it as a screen
+        position (an easy mistake - every other hit-test message *is* a point)
+        put every position in the same corner, which showed up as "every edge
+        gives the NWSE cursor" (L-268).  The pointer is therefore taken from the
+        real cursor position and fed through the same ``_resize_hit_test()`` that
+        drives the drag, so the arrow and the gesture cannot disagree.
+        """
+        if self.isMaximized() or self.isFullScreen():
+            return False
+        try:
+            point = ctypes.wintypes.POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(point))
+        except Exception:
+            return False
+        lparam_point = ((point.y & 0xFFFF) << 16) | (point.x & 0xFFFF)
+        hit = self._resize_hit_test(lparam_point)
+        if hit is None:
+            return False
+        # HTLEFT/HTRIGHT are *vertical* edges, whose cursor is the horizontal
+        # double arrow (IDC_SIZEWE) and vice versa.
+        identifier = {
+            HTLEFT: IDC_SIZEWE,
+            HTRIGHT: IDC_SIZEWE,
+            HTTOP: IDC_SIZENS,
+            HTBOTTOM: IDC_SIZENS,
+            HTTOPLEFT: IDC_SIZENWSE,
+            HTBOTTOMRIGHT: IDC_SIZENWSE,
+            HTTOPRIGHT: IDC_SIZENESW,
+            HTBOTTOMLEFT: IDC_SIZENESW,
+        }.get(hit)
+        if identifier is None:
+            return False
+        try:
+            user32 = ctypes.windll.user32
+            user32.LoadCursorW.argtypes = [ctypes.wintypes.HINSTANCE,
+                                           ctypes.c_void_p]
+            user32.SetCursor(user32.LoadCursorW(None,
+                                                ctypes.c_void_p(identifier)))
+        except Exception:
+            return False
+        return True
+
+    def _apply_minmax_info(self, lparam: int) -> bool:
+        """Tell the system the real minimum track size (R-204).
+
+        ``setMinimumSize()`` is a Qt-side clamp: a native sizing gesture goes
+        through ``WM_GETMINMAXINFO``, and when nobody answers it the window can
+        be dragged smaller than the layout allows - measured, a direct
+        ``SetWindowPos(400, 300)`` on this window really did produce a 400x300
+        window even though the minimum is 980x620 (L-266).  Filling
+        ``ptMinTrackSize`` is what the system expects from a resizable window.
+        """
+        try:
+            info = _MinMaxInfo.from_address(lparam)
+        except Exception:
+            return False
+        if info.ptMinTrackSize.x > 0:
+            # Already constrained (a themed frame, or Qt answered first).
+            return False
+        info.ptMinTrackSize.x = self.minimumWidth()
+        info.ptMinTrackSize.y = self.minimumHeight()
+        return True
+
+    def _strip_frame(self, lparam: int, was_calc_valid: bool) -> bool:
+        """Reduce the non-client area to zero, hiding the new frame (R-205).
+
+        ``WS_THICKFRAME`` buys the resize border at the cost of a visible frame.
+        The standard way to keep the system behaviour (sizing, snap, shadows)
+        while the client area covers the whole window is to answer
+        ``WM_NCCALCSIZE`` with the client rect set to the window rect; the
+        window then still *looks* frameless and the Qt layout is untouched.
+
+        ``was_calc_valid`` is the ``wParam``: 0 means ``lParam`` is a plain
+        ``RECT`` (client rect), non-zero means it is ``NCCALCSIZE_PARAMS`` and
+        ``rgrc[0]`` is the proposed *window* rect, which is exactly what the
+        client area has to become.
+        """
+        try:
+            if not was_calc_valid:
+                rect = ctypes.cast(lparam, ctypes.POINTER(ctypes.wintypes.RECT))
+                geometry = self.geometry()
+                rect.contents.left = geometry.left()
+                rect.contents.top = geometry.top()
+                rect.contents.right = geometry.right() + 1
+                rect.contents.bottom = geometry.bottom() + 1
+                return True
+            params = ctypes.cast(lparam,
+                                 ctypes.POINTER(_NCCALCSIZE_PARAMS)).contents
+            # ``rgrc[0]`` already holds the proposed window rect: leaving it
+            # untouched makes the client area cover the whole window, i.e. no
+            # frame is drawn at all.
+            rect = params.rgrc[0]
+            if rect.right <= rect.left or rect.bottom <= rect.top:
+                return False
+        except Exception:
+            return False
+        return True
+
+        """Tell the system the real minimum track size (R-204).
+
+        ``setMinimumSize()`` is a Qt-side clamp: a native sizing gesture goes
+        through ``WM_GETMINMAXINFO``, and when nobody answers it the window can
+        be dragged smaller than the layout allows - measured, a direct
+        ``SetWindowPos(400, 300)`` on this window really did produce a 400x300
+        window even though the minimum is 980x620 (L-265).  Filling
+        ``ptMinTrackSize`` is what the system expects from a resizable window.
+        """
+        try:
+            info = _MinMaxInfo.from_address(lparam)
+        except Exception:
+            return False
+        if info.ptMinTrackSize.x > 0:
+            # Already constrained (a themed frame, or Qt answered first).
+            return False
+        info.ptMinTrackSize.x = self.minimumWidth()
+        info.ptMinTrackSize.y = self.minimumHeight()
+        return True
+
+    # ------------------------------------------------------- resize by dragging
+    #: How close to an edge the pointer has to be to grab it, in px.  Windows
+    #: itself uses the resize border of the frame; this window has no frame (it
+    #: is frameless and translucent), so the band has to be supplied by hand.
+    RESIZE_BORDER = 6
+    #: Corner zones are square, the same way the system's own corners are.
+    RESIZE_CORNER = 14
+
+    def _resize_hit_test(self, lparam: int) -> int | None:
+        """``HT*`` code for an edge/corner, or ``None`` for "normal client".
+
+        A frameless window has no resize border at all, so the user could not
+        drag any edge - "要支持非全屏时使用鼠标拖动设置软件窗口的宽高".  Reporting
+        the hit to Windows (``WM_NCHITTEST``) is what makes the gesture behave
+        exactly like a native window: the cursor changes, the drag is handled by
+        the system's own sizing loop, Aero Snap and double-click keep working,
+        and nothing is re-implemented in Qt (R-204).
+
+        Disabled while maximised or full screen, where there is nothing to
+        resize.  The hit area starts at the *page* edge, i.e. outside the shadow
+        ring, so the whole visible border is grabbable.
+        """
+        if self.isMaximized() or self.isFullScreen():
+            return None
+        # ``lParam`` packs the screen point of the hit test.
+        x = ctypes.c_short(lparam & 0xFFFF).value
+        y = ctypes.c_short((lparam >> 16) & 0xFFFF).value
+        local = self.mapFromGlobal(QPoint(x, y))
+        width, height = self.width(), self.height()
+        border = self.RESIZE_BORDER
+        corner = self.RESIZE_CORNER
+        left = local.x() < border
+        right = local.x() >= width - border
+        top = local.y() < border
+        bottom = local.y() >= height - border
+        near_left = local.x() < corner
+        near_right = local.x() >= width - corner
+        if top and near_left:
+            return HTTOPLEFT
+        if top and near_right:
+            return HTTOPRIGHT
+        if bottom and near_left:
+            return HTBOTTOMLEFT
+        if bottom and near_right:
+            return HTBOTTOMRIGHT
+        if top:
+            return HTTOP
+        if bottom:
+            return HTBOTTOM
+        if left:
+            return HTLEFT
+        if right:
+            return HTRIGHT
+        return None
 
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
@@ -3655,6 +4165,9 @@ class OmniWindow(QMainWindow):
         # layer translucent, and hiding a translucent window leaves a ghost.
         self._stop_motion()
         self.setWindowOpacity(1.0)
+        # Notifications are children of the central widget; dropping them here
+        # avoids a last frame in which they flash over the fading window (R-200).
+        self.clear_toasts()
         self.hide()
         QApplication.processEvents()
         self.plugins.unload()

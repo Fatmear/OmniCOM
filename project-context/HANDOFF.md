@@ -1,8 +1,9 @@
 # Current handoff
 
 Updated: 2026-11-13（issue #1~#11 → R-184..R-194；追加 #12/#13 → R-195/R-196；
-吸顶条背景 → R-197；就绪栏空带 → R-186 修订 + R-199；
-`ui_selftest` 785 项，`acceptance_test` 194 需求全 PASS）
+吸顶条背景 → R-197；就绪栏空带 → R-186 修订 + R-199；通知堆叠 → R-200；
+HEX 时间戳 / 可选列 / 不丢半行 → R-201..R-203；边缘拖动缩放 → R-204..R-206；
+`ui_selftest` 817 项，`acceptance_test` 201 需求全 PASS）
 
 ## Latest State
 
@@ -42,8 +43,64 @@ Updated: 2026-11-13（issue #1~#11 → R-184..R-194；追加 #12/#13 → R-195/R
   一个数字坑：`QFontMetrics.height()` 对 11 px 中文字形返回 **15**（含行距），
   不是 11。按 11 估算会把栏压到 18 px、只剩 1.5 px 余量，看着就是「挤」（L-259）。
 
+- **第五轮（2026-11-14）**：通知弹窗堆叠方向与高度。
+  - 方向：原来**新的往上加**（最老的压在下面），用户要的是**新的在最下面、旧的往上推**。
+  - 高度：连发 12 条时整叠 **768 px = 85 % 窗口高**（用户说"快 3/4 屏幕"），
+    期望"比一半少一点"。
+  - 现在：最新固定在底部，旧的逐张上推，整叠上限 `TOAST_STACK_FRACTION = 0.45`；
+    超出时**挤掉最老的一条**。实测 900 px 窗口保留 6 条、跨度 371-396 px（41-44 %），
+    720 px 窗口自适应为 5 条 / 270 px（37 %）。
+
+  两个坑：① 布局阶段**不能做动画**——`move_to()` 是 190 ms 的 `QPropertyAnimation`，
+  连续 notify 时上一张还在动画途中，读 `pos()` 会拿到半途值，卡片间距变成 27/26/17/14/4/0，
+  最后两条完全重叠；改成按”底部往上逐张累加”算出的固定 y 落位，只有新到的那张滑入。
+  ② 上限判据曾用递减的运行总量，弹掉一条后与新的上限对不上，
+  结果 12 条全留着；改为每轮从活列表重算总和（L-261）。
+
+- **第六轮（2026-11-14）**：HEX 视图三处问题一起报上来。
+  * **未填满的最后一包没有时间戳**：尾行走 `set_pending()` 只插裸文本，前缀是
+    `append_line()` 加的，所以「补满那一刻才出现时间戳」。→ `set_pending(stamped=True)`
+    让尾行用正文格式，并用**同一个 `compose_line()`** 拼前缀（R-201）。
+  * **`000000f0` 偏移量不该默认显示**、**`|.U:|` ASCII 列要可选且默认关闭** →
+    两个独立开关，默认关；打开后**历史按新列重排**（保留字节与时间，不清空日志）（R-202）。
+  * **「每次发都有 00000180…，但收又不显示这个」**：真根因是
+    `LogView.append_line()` **开头就** 清 pending —— 任何在 HEX 行未凑满 16 字节时
+    写入的行（TX 回显 / 系统提示 / 下一包）都会把那半行**从视图里抹掉**，静默丢字节。
+    → 在 `_log_line()` 入口加闸：写非 RX 内容前先 `settle_hex_partial()` 把半行结算成
+    正式行；字节仍留在重放缓冲里，所以 16 字节对齐与偏移量照旧连续（R-203）。
+
+  顺带：两个新开关曾让**左栏溢出 44 px**（R-118 不允许滚动），改为**仅在 HEX 模式打开时
+  显示**；`row_hex_offset` / `row_hex_ascii` 也补进了 `retranslate()`，否则英文界面残留中文（R-033）。
+
+- **第七轮（2026-11-14）**：无边框窗口**完全不能拖动边缘改变大小**。用户反馈了**三次**
+  （「要支持非全屏时鼠标拖动」「还是没法拖动」「都没有那个箭头」），前两次我判错了，真相有三层：
+
+  1. **只应答 `WM_NCHITTEST` 完全不够。** `Qt.FramelessWindowHint` 的窗口是 `WS_POPUP`
+     且**没有 `WS_THICKFRAME`**，而 Windows 只对带该样式的窗口做缩放命中测试 ——
+     真实鼠标移动时我的处理器被调用 **0 次**。
+     诊断的坑：`SendMessage(hwnd, WM_NCHITTEST, …)` 能得到正确答案（**假阳性**），
+     必须用 `SendInput` 模拟真实鼠标移动才看得见。→ 补 `WS_THICKFRAME`，
+     再用 `WM_NCCALCSIZE` 把客户区撑满，外观仍无边框（R-205）。
+  2. **命中正确 ≠ 有箭头。** `WM_SETCURSOR` 才是决定光标形状的消息，而 **Qt 自己应答它
+     并返回 TRUE**，系统根本没机会画。→ 自己用 `GetCursorPos()` +
+     **同一个** `_resize_hit_test()` 取区域，再 `SetCursor(LoadCursor(IDC_*))`（R-206）。
+     两个子坑：让默认处理器画时形状全错（左边给 `SIZENWSE`）；
+     `WM_SETCURSOR` 的 `lParam` **不是坐标**（低字是 `HT*`、高字是鼠标消息），
+     当成点去读会让所有位置落到同一个角。
+  3. **`setMinimumSize()` 只管 Qt 侧**，原生拖动走 `WM_GETMINMAXINFO`，
+     必须自己填 `ptMinTrackSize`；而 `ctypes.wintypes` **没有** `MINMAXINFO`，
+     引用它会静默掉进 `except` ⇒「写了但没生效」（L-266）。
+
+  最终真实窗口实测：9 个位置光标全部正确（左右 `SIZEWE`、上下 `SIZENS`、四角对角箭头、
+  中心 I 形），`SendInput` 后台处理器被调用，客户区等于窗口矩形。
+
 ## What changed this round (files)
 
+- `omnicom/ui/widgets.py` — `Toast.move_to(point, animate)`；`play_in()` 不再用
+  `pos()` 覆写目标位，`_home` 始终是**目标**位置（L-261）。
+- `omnicom/ui/main_window.py` — `notify()` 重写为「新在最下 + 旧的往上推 + 上限挤掉最老」；
+  新增 `TOAST_STACK_FRACTION / TOAST_GAP / TOAST_BOTTOM` 与 `clear_toasts()`；
+  `closeEvent` 里清理通知，避免淡出时闪一下。
 - `omnicom/ui/theme.py` — `STATUS_H = 20`、`STATUS_GAP = 6`（去掉 `STATUS_PULL`，
   负边距方案已撤销）。
 - `omnicom/ui/main_window.py` — `_tighten_status_gap()` 改为
@@ -71,8 +128,8 @@ Updated: 2026-11-13（issue #1~#11 → R-184..R-194；追加 #12/#13 → R-195/R
 
 ```
 python -m ruff check .                    # All checks passed!
-python tools/ui_selftest.py               # 785/785 项通过 / ALL GUI SELFTESTS PASSED
-python tools/acceptance_test.py           # 194 需求全 PASS，1152 项检查，失败 0，uncovered 空
+python tools/ui_selftest.py               # 817/817 项通过 / ALL GUI SELFTESTS PASSED
+python tools/acceptance_test.py           # 201 需求全 PASS，1184 项检查，失败 0，uncovered 空
 python tools/protocol_selftest.py         # 23/23 ALL PROTOCOL SELFTESTS PASSED
 python tools/contrast_audit.py            # ALL 15 CONTRAST PAIRS >= 4.5:1
 ```
@@ -86,6 +143,7 @@ python tools/contrast_audit.py            # ALL 15 CONTRAST PAIRS >= 4.5:1
 | 终端光标断言 | 偶发 6 像素失败 | 30 vs 1 稳定区分 |
 | 吸顶条背景 | 不透明纯白 `#FFFFFF` | alpha 244 半透明白 / 有壁纸时玻璃色，与背后卡片同色 |
 | 就绪栏空带 | 48 px（间隙 10 + 栏 22 + 底边 16） | **38 px**（间隙 6 + 栏 20 + 底边 12），文字居中 |
+| 通知堆叠 | 新的在上，12 条占 768 px（85%） | **新在最下**，上限 45%，900 px 窗口保留 6 条 / 382 px（42%） |
 
 ## Known open
 
@@ -103,6 +161,31 @@ python tools/contrast_audit.py            # ALL 15 CONTRAST PAIRS >= 4.5:1
   会让两个子控件互相 negotiation size hint，进入 L-041 同款死循环（窗口卡死 +
   满屏 `propagateSizeHints()`）。吸顶栏要挂在**面板**上，按 viewport 坐标定位。
   另外 pin/unpin 改变内容高度会再次触发 `valueChanged`，必须有重入保护。
+- **L-261**：**异步动画期间不要读 `pos()` 做布局**。`move_to()` 是 190 ms 的
+  `QPropertyAnimation`，连续触发时上一张还在动画途中，`pos()` 是半途值，卡片间距变成
+  27/26/17/14/4/0 并出现两条完全重叠。改为自己维护目标位、按算出的固定 y 一次性落位，
+  只给新到的那张做滑入。上限判断也别用递减的运行总量——弹掉一条后就与上限对不上了。
+- **L-262**：`sum(高度 + 间隙)` 与用户看到的**首尾像素跨度**差一个间隙；判"占屏幕多少"
+  要按视觉跨度或"卡片数 × 间隙"算，否则会稳定超出目标一点点。
+- **L-267**：只应答 `WM_NCHITTEST` 没用——没有 `WS_THICKFRAME` 时系统不做缩放命中
+  测试，处理器在真实鼠标移动中 **0 次**被调用。**别用 `SendMessage` 验证消息处理**，
+  它绕过真实输入路径会产生假阳性；要用 `SendInput`。
+- **L-268**：命中正确也**没有箭头**，因为 Qt 自己应答 `WM_SETCURSOR` 并返回 TRUE。
+  另外 `WM_SETCURSOR` 的 `lParam` **不是坐标**（低字 `HT*`、高字鼠标消息）。
+- **L-269**：R-204 第一次的测试是**假阳性**（直接调函数当然对）。验收要站在用户那侧：
+  断言窗口样式、客户区尺寸、真实输入调用次数、光标句柄。
+- **L-265**：无边框窗口没有系统缩放边；正确做法是应答 `WM_NCHITTEST` 返回 `HT*`，
+  把尺寸手势交回系统，别在 Qt 里自己实现。`lParam` 里是**屏幕坐标**，
+  `mapToGlobal` 之后不要再 `ScreenToClient`（偏移会翻倍）。
+- **L-266**：`setMinimumSize()` 只管 Qt 侧；原生拖动走 `WM_GETMINMAXINFO`，
+  必须自己填 `ptMinTrackSize`。另外 `ctypes.wintypes` **没有** `MINMAXINFO`，
+  引用它会抛 `AttributeError` 被 `except` 吞掉 ⇒「写了但没生效」，要自己定义结构体。
+- **L-263**：`set_pending()` 只插裸文本，时间戳是 `append_line()` 的前缀 ——
+  所以「最后一包没时间戳、补满后才出现」。修法不是各拼一遍，而是**共用
+  `compose_line()`**。
+- **L-264**：`LogView.append_line()` **开头就清 pending**，于是任何在「HEX 行未凑满
+  16 字节」时写入的行都会把那半行**静默抹掉**（TX 回显 / 系统提示 / 下一包）。
+  凡是「pending/占位块」与「正式追加」共用一个控件时，追加路径必须先结算占位块。
 - **L-259**：用户说「太高」时先量**整条带**（间隙 + 控件 + 边距），不要只改控件高度。
   另一个数字坑：`QFontMetrics.height()` 对 11 px 中文给 15（含行距），按 11 估会压出
   1.5 px 余量、看着就挤。

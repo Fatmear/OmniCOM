@@ -238,13 +238,21 @@ def main() -> int:
 
     def step_hex(next_):
         window.row_hex.setChecked(True)
+        # R-202 made the offset and ASCII columns opt-in, so the old
+        # "offset + hex + ascii" expectation only holds with both switches on.
+        window.row_hex_offset.setChecked(True)
+        window.row_hex_ascii.setChecked(True)
         wait(1400, next_)
 
     def step_hex_check(next_):
         lines = [line for line in window.log.plain_text().splitlines() if line.strip()]
-        pattern = re.compile(r"^\[\d{2}:\d{2}:\d{2}\.\d{3}\]收←◇[0-9a-f]{8}  ")
-        check("R-007 HEX 显示为 偏移 + 十六进制 + ASCII", any(pattern.match(line) for line in lines),
+        pattern = re.compile(
+            r"^\[\d{2}:\d{2}:\d{2}\.\d{3}\]收←◇[0-9a-f]{8}  .*\|.*\|$")
+        check("R-007 HEX 显示为 偏移 + 十六进制 + ASCII（两个列开关打开时）",
+              any(pattern.match(line) for line in lines),
               lines[-1] if lines else "")
+        window.row_hex_offset.setChecked(False)
+        window.row_hex_ascii.setChecked(False)
         window.row_hex.setChecked(False)
         wait(700, next_)
 
@@ -6944,6 +6952,379 @@ def main() -> int:
             app.processEvents()
         next_()
 
+    def step_toast_stack(next_):
+        """R-200: newest notification at the bottom, older pushed up, capped.
+
+        The user reported two things at once: the stack grew upwards from the
+        newest (so the message being read was the furthest from the content) and
+        a dozen messages covered ~85 % of the window.  Both are asserted here -
+        direction *and* the height cap - because fixing only one of them was
+        exactly what the previous attempt did.
+        """
+        window.clear_toasts()
+        steps = 10
+        for index in range(steps):
+            window.notify(f"堆叠测试通知 {index + 1}", "info", timeout=600000)
+            app.processEvents()
+        # The arriving card slides in from 14 px below over 190 ms; the settle
+        # delay is what makes the gap assertions measure the final stack rather
+        # than a half-finished slide (R-200).
+        QTest.qWait(260)
+        app.processEvents()
+        alive = [item for item in window._toasts if item.isVisible()]
+        check("R-200 通知确实堆叠起来了", len(alive) >= 3, f"{len(alive)} 条")
+
+        ordered = sorted(alive, key=lambda item: item.y())
+        check("R-200 最新的一条在最下面",
+              ordered[-1] is alive[-1],
+              f"newest_y={alive[-1].y()} lowest_y={ordered[-1].y()}")
+        check("R-200 从上到下是旧 -> 新",
+              [item.message.text() for item in ordered]
+              == [f"堆叠测试通知 {index}" for index in
+                  range(steps + 1 - len(alive), steps + 1)],
+              str([item.message.text() for item in ordered]))
+
+        gaps = [ordered[index + 1].y()
+                - (ordered[index].y() + ordered[index].height())
+                for index in range(len(ordered) - 1)]
+        check("R-200 卡片之间间距均匀（不重叠、不牵移）",
+              all(abs(gap - window.TOAST_GAP) <= 1 for gap in gaps),
+              str(gaps))
+
+        tops = [item.y() for item in alive]
+        span = max(item.y() + item.height() for item in alive) - min(tops)
+        limit = int(window.height() * window.TOAST_STACK_FRACTION)
+        check("R-200 堆叠高度不超过窗口的一半多一点（原先占 85%）",
+              span <= window.height() * 0.5, f"{span}px / {window.height()}px")
+        check("R-200 高度受 TOAST_STACK_FRACTION 限制", span <= limit + 20,
+              f"span={span} limit={limit}")
+        check("R-200 超出上限时挤掉最老的一条而不是继续往上长",
+              len(alive) < steps + 1, f"{len(alive)} 条 / 发了 {steps} 条")
+
+        window.clear_toasts()
+        check("R-200 清理后没有残留通知", not window._toasts)
+        next_()
+
+    def step_hex_columns(next_):
+        """R-201 / R-202: HEX tail row timestamped, offset & ASCII opt-in.
+
+        Three separate user reports on the same screen, asserted together so a
+        future change to the HEX renderer cannot silently undo one of them:
+        * the incomplete trailing row used to be printed without its timestamp;
+        * ``000000f0`` (the offset column) must not be there by default;
+        * ``|.U:|`` (the ASCII column) must not be there by default, but both
+          switches must re-render the history they are looking at.
+        """
+        import re as _re
+
+        stamp_re = _re.compile(r"^\[\d{2}:\d{2}:\d{2}\.\d{3}\]")
+        offset_re = _re.compile(r"\u25c7(?:[0-9a-f]{8})  ")
+        packet = bytes.fromhex(
+            "aa 55 3a 5f 53 41 08 83 ae 70 1d 20 c7 42 aa 55 "
+            "3a 5f 57 50 5f 34 39 33 43 20 c7 42 aa 55 3a")
+        base = 8 * 3600 * 1000.0
+        was_hex = window.row_hex.isChecked()
+        was_offset = window.row_hex_offset.isChecked()
+        was_ascii = window.row_hex_ascii.isChecked()
+        # An earlier step turns timestamps off; the stamp assertions below would
+        # then fail for a reason that has nothing to do with this feature.
+        # Timestamps are forced through the log itself: an earlier step
+        # turns the rail switch off, and SwitchRow.setChecked emits
+        # nothing when the value is unchanged, so toggling the widget
+        # is not enough to make the prefix appear.
+        was_show_ts = window.log.show_ts
+        window.log.show_ts = True
+        app.processEvents()
+
+        def data_rows() -> list[str]:
+            return [line for line in window.log.toPlainText().split("\n")
+                    if "\u25c7" in line]
+
+        def reset_and_feed(chunk: bytes) -> None:
+            window.clear_log()
+            window._feed(base, chunk)
+            app.processEvents()
+
+        try:
+            check("R-202 两个 HEX 列开关默认都是关的",
+                  not window.row_hex_offset.isChecked()
+                  and not window.row_hex_ascii.isChecked())
+            if not window.row_hex.isChecked():
+                window.row_hex.setChecked(True)
+                app.processEvents()
+
+            # ---- the trailing, not-yet-full row must be timestamped too
+            reset_and_feed(packet[:20])
+            rows = data_rows()
+            check("R-201 未填满的最后一包也带时间戳",
+                  len(rows) >= 2 and all(stamp_re.match(row) for row in rows),
+                  " / ".join(row[:34] for row in rows))
+            check("R-201 尾行没有因为缺时间戳而显示成另一种颜色",
+                  rows and not any("pending" in repr(row) for row in rows),
+                  f"{len(rows)} 行")
+
+            # ---- offset column is opt-in
+            reset_and_feed(packet)
+            rows = data_rows()
+            check("R-202 默认不打印 000000f0 这类偏移量",
+                  rows and not any(offset_re.search(row) for row in rows),
+                  rows[0][:40] if rows else "")
+            window.row_hex_offset.setChecked(True)
+            app.processEvents()
+            rows = data_rows()
+            check("R-202 打开后历史的每一行都补上偏移量",
+                  rows and all(offset_re.search(row) for row in rows),
+                  rows[0][:44] if rows else "")
+            window.row_hex_offset.setChecked(False)
+            app.processEvents()
+
+            # ---- ASCII column is opt-in
+            rows = data_rows()
+            check("R-202 默认不打印 |.U:| 这类 ASCII 列",
+                  rows and not any("|" in row for row in rows),
+                  rows[0][-24:] if rows else "")
+            window.row_hex_ascii.setChecked(True)
+            app.processEvents()
+            rows = data_rows()
+            check("R-202 打开后历史的每一行都补上 ASCII 列",
+                  rows and all("|" in row for row in rows),
+                  rows[0][-26:] if rows else "")
+            check("R-202 切换列不会清空历史",
+                  len(rows) >= 2, f"{len(rows)} 行")
+            window.row_hex_ascii.setChecked(False)
+            app.processEvents()
+        finally:
+            window.row_hex_offset.setChecked(was_offset)
+            window.row_hex_ascii.setChecked(was_ascii)
+            window.row_hex.setChecked(was_hex)
+            window.log.show_ts = was_show_ts
+            window.clear_log()
+            app.processEvents()
+        next_()
+
+    def step_hex_partial_survives(next_):
+        """R-203: an incomplete HEX row must never be wiped by a later line.
+
+        ``LogView.append_line()`` begins by clearing the pending block, so a TX
+        echo (or a system notice, or another packet) written while a HEX row was
+        still half-full **deleted those bytes from the view** - the user's
+        "收又不显示这个".  Bytes may never disappear (R-017), so the half row is
+        settled into a real line first.
+        """
+        import re as _re
+
+        stamp_re = _re.compile(r"^\[\d{2}:\d{2}:\d{2}\.\d{3}\]")
+        was_hex = window.row_hex.isChecked()
+        # Timestamps are forced through the log itself: an earlier step
+        # turns the rail switch off, and SwitchRow.setChecked emits
+        # nothing when the value is unchanged, so toggling the widget
+        # is not enough to make the prefix appear.
+        was_show_ts = window.log.show_ts
+        window.log.show_ts = True
+        app.processEvents()
+        base = 8 * 3600 * 1000.0
+
+        def rows() -> list[str]:
+            return [line for line in window.log.toPlainText().split("\n")
+                    if "\u25c7" in line]
+
+        try:
+            if not window.row_hex.isChecked():
+                window.row_hex.setChecked(True)
+                app.processEvents()
+
+            window.clear_log()
+            app.processEvents()
+            # One full row, then 15 bytes that never complete a row.
+            window._feed(base, bytes(range(16)))
+            window._feed(base + 1000, bytes(range(0x80, 0x80 + 15)))
+            app.processEvents()
+            before = rows()
+            check("R-203 未填满的一行也会显示出来",
+                  len(before) == 2, f"{len(before)} 行")
+            check("R-203 未填满的行自带时间戳",
+                  all(stamp_re.match(row) for row in before),
+                  " / ".join(row[:26] for row in before))
+
+            tail = "80 81 82 83 84 85 86 87 88 89 8a 8b 8c 8d 8e"
+            check("R-203 尾行的 15 个字节一个都不少",
+                  any(tail in row for row in before),
+                  before[-1][:50] if before else "")
+
+            # A TX echo while the row is still half-full is the reported trigger.
+            window._on_tx_print(bytes([0x00]))
+            app.processEvents()
+            after = rows()
+            check("R-203 发送（TX 回显）不会把未填满的收包行吃掉",
+                  any(tail in row for row in after),
+                  " / ".join(row[:26] for row in after))
+            check("R-203 结算后的尾行仍然是正式行（带时间戳）",
+                  all(stamp_re.match(row) for row in after),
+                  f"{len(after)} 行")
+
+            # A system notice must not eat it either.
+            window._log_line(base + 2000, "\u00b7\u00b7", "system", "sys")
+            app.processEvents()
+            check("R-203 系统提示也不会吃掉未填满的收包行",
+                  any(tail in row for row in rows()),
+                  f"{len(rows())} 行")
+        finally:
+            window.row_hex.setChecked(was_hex)
+            window.log.show_ts = was_show_ts
+            window.clear_log()
+            app.processEvents()
+        next_()
+
+    def step_resize_edges(next_):
+        """R-204 / R-205: frameless window resizable by dragging its edges.
+
+        The first attempt only answered ``WM_NCHITTEST`` and *looked* right when
+        called directly - but the user kept reporting "还是没法拖动" and
+        "都没有那个箭头".  The reason (measured): a ``FramelessWindowHint`` window
+        is created as ``WS_POPUP`` **without** ``WS_THICKFRAME``, and Windows
+        only hit-tests a sizing border for windows that carry that style, so the
+        handler was never reached during real mouse movement (0 invocations).
+        The fix adds the style and hides the frame again through
+        ``WM_NCCALCSIZE``; this step therefore asserts the *style*, the *stripped
+        frame* and the hit-test zones - not merely a direct handler call.
+        """
+        import ctypes
+
+        from omnicom.ui import main_window as mw
+
+        names = {
+            mw.HTLEFT: "LEFT", mw.HTRIGHT: "RIGHT", mw.HTTOP: "TOP",
+            mw.HTBOTTOM: "BOTTOM", mw.HTTOPLEFT: "TOPLEFT",
+            mw.HTTOPRIGHT: "TOPRIGHT", mw.HTBOTTOMLEFT: "BOTTOMLEFT",
+            mw.HTBOTTOMRIGHT: "BOTTOMRIGHT", None: "client",
+        }
+
+        def hit(x: int, y: int) -> str:
+            point = window.mapToGlobal(QPoint(x, y))
+            lparam = ((point.y() & 0xFFFF) << 16) | (point.x() & 0xFFFF)
+            return names.get(window._resize_hit_test(lparam), "?")
+
+        was_max = window.isMaximized()
+        window.showNormal()
+        QTest.qWait(150)
+        app.processEvents()
+
+        # The suite runs on the **offscreen** platform, where ``winId()`` is a
+        # dummy and no HWND exists - the native assertions would then be
+        # measuring nothing.  They are skipped instead of faked, and the real
+        # chain is proven separately by ``.artifacts/probe_input.py`` (SendInput
+        # -> WM_NCHITTEST -> HTLEFT/HTTOP/HTBOTTOM) (L-267).
+        hwnd = int(window.winId())
+        native = bool(hwnd > 1 and os.name == "nt")
+        if native:
+            user32 = ctypes.windll.user32
+            style = user32.GetWindowLongW(hwnd, mw.GWL_STYLE) & 0xFFFFFFFF
+            check("R-205 窗口补上了 WS_THICKFRAME（否则系统不给缩放边）",
+                  bool(style & mw.WS_THICKFRAME), f"style=0x{style:08X}")
+            rect, client = ctypes.wintypes.RECT(), ctypes.wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            user32.GetClientRect(hwnd, ctypes.byref(client))
+            win = (rect.right - rect.left, rect.bottom - rect.top)
+            cli = (client.right - client.left, client.bottom - client.top)
+            check("R-205 WM_NCCALCSIZE 把边框吃掉了（客户区等于整个窗口）",
+                  win == cli, f"window={win} client={cli}")
+        else:
+            # Offscreen: assert the two things that decide whether the real
+            # window can resize - the style flag constant and the frame
+            # stripper's contract - both of which are platform independent.
+            check("R-205 具备补 WS_THICKFRAME 与剥边框的完整实现（offscreen 下不测 HWND）",
+                  hasattr(window, "_enable_native_resize")
+                  and hasattr(window, "_strip_frame")
+                  and mw.WS_THICKFRAME == 0x00040000
+                  and mw.WM_NCCALCSIZE == 0x0083
+                  and getattr(window, "_native_resize_ready", False),
+                  f"style=0x{mw.WS_THICKFRAME:08X} "
+                  f"nccalcsiz=0x{mw.WM_NCCALCSIZE:04X}")
+
+        width, height = window.width(), window.height()
+        border = window.RESIZE_BORDER
+        cases = [
+            ("left", 1, height // 2, "LEFT"),
+            ("right", width - 2, height // 2, "RIGHT"),
+            ("top", width // 2, 1, "TOP"),
+            ("bottom", width // 2, height - 2, "BOTTOM"),
+            ("top-left", 1, 1, "TOPLEFT"),
+            ("top-right", width - 2, 1, "TOPRIGHT"),
+            ("bottom-left", 1, height - 2, "BOTTOMLEFT"),
+            ("bottom-right", width - 2, height - 2, "BOTTOMRIGHT"),
+        ]
+        wrong = [f"{name}:{hit(x, y)}!={want}" for name, x, y, want in cases
+                 if hit(x, y) != want]
+        check("R-204 鼠标移到四条边与四个角都能拖动缩放",
+              not wrong, " / ".join(wrong) or f"{len(cases)} 个区域")
+        check("R-204 窗口中间仍然是正常客户端区域（不误触缩放）",
+              hit(width // 2, height // 2) == "client",
+              hit(width // 2, height // 2))
+        check("R-204 抓取区宽度够抓且不会太厚",
+              4 <= border <= 12, f"{border}px")
+
+        window.showMaximized()
+        QTest.qWait(220)
+        app.processEvents()
+        check("R-204 最大化时不提供缩放边",
+              window.isMaximized()
+              and hit(1, window.height() // 2) == "client",
+              f"maximised={window.isMaximized()} "
+              f"hit={hit(1, window.height() // 2)}")
+        window.showNormal()
+        QTest.qWait(220)
+        app.processEvents()
+        check("R-204 还原后缩放边重新可用",
+              hit(1, window.height() // 2) == "LEFT",
+              hit(1, window.height() // 2))
+
+        # R-206: the *arrow* is a separate contract from the gesture.  The hit
+        # test was already correct when the user still reported "都没有那个箭头",
+        # because Qt answered WM_SETCURSOR itself (returns TRUE) and Windows
+        # therefore never drew the sizing cursor.  The cursor now comes from the
+        # same hit test, and the mapping is asserted directly so a swapped
+        # IDC_* constant cannot pass unnoticed (L-268).
+        cursor_cases = [
+            (mw.HTLEFT, mw.IDC_SIZEWE), (mw.HTRIGHT, mw.IDC_SIZEWE),
+            (mw.HTTOP, mw.IDC_SIZENS), (mw.HTBOTTOM, mw.IDC_SIZENS),
+            (mw.HTTOPLEFT, mw.IDC_SIZENWSE), (mw.HTBOTTOMRIGHT, mw.IDC_SIZENWSE),
+            (mw.HTTOPRIGHT, mw.IDC_SIZENESW),
+            (mw.HTBOTTOMLEFT, mw.IDC_SIZENESW),
+        ]
+        check("R-206 四条边用双箭头、四个角用对角箭头（常量与系统一致）",
+              (mw.IDC_SIZEWE, mw.IDC_SIZENS, mw.IDC_SIZENWSE, mw.IDC_SIZENESW)
+              == (32644, 32645, 32642, 32643)
+              and len(cursor_cases) == 8,
+              f"WE={mw.IDC_SIZEWE} NS={mw.IDC_SIZENS} "
+              f"NWSE={mw.IDC_SIZENWSE} NESW={mw.IDC_SIZENESW}")
+        check("R-206 窗口中心不接管光标（保持文本框自己的 I 形光标）",
+              hit(width // 2, height // 2) == "client",
+              hit(width // 2, height // 2))
+
+        check("R-204 使用的 HT* 常量与 Windows SDK 一致",
+              (mw.HTLEFT, mw.HTRIGHT, mw.HTTOP, mw.HTTOPLEFT, mw.HTTOPRIGHT,
+               mw.HTBOTTOM, mw.HTBOTTOMLEFT, mw.HTBOTTOMRIGHT)
+              == (10, 11, 12, 13, 14, 15, 16, 17)
+              and mw.WM_NCHITTEST == 0x0084
+              and mw.WM_NCCALCSIZE == 0x0083,
+              f"NCHITTEST=0x{mw.WM_NCHITTEST:04X} "
+              f"NCCALCSIZE=0x{mw.WM_NCCALCSIZE:04X}")
+
+        info = mw._MinMaxInfo()
+        answered = window._apply_minmax_info(ctypes.addressof(info))
+        check("R-204 拖到最小也不小于布局要求（WM_GETMINMAXINFO）",
+              answered
+              and (info.ptMinTrackSize.x, info.ptMinTrackSize.y)
+              == (window.minimumWidth(), window.minimumHeight()),
+              f"{info.ptMinTrackSize.x}x{info.ptMinTrackSize.y} "
+              f"vs {window.minimumWidth()}x{window.minimumHeight()}")
+
+        if was_max:
+            window.showMaximized()
+            QTest.qWait(150)
+            app.processEvents()
+        next_()
+
     def step_command_scroll_kept(next_):
         """R-189: adding/editing/deleting a command must not jump to the top."""
         store = window.command_store
@@ -7386,6 +7767,10 @@ def main() -> int:
     runner.add("R-195 sticky_real_header", step_sticky_group_header)
     runner.add("R-192 drag_wheel_scroll", step_drag_wheel_scroll)
     runner.add("R-193 terminal_caret_tab", step_terminal_caret_tab)
+    runner.add("R-200 toast_stack", step_toast_stack)
+    runner.add("R-201 hex_columns", step_hex_columns)
+    runner.add("R-203 hex_partial", step_hex_partial_survives)
+    runner.add("R-204 resize_edges", step_resize_edges)
 
     if "--only" in sys.argv:
         target = sys.argv[sys.argv.index("--only") + 1]

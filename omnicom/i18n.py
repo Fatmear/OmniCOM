@@ -98,6 +98,14 @@ _TABLE: dict[str, tuple[str, str]] = {
     "flow.xonxoff": ("软件 (XON/XOFF)", "Software (XON/XOFF)"),
     "rail.display": ("显示", "Display"),
     "rail.hex": ("HEX 显示", "HEX view"),
+    "rail.hex.ascii": ("HEX 右侧显示 ASCII 列", "Show the ASCII column in HEX view"),
+    "rail.hex.ascii.tip": ("打开后每行右侧追加 |.U:| 这样的可打印字符列；默认关闭",
+                           "Appends a printable column such as |.U:| to each row; "
+                           "off by default"),
+    "rail.hex.offset": ("HEX 行首显示偏移量", "Show the byte offset in HEX view"),
+    "rail.hex.offset.tip": ("打开后每行以 000000f0 这样的地址开头；默认关闭",
+                            "Prefixes each row with an address such as 000000f0; "
+                            "off by default"),
     "rail.ts": ("时间戳（毫秒）", "Timestamps (ms)"),
     "rail.ctrl": ("显示 \\r \\n 等控制字符", "Show \\r \\n and other control chars"),
     "rail.ctrl.tip": ("打开后把不可见字符按 \\r \\n \\0 \\xNN 显示为文本",
@@ -142,6 +150,7 @@ _TABLE: dict[str, tuple[str, str]] = {
                       "Empty the log window (the capture file is untouched)"),
     "log.save.tip": ("把当前日志内容另存为文本文件", "Save the current log text to a file"),
     "log.clear": ("清空", "Clear"),
+    "log.reflow": ("HEX 列已切换，历史按新列重排", "HEX columns changed; history re-rendered"),
     "log.save": ("保存视图", "Save view"),
     # Buttons in the rail act on the *window*, not on the capture file, so they
     # say so (R-102).  ``log.clear`` / ``log.save`` stay: the log itself prints

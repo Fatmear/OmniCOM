@@ -1327,10 +1327,31 @@ class Toast(QWidget):
 
     def play_in(self) -> None:
         """Slide up from a few pixels below the final position."""
-        self._home = self.pos()
+        if self._home is None:
+            self._home = QPoint(self.pos())
         self._slide.stop()
         self._slide.setStartValue(self._home + QPoint(0, 14))
         self._slide.setEndValue(self._home)
+        self._slide.start()
+
+    def move_to(self, point: QPoint, animate: bool = True) -> None:
+        """Move to ``point``; animated when a newer toast pushes this one up.
+
+        Pushing is part of the stacking contract (R-200): a new toast appears at
+        the bottom of the stack and every older one slides up by its height, so
+        the newest message is always the lowest and easiest to reach.
+
+        ``_home`` always holds the *target*, never ``pos()``: the animation is
+        asynchronous, so a stack rebuilt twice in quick succession would
+        otherwise read a half-finished position and drift (measured, L-261).
+        """
+        self._home = QPoint(point)
+        self._slide.stop()
+        if not animate or self.pos() == point:
+            self.move(point)
+            return
+        self._slide.setStartValue(self.pos())
+        self._slide.setEndValue(point)
         self._slide.start()
 
     def dismiss(self) -> None:
