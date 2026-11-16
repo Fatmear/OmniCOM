@@ -276,3 +276,37 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 | L-267 | 只应答 `WM_NCHITTEST` 完全没用：真实鼠标移动时处理器一次都不执行 | FIXED-verified | 根因是**窗口样式**：`Qt.FramelessWindowHint` 的窗口是 `WS_POPUP`，**没有 `WS_THICKFRAME`**，而 Windows 只对带该样式的窗口做缩放命中测试。诊断方法很关键：先用 `SendMessage(hwnd, WM_NCHITTEST, …)` 测（能得到正确答案，**假阳性**），再用 `SendInput` 模拟真实鼠标移动并统计处理器调用次数 —— 真实路径是 **0 次**。修法：`SetWindowLongW(GWL_STYLE | WS_THICKFRAME)` + `SetWindowPos(SWP_FRAMECHANGED)`，然后用 `WM_NCCALCSIZE` 把客户区撑满整个窗口，外观仍无边框。教训：**别用 SendMessage 验证消息处理，它绕过了真实输入路径。** |
 | L-268 | 命中已正确，但鼠标移到边缘**没有缩放箭头** | FIXED-verified | `WM_SETCURSOR` 才是决定光标形状的消息，而 **Qt 自己应答它并返回 TRUE**，所以 Windows 没机会按 `HT*` 画箭头（实测 `SendMessage(WM_SETCURSOR)` 返回 1）。两个连环坑：① 想让默认处理器画的时候，形状全错（左边给 `SIZENWSE`），因为默认处理器用的是系统缓存的区域，不是本窗口算的；② `WM_SETCURSOR` 的 `lParam` **不是坐标** —— 低字是 `HT*` 码、高字是鼠标消息，当成点去读会让所有位置都落在同一个角（表现为「每条边都是 NWSE 箭头」）。修法：在 `WM_SETCURSOR` 里用 `GetCursorPos()` 取真实位置，喂给与拖拽**同一个** `_resize_hit_test()`，再由 `SetCursor(LoadCursor(IDC_*))` 设定；`IDC_SIZEWE=32644 / SIZENS=32645 / SIZENWSE=32642 / SIZENESW=32643`（逐个 `LoadCursor` 实测过）。 |
 | L-269 | R-204 第一次的测试是**假阳性**，害得问题被判定为已修复 | FIXED-verified | 最初的断言只直接调用 `window._resize_hit_test()`，那当然返回正确答案 —— 但用户实测仍然没有箭头、拖不动。真正该断言的是**原生链路**：窗口样式含 `WS_THICKFRAME`、客户区等于窗口（边框被剥）、`SendInput` 后处理器被调用、光标句柄确实是对应的 `IDC_*`。现在 R-205/R-206 覆盖前三项，光标映射用常量断言 + 真实窗口探针证明。**「函数返回对」不等于「用户能看到效果」**，验收要站在用户那一侧。 |
+
+## L-270 行式控制台丢了光标移动，所以"左右键会删字符"
+- **症状**：用户在终端里按左右键，字符被删除（不是移动）。
+- **根因**：旧 `TerminalView` 是**行式**控制台——`\r` 回列 0，`\n` 开新行，
+  **每一个 CSI 光标移动都被吞掉**（注释写的就是 "everything else in a CSI
+  sequence is swallowed"）。设备（如 `sh` 的行编辑器）回显 `ESC[D` 时，本地
+  `_col` 没动，下一个字符写到已占用的格子，`_write` 便 `cursor.deleteChar()`。
+- **修法**：换成真正的**网格模型**（`omnicom/ui/vt100.py`）：`Screen` 持有
+  `rows x cols` 的 `Cell` 缓冲 + 光标 + 样式 + 滚动区域 + 回滚，`TerminalView`
+  只负责画。输入只发设备，屏幕由回显驱动，与硬件终端一致。
+- **判据**：`ESC[D` 两次后写 `X`，必须得到 `aXc`，不是 `ac`。
+
+## L-271 终端接收一批 1100 字节曾要 6.8 ms，两处分配是主因
+- `_scroll_up()` 每换行都 `[Cell() for _ in range(cols)]`：一次 2 400 行突发
+  要新建约 19 万个 dataclass，占 pitch。改成**行池**（`_spare_rows`）原地
+  `blank()` 复用；`Cell` 加 `slots=True` 去掉 `__dict__`；`cell_width()` 加
+  `lru_cache`（每个可打印字符都调，`unicodedata` 两次查表）。
+- 绘制同理：每格 `QFont(self._font)` + `QPen` 新建，一屏约 2 000 格。改为
+  `_font_for(style)` 缓存 bold/italic 四种组合，颜色也 `_colours` 缓存。
+- 实测：解析 6.8 ms/批 → 4.5 ms/批，`feed+repaint` median 40.6 → 26.3 ms。
+
+## L-272 `styled.widget.style()` 可能为 None，行直接不画
+- `SearchDelegate.paint()` 里 `styled.widget.style().drawControl(...)` 没有
+  判空。`QStyleOptionViewItem.widget` 是**可空**的，一旦为空就抛
+  `AttributeError: 'QWidgetItem' object has no attribute 'drawControl'`，
+  整行不绘制且异常被 Qt 吞掉（R-001 整体失败里唯一的具体线索）。
+- 修法：`host is not None and hasattr(host.style(), "drawControl")` 才调用。
+
+## L-273 性能门禁（R-054/R-055）会被整机负载带偏，必须 A/B 对照
+- 本机同时跑 `ui_selftest`（8 万次检查量级）时，`log_scroll` / `rx_batch` 的
+  p95 常在 40-105 ms 之间跳；`R-055` 心跳还会出现 200-500 ms 停顿。
+- **判定方法**：`git stash` 掉本次改动再跑同一项，基线若同样超标，就不是本次
+  改动引入的。实测基线 `rx_batch` p95 68.0 ms、`R-055` max 318 ms，与改动后
+  同量级 ⇒ 环境问题，不得据此改预算（预算 40 ms / 200 ms 保持不动）。

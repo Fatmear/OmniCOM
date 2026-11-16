@@ -6632,8 +6632,10 @@ def main() -> int:
         # platform often never makes the widget the active one (L-256).
         def caret_census() -> tuple[int, int]:
             """``(inked pixels, pixels close to the solid ink colour)``."""
-            view.viewport().repaint()
-            image = view.viewport().grab().toImage()
+            # The terminal paints its own grid (R-207), so it has no
+            # ``viewport()`` - the widget *is* the surface.
+            view.repaint()
+            image = view.grab().toImage()
             solid_ink = QColor(theme.TERM_INK)
             inked = dense = 0
             for dx in range(rect.width() + 1):
@@ -6686,6 +6688,120 @@ def main() -> int:
               b"\t" in sent and b"\x1b[Z" in sent and b"\t" != b"\x1b[Z]",
               str(sent))
         view.reset()
+        window.switch_page("terminal")
+        app.processEvents()
+        next_()
+
+    def step_terminal_grid(next_):
+        """R-207/R-208/R-209: the grid model is what the window actually runs.
+
+        The user's report was 左右键移动会删除字符: the old view was a *line*
+        console that swallowed every CSI cursor movement, so a device echoing
+        ``ESC[D`` left the local column behind and the next character landed on
+        an occupied cell (and ``deleteChar()`` ate it).  Driving the real
+        ``window.console.view`` is the only way to prove the swap happened.
+        """
+        window.switch_page("console")
+        app.processEvents()
+        view = window.console.view
+        view.reset()
+        view.setFocus()
+        view.feed(b"login: root\r\n")
+        view.feed(b"abc")
+        row = view.screen.row_text(view.screen.cursor_row)
+        check("R-207 终端把回显写进网格（不是追加到文档）", row.endswith("abc"), repr(row))
+
+        # The single assertion that reproduces the bug: two left arrows, then a
+        # character.  A line console produced "ac"; a grid produces "aXc".
+        view.feed(b"\x1b[D\x1b[D")
+        check("R-207 左移序列真的移动了屏幕光标",
+              view.screen.cursor_col == len(row) - 2,
+              f"col={view.screen.cursor_col} row={row!r}")
+        view.feed(b"X")
+        row = view.screen.row_text(view.screen.cursor_row)
+        check("R-207 左右键移动后写字符不删除原字符", "aXc" in row, repr(row))
+        check("R-207 终端文本里不残留 ESC 字节",
+              "\x1b" not in view.toPlainText(), repr(view.toPlainText()[-40:]))
+
+        # R-208: the escape sequences a serial shell actually emits.
+        view.reset()
+        view.feed(b"\x1b[2J\x1b[H")
+        view.feed(b"\x1b[2;5Hmiddle")
+        check("R-208 CUP 定位到指定行列",
+              view.screen.cell(1, 4).char == "m",
+              f"{(view.screen.cursor_row, view.screen.cursor_col)} "
+              f"{view.screen.row_text(1)!r}")
+        view.feed(b"\x1b[31mR\x1b[0m")
+        # Before SGR the cell inherited the default ink; after it the cell must
+        # carry the palette red.  Comparing against the *default* is what makes
+        # this a real assertion rather than "some string differs".
+        from omnicom.ui.vt100 import DEFAULT_FG
+
+        check("R-208 SGR 只改颜色不改字符",
+              view.screen.cell(1, 10).char == "R"
+              and view.screen.cell(1, 10).style.fg.upper() != DEFAULT_FG.upper(),
+              f"{view.screen.cell(1, 10).char!r} {view.screen.cell(1, 10).style.fg}")
+        view.feed(b"\r\n\x1b[K")
+        view.feed(b"\x1b[1;1Hkeep\x1b[4;1Hzap\x1b[4;1H\x1b[1K\x1b[2J")
+        check("R-208 清屏后屏幕是空的但网格尺寸不变",
+              view.screen.row_text(0).strip() == ""
+              and view.screen.cols >= 20 and view.screen.rows >= 4,
+              f"{view.screen.rows}x{view.screen.cols} {view.toPlainText()[:30]!r}")
+
+        replies: list[bytes] = []
+        view.keyBytes.connect(replies.append)
+        try:
+            view.feed(b"\x1b[6n")
+            app.processEvents()
+        finally:
+            view.keyBytes.disconnect(replies.append)
+        check("R-208 设备状态查询 ESC[6n 有应答",
+              any(payload.endswith(b"R") for payload in replies), str(replies))
+
+        # R-209: mouse selection over the painted grid, and a real copy.
+        from PySide6.QtGui import QMouseEvent
+
+        view.reset()
+        view.feed(b"copy me please\r\n")
+        app.processEvents()
+        top = view.PAD_Y + 2
+        start = QPoint(view.PAD_X + 1, top)
+        end = QPoint(view.PAD_X + int(view._cell_w * 8), top)
+        for kind, point, held in (
+                (QMouseEvent.MouseButtonPress, start, Qt.LeftButton),
+                (QMouseEvent.MouseMove, end, Qt.LeftButton),
+                (QMouseEvent.MouseButtonRelease, end, Qt.NoButton)):
+            app.sendEvent(view, QMouseEvent(kind, point, point, Qt.LeftButton,
+                                            held, Qt.NoModifier))
+        app.processEvents()
+        check("R-209 鼠标拖选能选中屏幕上的文字",
+              view.has_selection() and "copy me" in view.selected_text(),
+              repr(view.selected_text()[:30]))
+        QApplication.clipboard().clear()
+        check("R-209 拖选后复制真的进了剪贴板",
+              view.copy_selection() and "copy me" in QApplication.clipboard().text(),
+              QApplication.clipboard().text()[:30])
+
+        view.reset()
+        view.feed(b"first line\r\nsecond line\r\n")
+        app.processEvents()
+        app.sendEvent(view, QMouseEvent(QMouseEvent.MouseButtonDblClick,
+                                        QPoint(view.PAD_X + 1, view.PAD_Y + 2),
+                                        QPoint(view.PAD_X + 1, view.PAD_Y + 2),
+                                        Qt.LeftButton, Qt.LeftButton,
+                                        Qt.NoModifier))
+        app.processEvents()
+        check("R-209 双击选中整行",
+              "first line" in view.selected_text(), repr(view.selected_text()[:30]))
+
+        view.selectAll()
+        check("R-209 全选覆盖整屏文字",
+              "second line" in view.selected_text()
+              and "first line" in view.selected_text(),
+              repr(view.selected_text()[:40]))
+
+        view.reset()
+        QApplication.clipboard().clear()
         window.switch_page("terminal")
         app.processEvents()
         next_()
@@ -7767,6 +7883,7 @@ def main() -> int:
     runner.add("R-195 sticky_real_header", step_sticky_group_header)
     runner.add("R-192 drag_wheel_scroll", step_drag_wheel_scroll)
     runner.add("R-193 terminal_caret_tab", step_terminal_caret_tab)
+    runner.add("R-207 terminal_grid", step_terminal_grid)
     runner.add("R-200 toast_stack", step_toast_stack)
     runner.add("R-201 hex_columns", step_hex_columns)
     runner.add("R-203 hex_partial", step_hex_partial_survives)

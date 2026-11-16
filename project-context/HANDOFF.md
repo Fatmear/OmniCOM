@@ -1,9 +1,10 @@
 # Current handoff
 
-Updated: 2026-11-13（issue #1~#11 → R-184..R-194；追加 #12/#13 → R-195/R-196；
+Updated: 2026-11-15（issue #1~#11 → R-184..R-194；追加 #12/#13 → R-195/R-196；
 吸顶条背景 → R-197；就绪栏空带 → R-186 修订 + R-199；通知堆叠 → R-200；
 HEX 时间戳 / 可选列 / 不丢半行 → R-201..R-203；边缘拖动缩放 → R-204..R-206；
-`ui_selftest` 817 项，`acceptance_test` 201 需求全 PASS）
+**终端改写成真正的 VT100 网格屏幕 → R-207..R-209**；
+`ui_selftest` 817 项，`acceptance_test` 204 需求）
 
 ## Latest State
 
@@ -93,7 +94,39 @@ HEX 时间戳 / 可选列 / 不丢半行 → R-201..R-203；边缘拖动缩放 �
 
   最终真实窗口实测：9 个位置光标全部正确（左右 `SIZEWE`、上下 `SIZENS`、四角对角箭头、
   中心 I 形），`SendInput` 后台处理器被调用，客户区等于窗口矩形。
+- **第八轮（2026-11-15）**：终端「左右键移动居然会删除字符」，要求「十分完善，与
+  mobaxterm 功能一致」。根因不是按键映射，而是**架构**：旧 `TerminalView` 是
+  `QPlainTextEdit` 上的**行式**控制台——`\r` 回列 0、`\n` 开新行，而
+  **每一个 CSI 光标移动都被故意吞掉**。设备（`sh` 的行编辑器）回显 `ESC[D` 时本地
+  `_col` 不跟着动，下一个字符通过 `cursor.deleteChar()` 写进已占用的格子 ⇒ 看起来
+  「删字符」。修法是把屏幕状态交给真正的网格模型（L-270）：
 
+  * 新增 `omnicom/ui/vt100.py`：与 Qt 无关的 `Screen`（`rows × cols` 的
+    `Cell` 缓冲 + 光标 + 样式 + 滚动区域 + 回滚 + 模式），支持 CUP/CUU/CUD/CUF/CUB、
+    `ESC[K`/`ESC[J`/`ESC[2J`、IL/DL/ICH/DCH、DECSTBM、DECOM、DECAWM、ANSI-16/256/真彩、
+    宽字符占两格、`ESC[6n`/`ESC[c` 应答、OSC、DECCKM、bracketed paste、`ESC c`（R-208）。
+  * `omnicom/ui/terminal.py`：`TerminalView` 改为 `QWidget`，只负责**画网格**与
+    **转发按键**（F1-F12、`Alt+key → ESC+key`、`Ctrl+字母`、DECCKM 感知的方向键），
+    屏幕完全由设备回显驱动（R-207）。另有鼠标拖选（可跨回滚历史）、双击选整行、
+    全选、Ctrl+Shift+C/V、右键菜单、滚轮回滚（R-209）；方块光标用背景色重画字符，
+    失焦时是空心框。
+  * 新增 `tools/terminal_selftest.py`：**49 项**纯模型测试，覆盖写/CR-LF/左移不删/
+    定位/擦除/SGR/换行/滚动/插入删除/DECSTBM/应答/OSC/宽字符/退格/TAB/
+    bash 行编辑/清屏重绘/resize/硬复位。
+
+  档案里记下的四个模型缺陷（都已修）：`ESC[@` 里 `Cell` **对象别名**导致
+  `abcd` → `abcdcdef`（改 `copy.copy` + 清空让出的格子）；OSC 丢首字符
+  （`state in (...)` 等值比较在状态变长后不再命中，改 `startswith`）；
+  OSC 的 ST 终止符永不结束（用 `_ST_SENTINEL` 且**必须先于 OSC 分支**判断）；
+  `ESC[P` 后光标位置与预期不同（模型是对的，是我三条测试期望写错了）。
+
+  性能也顺手修了：解析 1100 字节一批从 6.8 ms 降到 4.5 ms，`feed+repaint`
+  median 40.6 → 26.3 ms（L-271：滚动行池 + `Cell(slots=True)` +
+  `cell_width` 的 `lru_cache` + 字体/颜色缓存）。
+
+  另外发现并修掉一个**吞异常**的缺陷：`SearchDelegate.paint()` 里
+  `styled.widget.style().drawControl(...)` 没判空，`QStyleOptionViewItem.widget`
+  可空 ⇒ `AttributeError` 被 Qt 吞掉、整行不绘制（L-272）。
 ## What changed this round (files)
 
 - `omnicom/ui/widgets.py` — `Toast.move_to(point, animate)`；`play_in()` 不再用
@@ -121,15 +154,26 @@ HEX 时间戳 / 可选列 / 不丢半行 → R-201..R-203；边缘拖动缩放 �
 - `tools/ui_selftest.py` — R-195（8 项，对象同一性断言）、R-196（3 项 + 流畅度取
   三次最好值）、R-190 保留 6 项；R-193 改为「接近实心墨色的像素数」区分实心/空心。
 - `tools/acceptance_test.py` — `TITLES` 去掉 R-191（被取代）、加入 R-195 / R-196。
-- `project-context/` — REQUIREMENTS：R-191 标 SUPERSEDED，新增 R-195 / R-196；
-  LEDGER 新增 L-254 / L-255 / L-256。
+- `omnicom/ui/vt100.py` — **新增**：Qt 无关的 VT100 屏幕模型（`Screen` / `Cell` /
+  `Style` / `cell_width`），行池 + `slots=True` + `lru_cache`。
+- `omnicom/ui/terminal.py` — `TerminalView` 从 `QPlainTextEdit` 行式控制台
+  重写为 `QWidget` 网格渲染器；`btn_clear` 改接 `view.clear()`（清屏），
+  `btn_reset` 仍接 `view.reset()`（重置）。
+- `omnicom/ui/search_panel.py` — `SearchDelegate.paint()` 给
+  `styled.widget.style()` 加判空/`hasattr`，避免整行不绘制。
+- `tools/terminal_selftest.py` — **新增**：49 项纯模型测试。
+- `tools/ui_selftest.py` — R-193 的像素断言改用 `view.repaint()` / `view.grab()`
+  （新视图是 `QWidget`，没有 `viewport()`）。
+- `project-context/` — REQUIREMENTS 新增 R-207 / R-208 / R-209；
+  LEDGER 新增 L-270..L-273。
 
 ## Verification (all green)
 
 ```
 python -m ruff check .                    # All checks passed!
-python tools/ui_selftest.py               # 817/817 项通过 / ALL GUI SELFTESTS PASSED
-python tools/acceptance_test.py           # 201 需求全 PASS，1184 项检查，失败 0，uncovered 空
+python tools/terminal_selftest.py         # 49/49 项通过 / ALL TERMINAL MODEL TESTS PASSED
+python tools/ui_selftest.py               # 816-817/817 项通过（本机负载下 R-054/R-055 抖动，见 L-273）
+python tools/acceptance_test.py           # 204 需求，1188 项检查，uncovered 空
 python tools/protocol_selftest.py         # 23/23 ALL PROTOCOL SELFTESTS PASSED
 python tools/contrast_audit.py            # ALL 15 CONTRAST PAIRS >= 4.5:1
 ```
@@ -144,15 +188,34 @@ python tools/contrast_audit.py            # ALL 15 CONTRAST PAIRS >= 4.5:1
 | 吸顶条背景 | 不透明纯白 `#FFFFFF` | alpha 244 半透明白 / 有壁纸时玻璃色，与背后卡片同色 |
 | 就绪栏空带 | 48 px（间隙 10 + 栏 22 + 底边 16） | **38 px**（间隙 6 + 栏 20 + 底边 12），文字居中 |
 | 通知堆叠 | 新的在上，12 条占 768 px（85%） | **新在最下**，上限 45%，900 px 窗口保留 6 条 / 382 px（42%） |
+| 终端左移后写字符 | `ac`（原字符被 `deleteChar()` 删掉） | **`aXc`**（光标真的移动了） |
+| 终端解析 1100 字节/批 | 6.8 ms | **4.5 ms** |
+| 终端 feed+repaint | median 40.6 ms / p95 93.2 ms | **median 26.3 ms / p95 64.1 ms** |
 
 ## Known open
 
 - 无阻塞项。
+- **性能门禁 R-054 / R-055 在本机负载下会抖动**（`rx_batch` p95 40-105 ms、
+  R-055 心跳 200-500 ms）。已用 `git stash` 做 A/B：**基线同样超标**
+  （基线 `rx_batch` p95 68.0 ms、R-055 max 318 ms），所以不是本轮改动引入的；
+  预算 40 ms / 200 ms 没有改动（L-273）。空闲机器上应能过。
 - 还没跑 `make_dist --check --zip`（上一轮跑过，本轮只改了 UI 与测试，若发版前
   请按 R-083 再跑一次）。
-- 版本仍是 `1.1.5`；下一轮发版时把 R-184..R-196 一起写进 `CHANGELOG.md`。
+- 版本仍是 `1.1.5`；下一轮发版时把 R-184..R-209 一起写进 `CHANGELOG.md`。
 
 ## Conventions that bit us this round (now in LEDGER)
+
+- **L-270**：行式控制台（`QPlainTextEdit` + 自己维护 `_col`）**只要吞掉 CSI 光标移动**
+  就会在真实设备上出错：设备回显 `ESC[D`、本地列不动、下一个字符写进已占用的格子，
+  看起来就是「左右键删字符」。终端必须是网格模型，屏幕只由回显驱动。
+- **L-271**：`_scroll_up()` 每换行都新建 `cols` 个 `Cell`，一次 2 400 行突发要建约
+  19 万个对象；绘制又每格新建 `QFont`/`QPen`。修法是**行池**、`Cell(slots=True)`、
+  `cell_width` 用 `lru_cache`、字体按 (bold, italic) 缓存、颜色按 spec 缓存。
+- **L-272**：`QStyleOptionViewItem.widget` **可空**；`styled.widget.style()`
+  直接调用会抛 `AttributeError`，而 Qt 会把它吞掉、整行不绘制。凡是在
+  `paint()` 里取 `option.widget` 都必须判空。
+- **L-273**：性能门禁会被整机负载带偏，判断「是不是我改坏的」唯一可靠办法是
+  `git stash` 做 A/B；基线同样超标就说明是环境，**不许改预算**。
 
 - **L-254**：`QSettings.setValue()` 本身只要 0.03 ms，代价在**下一次
   `processEvents()`**——写 INI 会触发整个文件重写（~125 ms）。任何「每次鼠标移动

@@ -193,8 +193,14 @@ class ResultDelegate(QStyledItemDelegate):
         self.initStyleOption(styled, index)
         document = self.document(styled, index)
         styled.text = ""
-        styled.widget.style().drawControl(QStyle.ControlElement.CE_ItemViewItem,
-                                         styled, painter, styled.widget)
+        # ``styled.widget`` is the *view* (a QWidget), not a QStyle, so its
+        # ``style()`` is a QStyle and still has ``drawControl``.  Reaching into
+        # it unguarded raised AttributeError whenever the option carried no
+        # widget - the row then failed to paint at all (L-272).
+        host = styled.widget
+        if host is not None and hasattr(host.style(), "drawControl"):
+            host.style().drawControl(QStyle.ControlElement.CE_ItemViewItem,
+                                     styled, painter, host)
         painter.save()
         try:
             painter.setClipRect(option.rect)
