@@ -1,10 +1,11 @@
 # Current handoff
 
-Updated: 2026-11-15（issue #1~#11 → R-184..R-194；追加 #12/#13 → R-195/R-196；
+Updated: 2026-11-17（issue #1~#11 → R-184..R-194；追加 #12/#13 → R-195/R-196；
 吸顶条背景 → R-197；就绪栏空带 → R-186 修订 + R-199；通知堆叠 → R-200；
 HEX 时间戳 / 可选列 / 不丢半行 → R-201..R-203；边缘拖动缩放 → R-204..R-206；
-**终端改写成真正的 VT100 网格屏幕 → R-207..R-209**；
-`ui_selftest` 817 项，`acceptance_test` 204 需求）
+终端改写成真正的 VT100 网格屏幕 → R-207..R-209；
+**终端行内任意位置选块复制（与 Linux 终端一致）→ R-210**；
+`ui_selftest` 840 项，`acceptance_test` 205 需求 / 1211 项检查全 PASS）
 
 ## Latest State
 
@@ -127,6 +128,30 @@ HEX 时间戳 / 可选列 / 不丢半行 → R-201..R-203；边缘拖动缩放 �
   另外发现并修掉一个**吞异常**的缺陷：`SearchDelegate.paint()` 里
   `styled.widget.style().drawControl(...)` 没判空，`QStyleOptionViewItem.widget`
   可空 ⇒ `AttributeError` 被 Qt 吞掉、整行不绘制（L-272）。
+
+- **第九轮（2026-11-17）**：用户反馈「终端模式不支持我复制单行内的任意位置，现在只能
+  复制整行，要求和 linux 终端一致，所有功能」。探针一量就分裂成两个独立缺陷：
+
+  1. **显示错了，复制其实是对的。** 拖第 3~6 列，剪贴板拿到 `'3456'` 完全正确，但
+     屏幕上的高亮是 **x=11..880（通栏）** —— `_paint_row()` 用
+     `_row_in_selection()` 判断"这行在不在范围内"，然后 `fillRect()` 铺满整行宽度。
+     用户看到的是一条整行高亮，自然会判断"只能复制整行"。
+     → 改成 `_row_selection_cols()` 返回 `(first, last)` **列区间**，并且让
+     `selected_text()` 与绘制**共用这个函数**，两者从此不可能不一致（L-274）。
+  2. **手势也错了。** `mouseReleaseEvent()` 无条件把 `_sel_active` 写成松手位置：
+     双击选中的词在松手瞬间被压回一个格子；`Shift+点击` 因为没有锚点退化成新的单格
+     选区，再被"空点击清空"逻辑抹掉。→ 按 `_sel_mode`（`char`/`word`/`line`/
+     `extend`）分别处理 release，并用 `_caret_cell` 记住上一次落点（xterm 行为）。
+
+  顺带把与 Linux 终端不一致的功能补齐（R-210）：双击选**词**（原来是整行，那是三击
+  的语义）、三击选整行、Shift+点击扩选、拖出边缘自动滚动、宽字符端点对齐、
+  行尾填充空格不复制。键盘侧补了 Shift+PageUp/PageDown 回滚、Ctrl+Backspace 删词、
+  Ctrl+Space 发 NUL、Shift+Insert 粘贴。
+
+  Qt 的两个坑：**没有三击事件**（第三次点击是普通 press，要自己数），而**双击的
+  press 会先于 `mouseDoubleClickEvent` 到达** ⇒ 词选必须在 press 里就完成，否则
+  紧跟其后的 `Release` 会把它打回一格（L-276）。
+
 ## What changed this round (files)
 
 - `omnicom/ui/widgets.py` — `Toast.move_to(point, animate)`；`play_in()` 不再用
@@ -164,8 +189,15 @@ HEX 时间戳 / 可选列 / 不丢半行 → R-201..R-203；边缘拖动缩放 �
 - `tools/terminal_selftest.py` — **新增**：49 项纯模型测试。
 - `tools/ui_selftest.py` — R-193 的像素断言改用 `view.repaint()` / `view.grab()`
   （新视图是 `QWidget`，没有 `viewport()`）。
-- `project-context/` — REQUIREMENTS 新增 R-207 / R-208 / R-209；
-  LEDGER 新增 L-270..L-273。
+- `omnicom/ui/terminal.py` — 选区重做：`_row_selection_cols()` / `_snap_cols()` /
+  `_word_spans()` / `_select_word()` / `_select_line()` / `_count_click()` /
+  `_caret_cell` / `_autoscroll`；`_paint_row()` 按列区间填色；
+  `selected_text()` 与绘制共用同一区间函数；`reset()` 清空全部选区状态。
+- `tools/ui_selftest.py` — R-209 重写（原「双击选中整行」断言与新行为冲突）
+  + 新增 R-210（8 项），共 23 项，全部走真实 `QMouseEvent`。
+- `tools/acceptance_test.py` — `TITLES` 新增 R-210，R-209 描述改为「双击选词/三击选行」。
+- `project-context/` — REQUIREMENTS 新增 R-207 / R-208 / R-209 / R-210
+  （R-209 去掉「双击选整行」）；LEDGER 新增 L-270..L-276。
 
 ## Verification (all green)
 
@@ -191,19 +223,36 @@ python tools/contrast_audit.py            # ALL 15 CONTRAST PAIRS >= 4.5:1
 | 终端左移后写字符 | `ac`（原字符被 `deleteChar()` 删掉） | **`aXc`**（光标真的移动了） |
 | 终端解析 1100 字节/批 | 6.8 ms | **4.5 ms** |
 | 终端 feed+repaint | median 40.6 ms / p95 93.2 ms | **median 26.3 ms / p95 64.1 ms** |
+| 单行内拖 3~6 列 | 高亮 x=11..880（通栏），看着像整行 | **x=50..100，宽度 == 4×cell_w** |
+| 双击 | 选中整行 | **选中词**（`1024`），三击才选整行 |
 
 ## Known open
 
 - 无阻塞项。
-- **性能门禁 R-054 / R-055 在本机负载下会抖动**（`rx_batch` p95 40-105 ms、
-  R-055 心跳 200-500 ms）。已用 `git stash` 做 A/B：**基线同样超标**
-  （基线 `rx_batch` p95 68.0 ms、R-055 max 318 ms），所以不是本轮改动引入的；
-  预算 40 ms / 200 ms 没有改动（L-273）。空闲机器上应能过。
+- **R-055 在本机稳定失败（不是回归）**。各跑 4 次的严格 A/B：新版
+  `295/333/932/1047 ms`、把终端整份 stash 掉的基线 `305/339/305/385 ms` ——
+  **基线也 0/4 通过**。插桩进一步证明：12 次开关期间 `TerminalView.feed`
+  被调用 **0 次**、`paintEvent` **0 次**，停顿与终端无关（L-277）。
+  ⚠ 教训：我一开始只跑了一次基线拿到 148 ms PASS，差点误判成自己引入的回归
+  ——**时序类指标单次采样没有说服力**。预算 40 ms / 200 ms 都不动。
 - 还没跑 `make_dist --check --zip`（上一轮跑过，本轮只改了 UI 与测试，若发版前
   请按 R-083 再跑一次）。
-- 版本仍是 `1.1.5`；下一轮发版时把 R-184..R-209 一起写进 `CHANGELOG.md`。
+- 版本仍是 `1.1.5`；下一轮发版时把 R-184..R-210 一起写进 `CHANGELOG.md`。
 
 ## Conventions that bit us this round (now in LEDGER)
+
+- **L-274**：终端「只能复制整行」是**显示与手势两个独立缺陷**，复制本身是对的。
+  高亮必须按**列区间**画，并且与 `selected_text()` **共用同一个区间函数**——
+  各算一遍迟早会不一致。手势要按 `_sel_mode`（`char`/`word`/`line`/`extend`）
+  分别处理 `Release`。
+- **L-275**：选区的四个一致性细节：宽字符端点要向外扩到整字边界（否则复制文本
+  静默少字）；行尾要 `rstrip()`（终端每行补空格到整宽），但**不能** strip 左侧；
+  反向拖选要靠 `min/max` 归一；中间行不能 `.strip()`，否则多行复制的缩进会丢。
+- **L-276**：Qt 的事件顺序是 `Press → Release → DblClick → Release`，所以
+  `Release` 里无条件改写 `_sel_active` 会把双击选好的词打回一个格子。
+  而且 **Qt 没有三击事件**，第三次点击是普通 `Press`，要自己按时间窗+4 px 容差数。
+- **L-277**：时序类门禁（R-055 心跳停顿）单次 `git stash` A/B **会骗人**。
+  正确做法是各跑多次比分布 + 插桩确认代码路径是否真被执行。实测基线也 0/4 通过。
 
 - **L-270**：行式控制台（`QPlainTextEdit` + 自己维护 `_col`）**只要吞掉 CSI 光标移动**
   就会在真实设备上出错：设备回显 `ESC[D`、本地列不动、下一个字符写进已占用的格子，

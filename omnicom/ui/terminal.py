@@ -20,6 +20,8 @@ device's own echo drives the screen, exactly like a hardware terminal.
 
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
@@ -59,6 +61,8 @@ class TerminalView(QWidget):
     #: Pixels of padding inside the card, so text does not touch the border.
     PAD_X = 10
     PAD_Y = 6
+    #: Extra characters xterm counts as part of a word on double click.
+    WORD_CHARS = "_-./\\:@%+=~$"
 
     def __init__(self, parent=None, enter: bytes = b"\r") -> None:
         super().__init__(parent)
@@ -82,6 +86,21 @@ class TerminalView(QWidget):
         self._colours: dict[str, QColor] = {}
         self._sel_anchor: tuple[int, int] | None = None
         self._sel_active: tuple[int, int] | None = None
+        #: "char" (drag), "word" (double click) or "line" (triple click).
+        self._sel_mode = "char"
+        #: Cell the user double-clicked; dragging grows from here.
+        self._word_origin: tuple[int, int] | None = None
+        #: Where the last plain click landed, so Shift+click can extend from it
+        #: even after the click cleared the selection (xterm behaviour).
+        self._caret_cell: tuple[int, int] | None = None
+        #: Triple click has no Qt event, so consecutive presses are counted.
+        self._last_click: tuple[float, float, float] | None = None
+        self._click_count = 0
+        #: Drag-autoscroll while a selection runs past an edge.
+        self._autoscroll = QTimer(self)
+        self._autoscroll.setInterval(50)
+        self._autoscroll.timeout.connect(self._autoscroll_step)
+        self._autoscroll_dir = 0
         #: Column - 0 of the painted region; the grid is sized to the widget and
         #: the scrollback is shown above row 0 (like a real terminal's history).
         self._scroll_off = 0
@@ -159,6 +178,15 @@ class TerminalView(QWidget):
         self.screen.scrollback_limit = 5000
         self._sel_anchor = None
         self._sel_active = None
+        # Selection bookkeeping has to go too, or a stale mode/anchor makes the
+        # first click after a reset behave like a continuation (R-210).
+        self._sel_mode = "char"
+        self._word_origin = None
+        self._caret_cell = None
+        self._click_count = 0
+        self._last_click = None
+        self._autoscroll_dir = 0
+        self._autoscroll.stop()
         self._scroll_off = 0
         self.update()
 
@@ -187,9 +215,12 @@ class TerminalView(QWidget):
     def keyPressEvent(self, event) -> None:
         key = event.key()
         modifiers = event.modifiers()
+        control = bool(modifiers & Qt.ControlModifier)
+        shift = bool(modifiers & Qt.ShiftModifier)
+        alt = bool(modifiers & Qt.AltModifier)
 
         # Ctrl+Shift+C / V are copy/paste; plain Ctrl+C is the interrupt byte.
-        if modifiers & Qt.ControlModifier and modifiers & Qt.ShiftModifier:
+        if control and shift:
             if key == Qt.Key_C:
                 self.copy_selection()
                 event.accept()
@@ -199,6 +230,16 @@ class TerminalView(QWidget):
                 event.accept()
                 return
         if key in self.IGNORED_KEYS:
+            return
+
+        # Shift+PageUp/PageDown scroll the history, exactly like xterm; the
+        # plain keys keep going to the device (less/more depend on them).
+        if shift and key in (Qt.Key_PageUp, Qt.Key_PageDown):
+            self._scroll_history(self.screen.rows - 1
+                                 if key == Qt.Key_PageUp
+                                 else -(self.screen.rows - 1))
+            self.update()
+            event.accept()
             return
 
         sequences = {
@@ -219,16 +260,21 @@ class TerminalView(QWidget):
             Qt.Key_F9: b"\x1b[20~", Qt.Key_F10: b"\x1b[21~",
             Qt.Key_F11: b"\x1b[23~", Qt.Key_F12: b"\x1b[24~",
         }
-        if key in sequences and not modifiers & Qt.AltModifier:
+        if key in sequences and not alt:
             self.keyBytes.emit(sequences[key])
             event.accept()
             return
         if key in (Qt.Key_Return, Qt.Key_Enter):
-            self.keyBytes.emit(self.enter)
+            # Shift+Enter is a literal newline in every Linux terminal's shell.
+            if shift:
+                self.keyBytes.emit(b"\r")
+            else:
+                self.keyBytes.emit(self.enter)
             event.accept()
             return
         if key == Qt.Key_Backspace:
-            self.keyBytes.emit(b"\x7f")
+            # Ctrl+Backspace deletes a whole word (readline/xterm convention).
+            self.keyBytes.emit(b"\x17" if control else b"\x7f")
             event.accept()
             return
         if key == Qt.Key_Tab:
@@ -243,25 +289,29 @@ class TerminalView(QWidget):
             self.keyBytes.emit(b"\x1b")
             event.accept()
             return
-        if modifiers & Qt.ControlModifier and Qt.Key_A <= key <= Qt.Key_Z:
+        if control and Qt.Key_A <= key <= Qt.Key_Z:
             self.keyBytes.emit(bytes((key - Qt.Key_A + 1,)))
             event.accept()
             return
-        if modifiers & Qt.AltModifier and event.text():
+        if control and key == Qt.Key_Space:
+            self.keyBytes.emit(b"\x00")     # Ctrl+Space = NUL, as xterm
+            event.accept()
+            return
+        if alt and event.text():
             # Alt+<key> is ESC <key> on a terminal.
             self.keyBytes.emit(b"\x1b" + event.text().encode("utf-8"))
+            event.accept()
+            return
+        if key == Qt.Key_Insert and shift:
+            self.paste_clipboard()
             event.accept()
             return
 
         text = event.text()
         if text and text.isprintable():
-            if modifiers & Qt.ShiftModifier and key == Qt.Key_Insert:
-                self.paste_clipboard()
-            else:
-                self.keyBytes.emit(text.encode("utf-8"))
+            self.keyBytes.emit(text.encode("utf-8"))
             event.accept()
             return
-        super().keyPressEvent(event)
 
     IGNORED_KEYS = (Qt.Key_Shift, Qt.Key_Control, Qt.Key_Alt, Qt.Key_Meta,
                     Qt.Key_CapsLock, Qt.Key_NumLock)
@@ -312,58 +362,226 @@ class TerminalView(QWidget):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
-            self._sel_anchor = self._cell_at(event.position())
-            self._sel_active = self._sel_anchor
+            cell = self._cell_at(event.position())
+            clicks = self._count_click(event.position())
+            if clicks >= 3:
+                self._select_line(cell[0])
+            elif clicks == 2:
+                # Qt *does* send this press before ``mouseDoubleClickEvent``, so
+                # the word selection has to be made here or the release would
+                # collapse it back to a single cell (L-274).
+                self._select_word(cell, drag=False)
+            elif event.modifiers() & Qt.ShiftModifier and self._sel_anchor:
+                # Shift+click extends the existing selection (every Linux
+                # terminal does this, and it is the only way to adjust a
+                # double-clicked word without losing it).
+                self._sel_active = cell
+                self._sel_mode = "extend"
+            elif event.modifiers() & Qt.ShiftModifier and self._caret_cell:
+                # The selection was cleared by the previous plain click, but a
+                # terminal still remembers where the caret last landed: shift+
+                # click extends *from there* (that is what xterm does).  Without
+                # this fallback the gesture collapsed into a fresh 1-char
+                # selection and the release then wiped it (L-274).
+                self._sel_anchor = self._caret_cell
+                self._sel_active = cell
+                self._sel_mode = "extend"
+            else:
+                self._sel_anchor = cell
+                self._sel_active = cell
+                self._sel_mode = "char"
+                self._caret_cell = cell
             self.update()
             event.accept()
             return
         super().mousePressEvent(event)
 
+    def _count_click(self, point) -> int:
+        """Consecutive clicks at (nearly) the same spot within the system delay."""
+        now = time.monotonic()
+        same = (self._last_click is not None
+                and now - self._last_click[0]
+                <= QApplication.doubleClickInterval() / 1000
+                and abs(point.x() - self._last_click[1]) <= 4
+                and abs(point.y() - self._last_click[2]) <= 4)
+        self._click_count = (self._click_count + 1) if same else 1
+        self._last_click = (now, point.x(), point.y())
+        return self._click_count
+
+    def _select_line(self, row: int) -> None:
+        """Whole line - what a triple click does in xterm / MobaXterm."""
+        self._sel_anchor = (row, 0)
+        self._sel_active = (row, self.screen.cols - 1)
+        self._sel_mode = "line"
+
+    def _select_word(self, cell: tuple[int, int], drag: bool = True) -> None:
+        """Select the word under ``cell``, growing with the pointer if ``drag``."""
+        self._word_origin = cell
+        self._sel_anchor = cell
+        self._sel_active = cell
+        self._sel_mode = "word"
+        self._extend_by_word()
+        del drag
+
     def mouseMoveEvent(self, event) -> None:
         if self._sel_anchor is not None and event.buttons() & Qt.LeftButton:
-            self._sel_active = self._cell_at(event.position())
+            cell = self._cell_at(event.position())
+            if self._sel_mode == "word":
+                self._sel_active = cell
+                self._extend_by_word()
+            else:
+                self._sel_active = cell
+            self._maybe_autoscroll(event.position())
             self.update()
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton and self._sel_anchor is not None:
-            self._sel_active = self._cell_at(event.position())
-            if self._sel_active == self._sel_anchor:
-                self._sel_anchor = self._sel_active = None
+            if self._sel_mode == "word":
+                # Re-derive from the word instead of snapping to the release
+                # cell: closing the drag on a word must keep the whole word
+                # ("1024", not "102") - the release used to clobber it (L-274).
+                self._sel_active = self._cell_at(event.position())
+                self._extend_by_word()
+            elif self._sel_mode in ("char", "extend"):
+                self._sel_active = self._cell_at(event.position())
+                if self._sel_active == self._sel_anchor and \
+                        self._sel_mode == "char":
+                    # A plain click is a caret gesture, not an empty selection.
+                    self._sel_anchor = self._sel_active = None
+            self._autoscroll.stop()
             self.update()
             event.accept()
             return
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
-        """Double click selects the whole row, like every terminal."""
-        row, _col = self._cell_at(event.position())
-        self._sel_anchor = (row, 0)
-        self._sel_active = (row, self.screen.cols - 1)
+        """Double click selects the **word** under the cursor, like xterm.
+
+        It used to select the whole row, which is what a *triple* click does in
+        MobaXterm/PuTTY - and it made every double click look like "只能复制
+        整行" (R-210).
+        """
+        if event.button() != Qt.LeftButton:
+            super().mouseDoubleClickEvent(event)
+            return
+        self._select_word(self._cell_at(event.position()))
         self.update()
         event.accept()
+
+    def _word_spans(self, cells) -> list[tuple[int, int]]:
+        """Word runs in one row: ``[start, end]`` column pairs, inclusive."""
+        spans = []
+        start = None
+        for col, cell in enumerate(cells):
+            word = bool(cell.char) and not cell.continuation and \
+                (cell.char.isalnum() or cell.char in self.WORD_CHARS)
+            if word and start is None:
+                start = col
+            elif not word and start is not None:
+                spans.append((start, col - 1))
+                start = None
+        if start is not None:
+            spans.append((start, len(cells) - 1))
+        return spans
+
+    def _extend_by_word(self) -> None:
+        """Grow the selection to the word boundaries around the active cell.
+
+        ``_word_origin`` is the cell the user double-clicked.  Without it the
+        anchor would be rewritten to the word start on every mouse-move and
+        dragging across words could only ever grow the first one (R-210).
+        """
+        origin = self._word_origin or self._sel_active
+        if not self._sel_active:
+            return
+        rows = self._visual_rows()
+        row = max(0, min(len(rows) - 1, self._sel_active[0]))
+        cells = rows[row]
+        col = max(0, min(len(cells) - 1, self._sel_active[1]))
+        spans = self._word_spans(cells)
+        span = None
+        for start, end in spans:
+            if start <= col <= end:
+                span = (start, end)
+                break
+        if span is None:
+            # Separator: select just that character so the user still gets
+            # feedback instead of a silently empty selection.
+            span = (col, col)
+        if row == origin[0] and origin[1] < span[0]:
+            span = (min(span[0], origin[1]), span[1])
+        self._sel_anchor = (row, span[0])
+        self._sel_active = (row, span[1])
+
+    def _maybe_autoscroll(self, point) -> None:
+        """Dragging past an edge scrolls the history, like a real terminal."""
+        if point.y() < self.PAD_Y:
+            self._autoscroll_dir = 1
+        elif point.y() > self.height() - self.PAD_Y:
+            self._autoscroll_dir = -1
+        else:
+            self._autoscroll_dir = 0
+        if self._autoscroll_dir and not self._autoscroll.isActive():
+            self._autoscroll.start()
+        elif not self._autoscroll_dir:
+            self._autoscroll.stop()
+
+    def _autoscroll_step(self) -> None:
+        if not self._autoscroll_dir:
+            self._autoscroll.stop()
+            return
+        before = self._scroll_off
+        self._scroll_history(self._autoscroll_dir)
+        if self._scroll_off == before:
+            self._autoscroll.stop()
+            return
+        if self._sel_anchor and self._sel_active:
+            row = self._sel_active[0] - self._autoscroll_dir
+            rows = self._visual_rows()
+            row = max(0, min(max(0, len(rows) - 1), row))
+            self._sel_active = (row, self._sel_active[1])
+        self.update()
+
+    def _scroll_history(self, lines: int) -> None:
+        """Positive scrolls back into the history, negative returns to live."""
+        limit = len(self.screen.scrollback)
+        self._scroll_off = max(0, min(limit, self._scroll_off + lines))
 
     def selectAll(self) -> None:
         rows = self._visual_rows()
         self._sel_anchor = (0, 0)
         self._sel_active = (max(0, len(rows) - 1), self.screen.cols - 1)
+        self._sel_mode = "line"
         self.update()
 
     def has_selection(self) -> bool:
         return self._sel_anchor is not None and self._sel_active is not None
 
     def selected_text(self) -> str:
-        """Text under the selection, joining visual rows with newlines."""
+        """Text under the selection, joining visual rows with newlines.
+
+        Uses ``_row_selection_cols()`` - the very same span the painter fills in -
+        so the clipboard can never disagree with the highlight (R-210).  Leading
+        blanks are kept (selecting from mid-line must copy from that character);
+        trailing blanks are not, because a terminal line is padded to the full
+        width and copying that padding is what xterm/PuTTY strip as well.
+        """
         selection = self._selection_range()
         if selection is None:
             return ""
         rows = self._visual_rows()
-        (r1, c1), (r2, c2) = selection
+        (r1, _c1), (r2, _c2) = selection
         out = []
         for row in range(r1, min(r2, len(rows) - 1) + 1):
             cells = rows[row]
-            first = c1 if row == r1 else 0
-            last = c2 if row == r2 else len(cells) - 1
+            span = self._row_selection_cols(row, selection)
+            if span is None:
+                continue
+            first, last = span
+            if last is None:
+                last = len(cells) - 1
+            first, last = self._snap_cols(cells, first, last)
             out.append("".join(cell.char for cell in cells[first:last + 1]
                                if not cell.continuation).rstrip())
         while out and not out[-1]:
@@ -384,8 +602,7 @@ class TerminalView(QWidget):
         lines = int(event.angleDelta().y() / 120)
         if not lines:
             return
-        limit = len(self.screen.scrollback)
-        self._scroll_off = max(0, min(limit, self._scroll_off + lines))
+        self._scroll_history(lines)
         self.update()
         event.accept()
 
@@ -482,11 +699,21 @@ class TerminalView(QWidget):
         y = self.PAD_Y + visual_row * self._cell_h
         if y > self.height():
             return
-        row_rect = QRectF(self.PAD_X, y, self._cell_w * self.screen.cols,
-                          self._cell_h)
-        if selection is not None and self._row_in_selection(visual_row,
-                                                            selection):
-            painter.fillRect(row_rect, QColor(SELECTION_BG))
+        # The selection highlight must follow the *columns* of this row, not the
+        # whole row: filling the full width made a 4-character drag look like the
+        # entire line was selected, which is exactly what the user reported as
+        # "只能复制整行" (R-210).
+        sel_cols = self._row_selection_cols(visual_row, selection)
+        if sel_cols is not None:
+            start_col, end_col = sel_cols
+            if end_col is None:
+                end_col = len(cells) - 1
+            start_col, end_col = self._snap_cols(cells, start_col, end_col)
+            painter.fillRect(
+                QRectF(self.PAD_X + start_col * self._cell_w, y,
+                       max(1, end_col - start_col + 1) * self._cell_w,
+                       self._cell_h),
+                QColor(SELECTION_BG))
         col = 0
         while col < len(cells):
             cell = cells[col]
@@ -526,6 +753,41 @@ class TerminalView(QWidget):
             return None
         anchor, active = self._sel_anchor, self._sel_active
         return (min(anchor, active), max(anchor, active))
+
+    @staticmethod
+    def _row_selection_cols(visual_row: int, selection):
+        """``(first_col, last_col)`` of one painted row, or ``None``.
+
+        This is the counterpart of ``selected_text()``: both derive the span from
+        the same rule (first row starts at ``c1``, last row ends at ``c2``,
+        middle rows are full width) so what is highlighted and what is copied can
+        never disagree (R-210).  ``last_col`` is ``None`` for the middle rows -
+        the caller knows how wide the row is.
+        """
+        if selection is None:
+            return None
+        (r1, c1), (r2, c2) = selection
+        if visual_row < r1 or visual_row > r2:
+            return None
+        first = c1 if visual_row == r1 else 0
+        last = c2 if visual_row == r2 else None
+        return first, last
+
+    @staticmethod
+    def _snap_cols(cells, first: int, last: int) -> tuple[int, int]:
+        """Widen a span so it never cuts a wide (CJK) glyph in half.
+
+        Half a glyph cannot be highlighted sensibly, and the copied text would
+        silently drop the character (R-210).
+        """
+        cols = len(cells)
+        first = max(0, min(first, cols - 1))
+        last = max(first, min(last, cols - 1))
+        while first > 0 and cells[first].continuation:
+            first -= 1
+        while last + 1 < cols and cells[last + 1].continuation:
+            last += 1
+        return first, last
 
     @staticmethod
     def _row_in_selection(visual_row: int, selection) -> bool:

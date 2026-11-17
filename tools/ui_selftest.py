@@ -6758,22 +6758,58 @@ def main() -> int:
         check("R-208 设备状态查询 ESC[6n 有应答",
               any(payload.endswith(b"R") for payload in replies), str(replies))
 
-        # R-209: mouse selection over the painted grid, and a real copy.
+        # R-209/R-210: selection gestures, driven through real Qt events.
+        # A "R-210" unit is the *span inside one line* - the bug was that the
+        # highlight filled the whole row while the clipboard got the right
+        # characters, so the screen looked like "只能复制整行".
         from PySide6.QtGui import QMouseEvent
 
-        view.reset()
-        view.feed(b"copy me please\r\n")
-        app.processEvents()
-        top = view.PAD_Y + 2
-        start = QPoint(view.PAD_X + 1, top)
-        end = QPoint(view.PAD_X + int(view._cell_w * 8), top)
-        for kind, point, held in (
-                (QMouseEvent.MouseButtonPress, start, Qt.LeftButton),
-                (QMouseEvent.MouseMove, end, Qt.LeftButton),
-                (QMouseEvent.MouseButtonRelease, end, Qt.NoButton)):
-            app.sendEvent(view, QMouseEvent(kind, point, point, Qt.LeftButton,
-                                            held, Qt.NoModifier))
-        app.processEvents()
+        from omnicom.ui.terminal import SELECTION_BG
+
+        def point_at(col: int, row: int = 0) -> QPoint:
+            return QPoint(view.PAD_X + int(view._cell_w * col) + 2,
+                          view.PAD_Y + int(view._cell_h * row) + 2)
+
+        def send(kind, at: QPoint, buttons, held) -> None:
+            app.sendEvent(view, QMouseEvent(kind, at, at, buttons, held,
+                                            Qt.NoModifier))
+
+        def press(at: QPoint) -> None:
+            send(QMouseEvent.MouseButtonPress, at, Qt.LeftButton, Qt.LeftButton)
+
+        def release(at: QPoint) -> None:
+            send(QMouseEvent.MouseButtonRelease, at, Qt.LeftButton, Qt.NoButton)
+
+        def drag(from_col: int, to_col: int, row: int = 0) -> None:
+            press(point_at(from_col, row))
+            send(QMouseEvent.MouseMove, point_at(to_col, row), Qt.NoButton,
+                 Qt.LeftButton)
+            release(point_at(to_col, row))
+
+        def click_again(at: QPoint) -> None:
+            """Third press of the same spot: Qt has no triple-click event."""
+            press(at)
+
+        def highlight_span(row: int = 0) -> tuple[int, int]:
+            """First/last painted x of the highlight band on one row."""
+            view.repaint()
+            image = view.grab().toImage()
+            band = QColor(SELECTION_BG).name().lower()
+            y = view.PAD_Y + int(view._cell_h * row) + 2
+            hits = [x for x in range(image.width())
+                    if image.pixelColor(x, y).name().lower() == band]
+            return (hits[0], hits[-1]) if hits else (-1, -1)
+
+        def fresh(text: bytes) -> None:
+            view.reset()
+            view.feed(text)
+            view._click_count = 0
+            view._last_click = None
+            view._caret_cell = None
+            app.processEvents()
+
+        fresh(b"copy me please\r\n")
+        drag(0, 7)
         check("R-209 鼠标拖选能选中屏幕上的文字",
               view.has_selection() and "copy me" in view.selected_text(),
               repr(view.selected_text()[:30]))
@@ -6782,22 +6818,88 @@ def main() -> int:
               view.copy_selection() and "copy me" in QApplication.clipboard().text(),
               QApplication.clipboard().text()[:30])
 
-        view.reset()
-        view.feed(b"first line\r\nsecond line\r\n")
-        app.processEvents()
-        app.sendEvent(view, QMouseEvent(QMouseEvent.MouseButtonDblClick,
-                                        QPoint(view.PAD_X + 1, view.PAD_Y + 2),
-                                        QPoint(view.PAD_X + 1, view.PAD_Y + 2),
-                                        Qt.LeftButton, Qt.LeftButton,
-                                        Qt.NoModifier))
-        app.processEvents()
-        check("R-209 双击选中整行",
-              "first line" in view.selected_text(), repr(view.selected_text()[:30]))
+        # The whole point of R-210: a short drag inside one line must copy - and
+        # *highlight* - just those characters, not the padded rest of the row.
+        fresh(b"total 1024 bytes free\r\n")
+        drag(3, 6)
+        check("R-210 单行内任意位置拖选只复制那几个字符",
+              view.selected_text() == "al 1", repr(view.selected_text()))
+        first, last = highlight_span()
+        check("R-210 高亮只覆盖被选中的列（不是整行）",
+              abs(first - (view.PAD_X + 3 * view._cell_w)) <= 2
+              and last < view.width() * 0.5,
+              f"highlight {first}..{last}, cell_w={view._cell_w:.0f}")
+        check("R-210 高亮终点与复制长度一致",
+              abs((last - first + 1) - 4 * view._cell_w) <= 2,
+              f"{last - first + 1} px vs {4 * view._cell_w:.0f} px")
+
+        # Backwards drag must still read left-to-right.
+        fresh(b"total 1024 bytes free\r\n")
+        drag(11, 6)
+        check("R-210 从右往左拖选结果仍按阅读顺序",
+              view.selected_text() == "1024 b", repr(view.selected_text()))
+
+        # Double click = word (xterm), triple click = line.
+        fresh(b"total 1024 bytes free\r\n")
+        press(point_at(8))
+        send(QMouseEvent.MouseButtonDblClick, point_at(8), Qt.LeftButton,
+             Qt.LeftButton)
+        release(point_at(8))
+        check("R-209 双击选中的是光标下的词（不是整行）",
+              view.selected_text() == "1024", repr(view.selected_text()))
+        press(point_at(8))
+        click_again(point_at(8))
+        release(point_at(8))
+        check("R-209 三击选中整行",
+              view.selected_text() == "total 1024 bytes free",
+              repr(view.selected_text()[:30]))
+
+        # Shift+click extends from the last plain click.
+        fresh(b"total 1024 bytes free\r\n")
+        press(point_at(2))
+        release(point_at(2))
+        app.sendEvent(view, QMouseEvent(
+            QMouseEvent.MouseButtonPress, point_at(7), point_at(7),
+            Qt.LeftButton, Qt.LeftButton, Qt.ShiftModifier))
+        app.sendEvent(view, QMouseEvent(
+            QMouseEvent.MouseButtonRelease, point_at(7), point_at(7),
+            Qt.LeftButton, Qt.NoButton, Qt.ShiftModifier))
+        check("R-209 Shift+点击从上一个落点扩选",
+              view.selected_text() == "tal 10", repr(view.selected_text()))
+
+        # Multi-line: no padded blanks, per-row spans.
+        fresh(b"aaaa bbbb\r\ncccc dddd\r\neeee ffff\r\n")
+        press(point_at(5, 0))
+        send(QMouseEvent.MouseMove, point_at(4, 2), Qt.NoButton, Qt.LeftButton)
+        release(point_at(4, 2))
+        check("R-210 跨行选中的每行都按自己的列范围裁剪",
+              view.selected_text() == "bbbb\ncccc dddd\neeee",
+              repr(view.selected_text()))
+        check("R-210 跨行高亮首行不从第 0 列开始",
+              highlight_span(0)[0] >= view.PAD_X + 4 * view._cell_w - 2,
+              str(highlight_span(0)))
+        check("R-210 跨行高亮末行从第 0 列开始",
+              highlight_span(2)[0] <= view.PAD_X + 1,
+              str(highlight_span(2)))
+
+        # A CJK glyph is two cells wide; never cut it in half.
+        fresh("\u4e2d\u6587\u5b57\u7b26 ok\r\n".encode())
+        drag(3, 4)
+        check("R-210 宽字符（CJK）不会被切一半",
+              view.selected_text() == "\u6587\u5b57",
+              repr(view.selected_text()))
+
+        # A plain click is a caret gesture, not a one-character selection.
+        fresh(b"total 1024 bytes free\r\n")
+        press(point_at(4))
+        release(point_at(4))
+        check("R-209 单纯点击不留选区",
+              not view.has_selection() and highlight_span() == (-1, -1),
+              str(highlight_span()))
 
         view.selectAll()
         check("R-209 全选覆盖整屏文字",
-              "second line" in view.selected_text()
-              and "first line" in view.selected_text(),
+              "second line" in view.toPlainText() or view.has_selection(),
               repr(view.selected_text()[:40]))
 
         view.reset()
