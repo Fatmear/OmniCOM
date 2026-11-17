@@ -339,6 +339,58 @@ python -m omnicom.cli reset --port COM3 --line rts --low-ms 40
 每个沿都带状态，某个沿没生效时能直接看出来；结束时线保持在**高**电平。
 这就是 CH340/CP210x 板子靠 RESET 电容进下载模式的那一下。
 
+### `screen` — 读设备的终端屏幕（VT100 解析后的字符网格）
+
+```bash
+python -m omnicom.cli screen                        # 当前窗口的屏幕
+python -m omnicom.cli screen --scrollback 40        # 连带 40 行回滚历史
+python -m omnicom.cli screen --port COM3            # 指定串口所属窗口
+```
+```json
+{"ok": true, "via": "window", "window_pid": 50536,
+ "rows": 24, "cols": 80,
+ "cursor": {"row": 2, "col": 0}, "cursor_visible": true,
+ "screen": ["top line", "second line", ""],
+ "scrollback": ["...历史行..."], "scrollback_total": 17,
+ "text": "top line\nsecond line",
+ "title": "", "connected": true, "port": "DEMO", ...}
+```
+
+**为什么需要它**：`log` 给你的是**一行行按时间追加的原始文本**，全屏程序（`top`、`vim`、
+`menuconfig`、任何用 `ESC[H` 重绘的界面）在日志里是一团乱码。`screen` 返回的是
+**解析之后**的字符网格 —— 光标在哪、屏幕上现在写的是什么，与人在终端页看到的一致。
+
+⚠ 镜像屏幕**与界面当前在哪一页无关**：窗口内部常驻一个 24×80 的 `Screen`，
+接收字节时同步喂它，所以用户坐在日志页时 `screen` 照样有内容
+（终端页本身只在可见时才解析，这是 R-055 那个 `isVisible` 分支的由来）。
+
+`screen` 是**只读**的；要按方向键请用 `keys`。
+
+### `keys` — 发送终端按键（不追加换行）
+
+```bash
+python -m omnicom.cli keys --key down              # ↓  发送 ESC[B
+python -m omnicom.cli keys --key enter             # \r
+python -m omnicom.cli keys --key ctrl-c            # 0x03
+python -m omnicom.cli keys --keys '\x1b[A\x1b[A'   # 连按两次 ↑
+python -m omnicom.cli keys --hex 1b5b41            # 同上，显式十六进制
+python -m omnicom.cli keys --key tab --wait 0.5 --expect 'Welcome'
+```
+```json
+{"ok": true, "via": "window", "sent": {"bytes": 3, "hex": "1b 5b 42"},
+ "wait_ms": 0, "matched": true, ...}
+```
+
+`send` 是**面向行**的（会按 `--ending` 追加 CR/LF），适合发命令；`keys` 发的是**裸按键字节**，
+一个字节都不多加 —— 这是驱动全屏程序唯一可行的方式。
+
+可用的 `--key`：`up down left right home end pageup pagedown insert delete
+tab backtab enter esc space backspace ctrl-a ctrl-c ctrl-d ctrl-e ctrl-l ctrl-z
+f1..f12`。
+
+`--wait` 与 `--expect` 的语义与 `send` 相同（从 `--since` 之后找应答）；
+没给 `--since` 时取当前接收序号，所以先 `screen` 再 `keys` 不会把旧内容算成应答。
+
 ### `selftest` — 无硬件端到端自检
 
 ```bash

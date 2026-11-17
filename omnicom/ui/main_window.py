@@ -1986,6 +1986,12 @@ class OmniWindow(QMainWindow):
         overflow = len(self._control_ring) - self.CONTROL_RING
         if overflow > 0:
             del self._control_ring[:overflow]
+        # Feed the CLI-facing mirror screen as well.  It is deliberately separate
+        # from the terminal page: the page only parses while it is *visible*
+        # (`_flush_rx` checks `isVisible`), so an agent asking for the screen
+        # while the user sits on the log page would otherwise get an empty
+        # answer (R-211).
+        self.console.mirror.feed(data)
         self._rx_queue.append((ts, data))
         if not self._rx_timer.isActive():
             self._rx_timer.start()
@@ -3632,6 +3638,55 @@ class OmniWindow(QMainWindow):
     def _control_notify(self, args: dict, _job: dict) -> dict:
         self.notify(str(args.get("text") or ""), str(args.get("level") or "info"))
         return {"ok": True}
+
+    def _control_screen(self, args: dict, _job: dict) -> dict:
+        """The device's VT100 screen, for ``omnicom.cli screen`` (R-211).
+
+        Read from the always-on mirror, not from the page: the terminal page only
+        parses while it is visible (`_flush_rx` checks `isVisible`), so an agent
+        would get a blank screen whenever the user was on the log page.
+        """
+        scrollback = int(args.get("scrollback") or 0)
+        try:
+            state = self.console.mirror_state(scrollback=max(0, scrollback))
+        except Exception as exc:
+            return {"ok": False, "error": f"读取终端屏幕失败：{exc}"}
+        return {"ok": True, **self._control_snapshot(), **state}
+
+    def _control_keys(self, args: dict, _job: dict) -> dict:
+        """Send raw terminal key bytes (escape sequences), not a text line.
+
+        ``send`` appends a line ending and is meant for commands; an agent
+        driving a full-screen program needs to press *keys* - ``\\x1b[A`` for Up,
+        ``\\t``, ``\\x03`` for Ctrl+C - without anything being added (R-211).
+        """
+        from ..commands import decode_escapes, parse_hex
+
+        raw = args.get("keys")
+        if raw is None:
+            return {"ok": False, "error": "缺少 keys"}
+        text = str(raw)
+        if args.get("hex"):
+            data = parse_hex(text)
+            if data is None:
+                return {"ok": False, "error": f"不是合法的十六进制：{text}"}
+        else:
+            data = decode_escapes(text).encode("utf-8")
+        if not data:
+            return {"ok": False, "error": "keys 是空的"}
+        # `_control_send` takes hex and adds no line ending of its own, so keys
+        # arrive unchanged - that is the whole point of this command (R-211).
+        result = self._control_send({
+            "hex": data.hex(),
+            "wait": float(args.get("wait") or 0.0),
+            "expect": [str(item) for item in (args.get("expect") or []) if str(item)],
+            "since": int(args.get("since") or 0) or None,
+        }, _job)
+        if result is not None and result.get("ok"):
+            result = {**result, "sent": {"bytes": len(data),
+                                         "hex": data.hex(" ")},
+                      "wait_ms": int(float(args.get("wait") or 0.0) * 1000)}
+        return result
 
     # -------------------------------------------------------------- window
     def window_shadow_px(self) -> int:

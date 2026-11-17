@@ -6908,6 +6908,95 @@ def main() -> int:
         app.processEvents()
         next_()
 
+    def step_terminal_cli(next_):
+        """R-211: `cli screen` / `cli keys` see and drive the same terminal.
+
+        The mirror is what makes this possible: `_flush_rx` only parses into the
+        terminal page while it is *visible*, so a CLI answered from the page would
+        return a blank screen whenever the user was on the log page.  The step
+        therefore hides the terminal page first - that is the interesting case.
+        """
+        window.switch_page("terminal")          # anything but the terminal page
+        app.processEvents()
+        check("R-211 终端页此时不可见（正是要覆盖的场景）",
+              not window.console.view.isVisible())
+
+        window.console.mirror = type(window.console.mirror)(
+            rows=24, cols=80, scrollback=200)
+        window.console.feed(b"line one\r\nsecond line\r\n$ ")
+        window.console.mirror.feed(b"prompt> ")     # what `_on_rx` does
+
+        state = window._control_screen({"scrollback": 0}, {})
+        check("R-211 窗口能返回终端屏幕（页面不可见时也有内容）",
+              state.get("ok") is True and state.get("rows", 0) > 0
+              and state.get("cols", 0) > 0, str(state.get("error")))
+        check("R-211 屏幕带光标位置", isinstance(state.get("cursor"), dict)
+              and "row" in (state.get("cursor") or {}),
+              str(state.get("cursor")))
+        check("R-211 屏幕文本来自镜像而不是可见页面",
+              "prompt>" in (state.get("text") or ""),
+              repr((state.get("text") or "")[:40]))
+        check("R-211 screen 数组长度等于 rows",
+              len(state.get("screen") or []) == state.get("rows"),
+              f"{len(state.get('screen') or [])} / {state.get('rows')}")
+
+        state = window._control_screen({"scrollback": 5}, {})
+        check("R-211 能带回滚历史", isinstance(state.get("scrollback"), list)
+              and "scrollback_total" in state, str(state.get("scrollback_total")))
+
+        # ---- keys: raw bytes, no line ending appended
+        sent: list[bytes] = []
+        manager = window.bridge.manager
+        original_write = manager.write
+        opened_here = False
+        if not manager.status().get("connected"):
+            window.bridge.open("DEMO", window._serial_opts())
+            opened_here = True
+            for _wait in range(80):
+                app.processEvents()
+                if manager.status().get("connected"):
+                    break
+
+        def collect(payload):
+            sent.append(payload)
+            return original_write(payload)
+
+        with patch.object(manager, "write", side_effect=collect):
+            reply = window._control_keys({"keys": "1b5b41", "hex": True}, {})
+            check("R-211 keys 发送原始字节（方向键 ESC[A）",
+                  reply.get("ok") is True
+                  and (reply.get("sent") or {}).get("hex") == "1b 5b 41",
+                  str(reply.get("error") or reply.get("sent")))
+        check("R-211 keys 报告实际发送的字节数",
+              (reply.get("sent") or {}).get("bytes") == 3,
+              str(reply.get("sent")))
+        check("R-211 没有发送方（hex 为空）时报错而不是静默成功",
+              window._control_keys({}, {}).get("ok") is False)
+
+        # ---- CLI surface: the two subcommands exist and agree with the window
+        from omnicom import cli as cli_module
+
+        parser = cli_module.build_parser() if hasattr(cli_module, "build_parser") \
+            else None
+        if parser is not None:
+            choices = parser._subparsers._group_actions[0].choices
+            check("R-211 CLI 暴露 screen 与 keys",
+                  "screen" in choices and "keys" in choices, str(sorted(choices)))
+        check("R-211 CLI 有可直接使用的按键表",
+              cli_module.KEY_SEQUENCES.get("up") == b"\x1b[A"
+              and cli_module.KEY_SEQUENCES.get("ctrl-c") == b"\x03"
+              and "enter" in cli_module.KEY_SEQUENCES,
+              str(len(cli_module.KEY_SEQUENCES)))
+
+        window.console.reset()
+        if opened_here:
+            window.bridge.close()
+            for _wait in range(40):
+                app.processEvents()
+        window.switch_page("terminal")
+        app.processEvents()
+        next_()
+
     def step_terminal_buttons(next_):
         """R-188: reset and full screen are two different, working actions."""
         from omnicom.i18n import tr
@@ -7986,6 +8075,7 @@ def main() -> int:
     runner.add("R-192 drag_wheel_scroll", step_drag_wheel_scroll)
     runner.add("R-193 terminal_caret_tab", step_terminal_caret_tab)
     runner.add("R-207 terminal_grid", step_terminal_grid)
+    runner.add("R-211 terminal_cli", step_terminal_cli)
     runner.add("R-200 toast_stack", step_toast_stack)
     runner.add("R-201 hex_columns", step_hex_columns)
     runner.add("R-203 hex_partial", step_hex_partial_survives)

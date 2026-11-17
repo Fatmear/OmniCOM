@@ -911,6 +911,13 @@ class TerminalPage(QWidget):
         self.view.keyBytes.connect(self.keyBytes.emit)
         card_layout.addWidget(self.view, 1)
 
+        #: Always-on mirror of the same byte stream, sized 24x80, owned by this
+        #: page and **never painted**.  The window feeds it from `_on_rx` even
+        #: while the terminal page is hidden, so `omnicom.cli screen` can answer
+        #: what the device's screen looks like without depending on which page
+        #: the user happens to be on (R-211).
+        self.mirror = Screen(rows=24, cols=80, scrollback=500)
+
         self.hint = QLabel(tr("term.hint"))
         self.hint.setStyleSheet("color: rgba(214, 226, 240, 130); font-size: 11px;")
         self.hint.setWordWrap(True)
@@ -927,9 +934,38 @@ class TerminalPage(QWidget):
     # ------------------------------------------------------------------ api
     def feed(self, data: bytes) -> None:
         self.view.feed(data)
+        self.mirror.feed(data)
 
     def reset(self) -> None:
         self.view.reset()
+        self.mirror = Screen(rows=self.mirror.rows, cols=self.mirror.cols,
+                             scrollback=500)
+
+    def mirror_state(self, scrollback: int = 0) -> dict:
+        """The device's screen as plain data, for ``omnicom.cli screen`` (R-211).
+
+        ``screen`` is the live grid only (the part a user would see right now);
+        ``text`` adds ``scrollback`` rows of history above it.  Styles are
+        intentionally not exported yet - an agent needs the characters and the
+        cursor, and colour would triple the payload.
+        """
+        screen = self.mirror
+        lines = [screen.row_text(row) for row in range(screen.rows)]
+        history = []
+        if scrollback > 0 and screen.scrollback:
+            wanted = screen.scrollback[-scrollback:]
+            history = [Screen._scrollback_text(cells) for cells in wanted]
+        return {
+            "rows": screen.rows,
+            "cols": screen.cols,
+            "cursor": {"row": screen.cursor_row, "col": screen.cursor_col},
+            "cursor_visible": bool(screen.cursor_visible),
+            "screen": lines,
+            "scrollback": history,
+            "scrollback_total": len(screen.scrollback),
+            "text": "\n".join(lines).rstrip("\n"),
+            "title": str(getattr(screen, "title", "") or ""),
+        }
 
     def apply_font(self) -> None:
         """Terminal text follows the log font setting (R-096)."""

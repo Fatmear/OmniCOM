@@ -360,3 +360,24 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - **所以**：判定"是不是我改坏的"必须①多次采样比分布，②用插桩证明代码路径
   是否真的被执行。**单次 A/B 在这类时序指标上没有任何说服力**（L-273 的升级版）。
 - 预算 200 ms 与 40 ms 都不动：问题在测量环境，不在产品。
+
+## L-278 `_flush_rx` 里有个 `if console:` —— 终端页不可见时它根本不解析
+
+- 代码是：`console = self.console.isVisible()` … `if console: self.console.feed(data)`。
+  也就是说**用户坐在日志页时，终端网格完全不更新**。这在纯 UI 场景没问题（看不见
+  就不用画），但一旦要让 CLI 读屏幕就致命：`cli screen` 会在用户没点终端页时返回空白。
+- 这也顺手解释了 R-055：那个步骤全程不在终端页，所以 `TerminalView.feed` /
+  `paintEvent` 被调用 **0 次**（已插桩证实，L-277）。
+- **修法**：`TerminalPage` 持有一个**常驻镜像** `Screen(24, 80)`，由 `_on_rx` 无条件
+  喂字节，与页面可见性无关；`TerminalPage.feed()` 同时喂可见视图与镜像。
+  宁可多花一次解析（1100 字节约 4.5 ms/批，且已优化），也不要让 CLI 看到空屏。
+
+## L-279 CLI 的窗口命令有两条纪律：白名单要显式扩展，`_control_send` 只吃 hex
+
+- `_emit_window()` 只复制**固定白名单**的字段，新增命令的返回值会被静默丢弃
+  （第一次接 `screen` 时 `rows`/`cols`/`cursor` 全没了）。加了 `keep=` 参数显式列出，
+  比把白名单越拉越长更可控。
+- `_control_send()` 的参数是 `hex=`（不是 `data_b64`），并且**不追加任何行尾**。
+  `keys` 正好可以直接复用它 —— 这正是 `send`（面向行，追加 CR/LF）做不到的事。
+- 写端到端测试时，**CLI 必须跑在别的线程/进程里**：窗口在自己的 GUI 线程处理请求，
+  在 GUI 线程里 `subprocess.run` 会死锁，表现为"窗口繁忙/超时"而不是报错。

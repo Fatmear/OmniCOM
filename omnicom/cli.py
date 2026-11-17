@@ -1390,7 +1390,7 @@ def _need_window(timeout: float = 20.0, pid: int | None = None,
 
 
 def _emit_window(reply: dict, client: control.Client | None = None,
-                 **extra: Any) -> int:
+                 keep: Iterable[str] = (), **extra: Any) -> int:
     payload = {"ok": bool(reply.get("ok")), "via": "window", **extra}
     if client is not None and client.endpoint:
         payload.setdefault("window_pid", client.endpoint.get("pid"))
@@ -1398,6 +1398,11 @@ def _emit_window(reply: dict, client: control.Client | None = None,
     for key in ("connected", "port", "reconnecting", "error", "opts", "stats",
                 "recording", "received_hex", "received_text", "received_bytes",
                 "lines", "count", "blocks", "trimmed", "seq", "version"):
+        if key in reply:
+            payload[key] = reply[key]
+    # Command-specific fields (the terminal screen, raw key echoes...) are passed
+    # explicitly so the shared whitelist stays small (R-211).
+    for key in keep:
         if key in reply:
             payload[key] = reply[key]
     if not reply.get("ok"):
@@ -1540,6 +1545,82 @@ def cmd_reset(args) -> int:
         return fail(f"串口错误：{exc}")
     finally:
         session.close()
+
+
+def cmd_screen(args) -> int:
+    """Dump the device's VT100 screen as parsed text plus the cursor (R-211).
+
+    Reads the window's always-on mirror grid rather than the log, so the answer
+    reflects what the *terminal* shows - a full-screen program that repaints with
+    escapes is unreadable in a line log, and the mirror keeps working while the
+    user is on another page.
+    """
+    client, error = _need_window(pid=getattr(args, "window", None),
+                                 port=str(getattr(args, "port", None) or ""))
+    if client is None:
+        return fail(error)
+    try:
+        reply = client.request("screen", scrollback=int(args.scrollback or 0))
+    except control.ControlError as exc:
+        return fail(str(exc))
+    return _emit_window(
+        reply, client,
+        keep=("rows", "cols", "cursor", "cursor_visible", "screen",
+              "scrollback", "scrollback_total", "text", "title"))
+
+
+def cmd_keys(args) -> int:
+    """Send raw terminal keystrokes - no line ending is appended (R-211).
+
+    ``send`` is line-oriented (it appends CR/LF), which cannot drive a
+    full-screen program: an arrow key must arrive as ``ESC[A`` and nothing else.
+    ``--key`` takes a friendly name, ``--keys`` takes escapes, ``--hex`` raw.
+    """
+    if args.key:
+        name = str(args.key).lower()
+        if name not in KEY_SEQUENCES:
+            return fail(f"不认识的按键：{name}"
+                        f"（可用：{', '.join(sorted(KEY_SEQUENCES))}）")
+        payload = KEY_SEQUENCES[name]
+    elif args.keys is not None:
+        payload = decode_escapes(str(args.keys)).encode("utf-8")
+    elif args.hex is not None:
+        payload = parse_hex(str(args.hex))
+        if payload is None:
+            return fail(f"不是合法的十六进制：{args.hex}")
+    else:
+        return fail("要给 --key / --keys / --hex 之一")
+    if not payload:
+        return fail("按键内容为空")
+    client, error = _need_window(float(args.wait or 0) + 20.0,
+                                 pid=getattr(args, "window", None),
+                                 port=str(getattr(args, "port", None) or ""))
+    if client is None:
+        return fail(error)
+    try:
+        reply = client.request("keys", keys=payload.hex(), hex=True,
+                               wait=float(args.wait or 0.0),
+                               expect=args.expect or [],
+                               since=int(args.since or 0))
+    except control.ControlError as exc:
+        return fail(str(exc))
+    return _emit_window(reply, client, keep=("sent", "wait_ms", "matched"))
+
+
+#: Friendly names for the keys an agent is likely to press (R-211).
+KEY_SEQUENCES = {
+    "up": b"\x1b[A", "down": b"\x1b[B", "right": b"\x1b[C", "left": b"\x1b[D",
+    "home": b"\x1b[H", "end": b"\x1b[F",
+    "pageup": b"\x1b[5~", "pagedown": b"\x1b[6~",
+    "insert": b"\x1b[2~", "delete": b"\x1b[3~",
+    "tab": b"\t", "backtab": b"\x1b[Z", "enter": b"\r", "esc": b"\x1b",
+    "space": b" ", "backspace": b"\x7f",
+    "ctrl-c": b"\x03", "ctrl-d": b"\x04", "ctrl-z": b"\x1a",
+    "ctrl-l": b"\x0c", "ctrl-a": b"\x01", "ctrl-e": b"\x05",
+    "f1": b"\x1bOP", "f2": b"\x1bOQ", "f3": b"\x1bOR", "f4": b"\x1bOS",
+    "f5": b"\x1b[15~", "f6": b"\x1b[17~", "f7": b"\x1b[18~", "f8": b"\x1b[19~",
+    "f9": b"\x1b[20~", "f10": b"\x1b[21~", "f11": b"\x1b[23~", "f12": b"\x1b[24~",
+}
 
 
 # ------------------------------------------------------------------ selftest
@@ -1799,6 +1880,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_stats.add_argument("--reset", action="store_true", help="清零后再返回")
     add_window(p_stats, with_port=True)
     p_stats.set_defaults(func=cmd_stats)
+
+    p_screen = sub.add_parser(
+        "screen", help="读取设备的终端屏幕（按 VT100 解析后的字符网格 + 光标）")
+    p_screen.add_argument("--scrollback", type=int, default=0,
+                          help="额外返回多少行回滚历史（默认 0）")
+    add_window(p_screen, with_port=True)
+    p_screen.set_defaults(func=cmd_screen)
+
+    p_keys = sub.add_parser(
+        "keys", help="发送终端按键（方向键/功能键/Ctrl 组合），不追加换行")
+    p_keys.add_argument("--key", default="",
+                        help="按键名：up/down/tab/enter/esc/ctrl-c/f1...")
+    p_keys.add_argument("--keys", default=None,
+                        help="直接给转义串，如 \"\\\\x1b[A\\\\x1b[A\"")
+    p_keys.add_argument("--hex", default=None, help="直接给十六进制，如 \"1b5b41\"")
+    p_keys.add_argument("--wait", type=float, default=0.0,
+                        help="发送后等待回显的秒数（默认 0）")
+    p_keys.add_argument("--expect", action="append", default=[],
+                        help="等待应答包含该子串，可重复")
+    p_keys.add_argument("--since", type=int, default=0,
+                        help="从该字节序号之后找应答（默认取当前序号）")
+    add_window(p_keys, with_port=True)
+    p_keys.set_defaults(func=cmd_keys)
 
     p_lines = sub.add_parser(
         "lines", help="读取/切换 DTR RTS CTS DSR 等控制线")
