@@ -3,9 +3,9 @@
 Updated: 2026-11-17（issue #1~#11 → R-184..R-194；追加 #12/#13 → R-195/R-196；
 吸顶条背景 → R-197；就绪栏空带 → R-186 修订 + R-199；通知堆叠 → R-200；
 HEX 时间戳 / 可选列 / 不丢半行 → R-201..R-203；边缘拖动缩放 → R-204..R-206；
-终端改写成真正的 VT100 网格屏幕 → R-207..R-209；
-**终端行内任意位置选块复制（与 Linux 终端一致）→ R-210**；
-`ui_selftest` 840 项，`acceptance_test` 205 需求 / 1211 项检查全 PASS）
+终端改写成真正的 VT100 网格屏幕 → R-207..R-209；终端行内任意位置选块复制 → R-210；
+**CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211**；
+`ui_selftest` 851 项，`acceptance_test` 206 需求 / 1222 项检查全 PASS）
 
 ## Latest State
 
@@ -152,6 +152,28 @@ HEX 时间戳 / 可选列 / 不丢半行 → R-201..R-203；边缘拖动缩放 �
   press 会先于 `mouseDoubleClickEvent` 到达** ⇒ 词选必须在 press 里就完成，否则
   紧跟其后的 `Release` 会把它打回一格（L-276）。
 
+- **第十轮（2026-11-17）**：用户问「终端功能，cli 是否支持」。答案是**不支持**：
+  CLI 原来只有按字节/按行的接口，全屏程序（`top`/`vim`）在日志里是一团乱码，
+  而 `send` 面向行、会追加 CR/LF，驱动不了它。新增两个命令（R-211）：
+
+  * `cli screen` — 返回按 VT100 解析后的**字符网格**：`rows`/`cols`/`cursor`/
+    `screen[]`/`text`，`--scrollback N` 带回滚历史。
+  * `cli keys` — 发送**裸按键字节**，一个都不多加：`--key up|tab|enter|ctrl-c|
+    f1..f12`（34 个名字）、`--keys '\x1b[A'`、`--hex 1b5b41`；
+    `--wait`/`--expect`/`--since` 与 `send` 语义一致。
+
+  过程中查出一个真缺陷（L-278）：`_flush_rx()` 里有 **`if console:`** —— 终端页
+  **不可见时根本不解析**。所以 CLI 不能读页面，否则用户坐在日志页时 `screen` 会
+  返回空白。→ `TerminalPage` 新增常驻镜像 `Screen(24,80)`，`_on_rx` 无条件喂它，
+  `feed()` 同时喂可见视图与镜像。
+
+  这同时解释了上一轮 R-055 为何与终端无关：那个步骤全程不在终端页，
+  `TerminalView.feed` 被调用 **0 次**（已插桩证实）。
+
+  另两个 CLI 侧约束（L-279）：`_emit_window()` 只复制**固定白名单**字段，新命令
+  的返回值会被静默丢弃 → 加 `keep=` 显式扩展；`_control_send()` 只吃 `hex=`
+  且不追加行尾，`keys` 正好复用它。
+
 ## What changed this round (files)
 
 - `omnicom/ui/widgets.py` — `Toast.move_to(point, animate)`；`play_in()` 不再用
@@ -198,14 +220,28 @@ HEX 时间戳 / 可选列 / 不丢半行 → R-201..R-203；边缘拖动缩放 �
 - `tools/acceptance_test.py` — `TITLES` 新增 R-210，R-209 描述改为「双击选词/三击选行」。
 - `project-context/` — REQUIREMENTS 新增 R-207 / R-208 / R-209 / R-210
   （R-209 去掉「双击选整行」）；LEDGER 新增 L-270..L-276。
+- `omnicom/ui/terminal.py` — `TerminalPage` 新增常驻镜像 `self.mirror`
+  （`Screen(24,80,scrollback=500)`，从不绘制）；`feed()` 同时喂视图与镜像；
+  `reset()` 重建镜像；新增 `mirror_state(scrollback=)` 返回
+  `rows/cols/cursor/screen[]/text/scrollback/title`。
+- `omnicom/ui/main_window.py` — `_on_rx()` 不再依赖页面可见性，无条件
+  `self.console.mirror.feed(data)`；新增 `_control_screen`（读镜像）与
+  `_control_keys`（裸按键字节，转发到 `_control_send`）。
+- `omnicom/cli.py` — 新增 `cmd_screen` / `cmd_keys` + `KEY_SEQUENCES`（34 个按键名）；
+  `_emit_window()` 加 `keep=` 参数（原白名单会吞掉新字段）。
+- `docs/CLI.md` — 新增 `screen` / `keys` 两节，含「为什么需要 screen」与
+  「`send` 面向行、`keys` 发裸字节」的区别。
+- `tools/ui_selftest.py` — 新增 R-211（11 项），先切到别的页再断言镜像有内容。
+- `tools/acceptance_test.py` — `TITLES` 新增 R-211。
+- `project-context/` — REQUIREMENTS 新增 R-211；LEDGER 新增 L-278 / L-279。
 
 ## Verification (all green)
 
 ```
 python -m ruff check .                    # All checks passed!
 python tools/terminal_selftest.py         # 49/49 项通过 / ALL TERMINAL MODEL TESTS PASSED
-python tools/ui_selftest.py               # 816-817/817 项通过（本机负载下 R-054/R-055 抖动，见 L-273）
-python tools/acceptance_test.py           # 204 需求，1188 项检查，uncovered 空
+python tools/ui_selftest.py               # 851 项（本机负载下 R-051/R-055 抖动，见 L-273/L-277）
+python tools/acceptance_test.py           # 206 需求，1222 项检查，0 失败，uncovered 空
 python tools/protocol_selftest.py         # 23/23 ALL PROTOCOL SELFTESTS PASSED
 python tools/contrast_audit.py            # ALL 15 CONTRAST PAIRS >= 4.5:1
 ```
@@ -225,6 +261,8 @@ python tools/contrast_audit.py            # ALL 15 CONTRAST PAIRS >= 4.5:1
 | 终端 feed+repaint | median 40.6 ms / p95 93.2 ms | **median 26.3 ms / p95 64.1 ms** |
 | 单行内拖 3~6 列 | 高亮 x=11..880（通栏），看着像整行 | **x=50..100，宽度 == 4×cell_w** |
 | 双击 | 选中整行 | **选中词**（`1024`），三击才选整行 |
+| CLI 读屏幕 | 不支持（只有按行的 log） | **`cli screen` 返回网格 + 光标**（页面隐藏时也正确） |
+| CLI 按方向键 | 做不到（`send` 会追加 CR/LF） | **`cli keys --key down` 只发 `ESC[B`** |
 
 ## Known open
 
@@ -235,9 +273,11 @@ python tools/contrast_audit.py            # ALL 15 CONTRAST PAIRS >= 4.5:1
   被调用 **0 次**、`paintEvent` **0 次**，停顿与终端无关（L-277）。
   ⚠ 教训：我一开始只跑了一次基线拿到 148 ms PASS，差点误判成自己引入的回归
   ——**时序类指标单次采样没有说服力**。预算 40 ms / 200 ms 都不动。
-- 还没跑 `make_dist --check --zip`（上一轮跑过，本轮只改了 UI 与测试，若发版前
-  请按 R-083 再跑一次）。
-- 版本仍是 `1.1.5`；下一轮发版时把 R-184..R-210 一起写进 `CHANGELOG.md`。
+- **R-051（按钮动画在满负载下未及时停止）也会抖动**：全量套件偶发失败，
+  单独跑 `--only "R-049 视觉与选区交互"` 连跑 3 次全通过。同样是负载噪声。
+- 还没跑 `make_dist --check --zip`（上一轮跑过，本轮只改了 UI/CLI 与测试，
+  若发版前请按 R-083 再跑一次）。
+- 版本仍是 `1.1.5`；下一轮发版时把 R-184..R-211 一起写进 `CHANGELOG.md`。
 
 ## Conventions that bit us this round (now in LEDGER)
 
@@ -253,6 +293,11 @@ python tools/contrast_audit.py            # ALL 15 CONTRAST PAIRS >= 4.5:1
   而且 **Qt 没有三击事件**，第三次点击是普通 `Press`，要自己按时间窗+4 px 容差数。
 - **L-277**：时序类门禁（R-055 心跳停顿）单次 `git stash` A/B **会骗人**。
   正确做法是各跑多次比分布 + 插桩确认代码路径是否真被执行。实测基线也 0/4 通过。
+- **L-278**：`_flush_rx()` 里的 `if console:` 让终端页**不可见时完全不解析**。
+  任何要读屏幕的外部接口（CLI/插件）都不能读页面，必须读一个**常驻镜像网格**。
+- **L-279**：CLI 窗口命令两个纪律：`_emit_window()` 是**白名单**（新字段会被静默
+  丢弃，要显式 `keep=`）；`_control_send()` 只吃 `hex=` 且不加行尾（`keys` 复用它）。
+  端到端测试里 CLI 必须跑在别的线程/进程，否则和 GUI 线程互相等死。
 
 - **L-270**：行式控制台（`QPlainTextEdit` + 自己维护 `_col`）**只要吞掉 CSI 光标移动**
   就会在真实设备上出错：设备回显 `ESC[D`、本地列不动、下一个字符写进已占用的格子，
