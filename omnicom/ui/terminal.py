@@ -419,10 +419,13 @@ class TerminalView(QWidget):
         visible = self.screen.rows / total
         height = max(12.0, track.height() * visible)
         travel = track.height() - height
-        position = 0.0
-        if self._scroll_off:
-            maximum = max(1, len(self.screen.scrollback))
-            position = travel * (1 - self._scroll_off / maximum)
+        # ``_scroll_off == 0`` means the *live* screen, i.e. the bottom of the
+        # document - so the thumb belongs at the bottom, not the top.  Guarding
+        # this computation with ``if self._scroll_off:`` left ``position`` at its
+        # 0.0 default exactly for that case, so dragging to the bottom snapped the
+        # thumb back to the top (R-216).
+        maximum = max(1, len(self.screen.scrollback))
+        position = travel * (1.0 - min(1.0, self._scroll_off / maximum))
         thumb = QRectF(track.left(), track.top() + position, track.width(),
                        height)
         return track, thumb

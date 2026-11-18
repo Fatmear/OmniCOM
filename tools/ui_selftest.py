@@ -10,6 +10,7 @@ Exit code 0 means all checks passed.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import os
 import re
 import shutil
@@ -7347,9 +7348,11 @@ def main() -> int:
         view._scroll_off = 0
         app.processEvents()
         track, thumb = view._scrollbar_geometry()
-        below = int(thumb.bottom() + (track.bottom() - thumb.bottom()) / 2)
-        press(QPoint(int(track.center().x()), below))
-        release(QPoint(int(track.center().x()), below))
+        # Aim at the empty track ABOVE the thumb (the thumb sits at the bottom
+        # while we are on the live screen), otherwise we would hit the thumb.
+        above = int(track.top() + (thumb.top() - track.top()) / 2)
+        press(QPoint(int(track.center().x()), above))
+        release(QPoint(int(track.center().x()), above))
         check("R-215 点击轨道空白处会跳到该位置",
               view._scroll_off > 0, f"scroll_off={view._scroll_off}")
 
@@ -7374,6 +7377,66 @@ def main() -> int:
         release(QPoint(view.PAD_X + int(view._cell_w * 6), y))
         check("R-215 正文拖选仍然正常工作",
               view.has_selection(), repr(view.selected_text()[:24]))
+
+        # ---- the thumb must sit at the BOTTOM when we are on the live screen
+        # ``_scroll_off == 0`` means "live screen" = the end of the document, so
+        # the thumb belongs at the bottom.  Guarding the position calculation
+        # with ``if self._scroll_off:`` left it at its 0.0 default exactly then,
+        # so dragging to the bottom snapped the thumb back to the top (R-216).
+        view._scroll_off = 0
+        app.processEvents()
+        track, thumb = view._scrollbar_geometry()
+        travel = track.height() - thumb.height()
+        check("R-216 实时屏幕时滑块在底部（不是跳回顶部）",
+              abs(thumb.top() - (track.top() + travel)) <= 1.0,
+              f"thumb.top={thumb.top():.1f} 期望≈{track.top() + travel:.1f}")
+        check("R-216 实时屏幕时滑块明显不在顶部",
+              abs(thumb.top() - track.top()) > 1.0,
+              f"thumb.top={thumb.top():.1f} track.top={track.top():.1f}")
+
+        # ---- monotone: deeper history => higher thumb
+        history = len(view.screen.scrollback)
+        tops = []
+        for offset in (0, max(1, history // 4), max(1, history // 2), history):
+            view._scroll_off = min(offset, history)
+            _t, probe = view._scrollbar_geometry()
+            tops.append(probe.top())
+        check("R-216 越往历史深处滑块越高（位置单调）",
+              all(a >= b for a, b in itertools.pairwise(tops)),
+              f"{[round(value, 1) for value in tops]}")
+
+        # ---- earliest history => thumb at the very top
+        view._scroll_off = history
+        track, thumb = view._scrollbar_geometry()
+        check("R-216 滚到最早历史时滑块在顶部",
+              abs(thumb.top() - track.top()) <= 1.0,
+              f"thumb.top={thumb.top():.1f} track.top={track.top():.1f}")
+
+        # ---- and after a real drag to the bottom the thumb stays there
+        view._scroll_off = max(1, history // 2)
+        app.processEvents()
+        track, thumb = view._scrollbar_geometry()
+        centre_x = int(thumb.center().x())
+        press(QPoint(centre_x, int(thumb.center().y())))
+        move(QPoint(centre_x, int(track.bottom())))
+        release(QPoint(centre_x, int(track.bottom())))
+        app.processEvents()
+        check("R-216 拖到底后 _scroll_off 归零", view._scroll_off == 0,
+              str(view._scroll_off))
+        track, thumb = view._scrollbar_geometry()
+        travel = track.height() - thumb.height()
+        check("R-216 拖到底后滑块留在底部（不跳回顶部）",
+              abs(thumb.top() - (track.top() + travel)) <= 2.0,
+              f"thumb.top={thumb.top():.1f} 底部={track.top() + travel:.1f}")
+
+        # ---- and it can still be dragged back to the top
+        centre_x = int(thumb.center().x())
+        press(QPoint(centre_x, int(thumb.center().y())))
+        move(QPoint(centre_x, int(track.top())))
+        release(QPoint(centre_x, int(track.top())))
+        check("R-216 从底部还能拖回顶部",
+              view._scroll_off == len(view.screen.scrollback),
+              f"{view._scroll_off} / {len(view.screen.scrollback)}")
 
         # ---- no history => no bar, and no phantom hit area
         page.reset()

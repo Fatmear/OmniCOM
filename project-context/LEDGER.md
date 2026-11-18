@@ -482,3 +482,27 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
   一次点击就能跳到任意位置，且手指不松就能接着拖。
 - 自测时也踩了一次：我在 `track.top()+2` 处点击，那里**正是滑块本身**（我们是实时状态，
   滑块在顶部），于是走了 thumb 分支、`_scroll_off` 当然不变。点轨道要挑**滑块之外**的位置。
+
+## L-290 用真值判断"要不要算"，等于把最特殊的那个值留给默认值
+- 滑块位置原本写成：
+  ```python
+  position = 0.0
+  if self._scroll_off:                       # ← 短路发生在最常见的那个值上
+      position = travel * (1 - self._scroll_off / maximum)
+  ```
+  `_scroll_off == 0` 是**实时屏幕**（用户 99% 时间都停在这里），却被 `if` 跳过，
+  `position` 保持初值 `0.0` ⇒ 滑块画在**顶部**。表现就是「拉到底后滑块跳到最上面」。
+- 修法：**取消短路**，把 `0` 当成正常输入参与运算：
+  `position = travel * (1.0 - min(1.0, self._scroll_off / maximum))`。
+- 规律：当某个变量的"零值"本身是**有意义且最常见**的状态时，绝不能用
+  `if value:` 当作"是否初始化"的代名词。要么用 `is None`，要么直接算。
+  同类陷阱：`if self._scroll_off:` / `if self.count:` / `if self.offset:`。
+
+## L-291 滚动条的几何自检要覆盖"两端 + 单调性"
+- 只断言"能滚动"或"有变化"抓不到这类 bug：`_scroll_off` 从 38 变到 0 时滑块确实
+  移动了（从 218 跳到 4），看起来"有反应"，只是方向错了。
+- 可靠的三组判据：
+  ① **端点**：`_scroll_off == 0` → 滑块贴轨道**底**；`_scroll_off == history` → 贴**顶**；
+  ② **单调**：取 4 个档位的 `thumb.top`，必须严格（或非严格）递减；
+  ③ **行为**：真实拖到底后 `_scroll_off == 0` **且**再读一次几何仍在底部
+  （只查 `_scroll_off` 会漏掉"状态对了但画错了"）。

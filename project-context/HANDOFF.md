@@ -9,7 +9,8 @@ CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
 **清除窗口跟随当前页 + 终端清空后光标归零 → R-213**；
 **窗口变窄时终端按新宽度重新折行 → R-214**；
 **终端滚动条可拖动 / 点击跳转 → R-215**；
-`ui_selftest` 893 项，`acceptance_test` 210 需求 / 1264 项检查全 PASS）
+**滚动条滑块位置正确（拉到底不跳回顶部）→ R-216**；
+`ui_selftest` 900 项，`acceptance_test` 211 需求 / 1264 项检查全 PASS）
 
 ## Latest State
 
@@ -233,6 +234,15 @@ CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
   **滚动条优先于选区**（否则在滑块上按下会留下一条文字高亮）。
   点击轨道改为**跳到该位置**而不是翻页（翻页在滑块附近几乎看不出变化）。
 
+- **第十五轮（2026-11-18）**：滚动条拉到底后滑块跳到最上面（R-216，L-290/L-291）。
+  滑块位置算成 `position = 0.0; if self._scroll_off: position = travel * (...)`。
+  `_scroll_off == 0` 是**实时屏幕**（用户 99% 时间停在这里），却被 `if` 短路跳过，
+  `position` 停在初值 `0.0` ⇒ 滑块画在**顶部**。
+  → 取消短路，把 `0` 当正常输入算：
+  `position = travel * (1.0 - min(1.0, self._scroll_off / maximum))`。
+  教训：变量的**零值本身是有意义且最常见的状态**时，绝不能用 `if value:` 代充
+  "是否初始化"（同类：`if self.count:` / `if self.offset:`）。
+
 ## What changed this round (files)
 
 - `omnicom/ui/widgets.py` — `Toast.move_to(point, animate)`；`play_in()` 不再用
@@ -309,20 +319,21 @@ CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
 - `omnicom/ui/terminal.py` — 新增 `_scrollbar_geometry()` /
   `_scrollbar_hit()` / `_set_scroll_from_thumb()`；`mousePress|Move|Release`
   加拖拽分支（命中优先于选区）；`_paint_scrollbar()` 改用共享几何，拖拽时加宽提亮。
-- `tools/ui_selftest.py` — 新增 R-215（11 项，全部走真实 `QMouseEvent`）。
-- `project-context/` — REQUIREMENTS 新增 R-212 / R-213 / R-214 / R-215；
-  LEDGER 新增 L-280..L-289。
+- `tools/ui_selftest.py` — 新增 R-215（11 项）与 R-216（7 项），全部走真实 `QMouseEvent`。
+- `project-context/` — REQUIREMENTS 新增 R-212..R-216；LEDGER 新增 L-280..L-291。
 
 ## Verification (all green)
 
 ```
 python -m ruff check .                    # All checks passed!
 python tools/terminal_selftest.py         # 69/69 项通过
-python tools/ui_selftest.py               # 893/893 项通过 / ALL GUI SELFTESTS PASSED
-python tools/acceptance_test.py           # 210 需求，1264 项检查，0 失败，uncovered 空
+python tools/ui_selftest.py               # 900/900 项通过 / ALL GUI SELFTESTS PASSED
+python tools/acceptance_test.py           # 211 需求，1264 项检查，0 失败，uncovered 空
 python tools/protocol_selftest.py         # 23/23
 python tools/contrast_audit.py            # 15/15 pairs >= 4.5:1
 ```
+
+（R-055 心跳停顿偶发超标，单独复跑必过 —— 本机负载噪声，见 L-277。）
 
 关键实测数字：
 
@@ -350,6 +361,7 @@ python tools/contrast_audit.py            # 15/15 pairs >= 4.5:1
 | 窄窗口折行 | 超出宽度的内容被**截断**，光标留在原坐标 | **按新宽重折，120 字符一个不少** |
 | 缩窄后按上键 | 落在错的行（少一行/少几行） | 逐行递减 `2→1→0` |
 | 终端右侧滚动条 | **画出来的装饰，不能拖也不能点** | 可拖到顶/底、点轨道跳转 |
+| 滚动条拉到底 | 滑块**跳到顶部**（`if _scroll_off:` 短路） | 停在底部（439.3 = 439.3） |
 
 ## Known open
 
@@ -406,6 +418,9 @@ python tools/contrast_audit.py            # 15/15 pairs >= 4.5:1
   抽成一份函数供绘制与命中**共用**；命中区要比滑块宽（4 px 抓不住）；
   **滚动条优先于选区**，否则在滑块上按会留下高亮。
 - **L-289**：点轨道应该"跳到那个位置"而不是"翻一页"（跳转才看得出反馈，而且能接着拖）。
+- **L-290**：`if self._scroll_off:` 把**最常见且有意义**的零值短路掉了，滑块永远画在顶部。
+  零值本身是有效状态时不能用 `if value:` 代充"是否初始化"。
+- **L-291**：滚动条几何要同时验"两端 + 单调性 + 拖后重读"。只验"有变化"会漏掉方向错。
 
 - **L-270**：行式控制台（`QPlainTextEdit` + 自己维护 `_col`）**只要吞掉 CSI 光标移动**
   就会在真实设备上出错：设备回显 `ESC[D`、本地列不动、下一个字符写进已占用的格子，
