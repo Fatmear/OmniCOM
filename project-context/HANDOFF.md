@@ -4,8 +4,9 @@ Updated: 2026-11-17（issue #1~#11 → R-184..R-194；追加 #12/#13 → R-195/R
 吸顶条背景 → R-197；就绪栏空带 → R-186 修订 + R-199；通知堆叠 → R-200；
 HEX 时间戳 / 可选列 / 不丢半行 → R-201..R-203；边缘拖动缩放 → R-204..R-206；
 终端改写成真正的 VT100 网格屏幕 → R-207..R-209；终端行内任意位置选块复制 → R-210；
-**CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211**；
-`ui_selftest` 851 项，`acceptance_test` 206 需求 / 1222 项检查全 PASS）
+CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
+**终端不再乱行：单一屏幕 + Delete/Home/End/退格生效 → R-212**；
+`ui_selftest` 862 项，`acceptance_test` 207 需求 / 1233 项检查全 PASS）
 
 ## Latest State
 
@@ -174,6 +175,27 @@ HEX 时间戳 / 可选列 / 不丢半行 → R-201..R-203；边缘拖动缩放 �
   的返回值会被静默丢弃 → 加 `keep=` 显式扩展；`_control_send()` 只吃 `hex=`
   且不追加行尾，`keys` 正好复用它。
 
+- **第十一轮（2026-11-18）**：用户报「终端串口会乱行，我按上键或者删除的时候」。
+  探针把问题拆成**两个独立缺陷**：
+
+  1. **字节被解析了两次（L-280）。** `_on_rx` 喂 `page.mirror`，`_flush_rx` 又
+     `if console: console.feed(data)` 喂 `view.screen`。两份网格各自演进，一方漏
+     一个 chunk 就永久漂移 —— 屏幕出现重复/错位字符。
+     → 改成**一份屏幕**：`TerminalView.attach_screen(mirror)`，视图只画不解析；
+     字节唯一入口是 `TerminalPage.absorb()`，由 `_on_rx` 无条件调用。
+  2. **`~` 序列被整类丢弃（L-280）。** `_apply_csi` 只处理字母 final，而
+     `ESC[3~`（Delete）/`ESC[1~`（Home）/`ESC[4~`（End）/`ESC[5~6~`
+     的 final 都是 **`~`**，全部落进末尾那句
+     "Everything else is a mode/query we can safely ignore."
+     设备已经删了字符、屏幕没删，下一次回显就落在错位列上。
+
+  顺带修掉两个同源缺陷：**`0x7f` 被直接丢弃**（L-281——串口上很多设备用它表示退格
+  且自己不回显）；**`ESC[4~`（End）被 `ESC[4h`（IRM）抢走分支**，导致 Home 之后按
+  End 毫无反应（L-282，一个只在特定顺序下暴露的 bug）。
+
+  `view.reset()` 也从"重建 Screen"改为"原地擦屏"（L-283）——新建会让窗口继续
+  画旧网格而 CLI 读新网格。
+
 ## What changed this round (files)
 
 - `omnicom/ui/widgets.py` — `Toast.move_to(point, animate)`；`play_in()` 不再用
@@ -232,18 +254,30 @@ HEX 时间戳 / 可选列 / 不丢半行 → R-201..R-203；边缘拖动缩放 �
 - `docs/CLI.md` — 新增 `screen` / `keys` 两节，含「为什么需要 screen」与
   「`send` 面向行、`keys` 发裸字节」的区别。
 - `tools/ui_selftest.py` — 新增 R-211（11 项），先切到别的页再断言镜像有内容。
-- `tools/acceptance_test.py` — `TITLES` 新增 R-211。
-- `project-context/` — REQUIREMENTS 新增 R-211；LEDGER 新增 L-278 / L-279。
+- `tools/acceptance_test.py` — `TITLES` 新增 R-211 / R-212。
+- `omnicom/ui/terminal.py` — `TerminalPage` 新增 `absorb()`（唯一解析入口，
+  `feed` 为别名）与 `mirror_state`；`TerminalView` 新增 `attach_screen()` /
+  `refresh()`，`reset()` 改为**原地擦屏**（不再新建 `Screen`）。
+- `omnicom/ui/main_window.py` — `_on_rx()` 调 `console.absorb(data)`；
+  `_flush_rx()` **删掉** `if console: console.feed()`（重复解析的根源）。
+- `omnicom/ui/vt100.py` — `_apply_csi` 新增 `final == "~"` 分支与 `_apply_tilde()`
+  （2=Insert、3=Delete、1/7=Home、4/8=End、5/6=PageUp/Down、200/201=bracketed
+  paste）；`0x7f` 改为真退格；`_line_end()` 算行尾；IRM 移到 `_apply_mode` 的
+  `ESC[4h`/`ESC[4l`；顺手删掉 `insert_chars` 里重复的一段循环。
+- `tools/terminal_selftest.py` — 新增 10 项（DEL / Delete / Home / End / Insert /
+  `ESC[4~` 不遮蔽 `ESC[4h`），49 → **59 项**。
+- `tools/ui_selftest.py` — 新增 R-212（11 项）。
+- `project-context/` — REQUIREMENTS 新增 R-212；LEDGER 新增 L-280..L-283。
 
 ## Verification (all green)
 
 ```
 python -m ruff check .                    # All checks passed!
-python tools/terminal_selftest.py         # 49/49 项通过 / ALL TERMINAL MODEL TESTS PASSED
-python tools/ui_selftest.py               # 851 项（本机负载下 R-051/R-055 抖动，见 L-273/L-277）
-python tools/acceptance_test.py           # 206 需求，1222 项检查，0 失败，uncovered 空
-python tools/protocol_selftest.py         # 23/23 ALL PROTOCOL SELFTESTS PASSED
-python tools/contrast_audit.py            # ALL 15 CONTRAST PAIRS >= 4.5:1
+python tools/terminal_selftest.py         # 59/59 项通过
+python tools/ui_selftest.py               # 862/862 项通过 / ALL GUI SELFTESTS PASSED
+python tools/acceptance_test.py           # 207 需求，1233 项检查，0 失败，uncovered 空
+python tools/protocol_selftest.py         # 23/23
+python tools/contrast_audit.py            # 15/15 pairs >= 4.5:1
 ```
 
 关键实测数字：
@@ -263,6 +297,10 @@ python tools/contrast_audit.py            # ALL 15 CONTRAST PAIRS >= 4.5:1
 | 双击 | 选中整行 | **选中词**（`1024`），三击才选整行 |
 | CLI 读屏幕 | 不支持（只有按行的 log） | **`cli screen` 返回网格 + 光标**（页面隐藏时也正确） |
 | CLI 按方向键 | 做不到（`send` 会追加 CR/LF） | **`cli keys --key down` 只发 `ESC[B`** |
+| 终端屏幕数量 | **2 份**（view + mirror，各自解析） | **1 份**（`view.screen is page.mirror`） |
+| 按 Delete | 毫无反应（`ESC[3~` 整类被丢弃） | `abcdef` → `abcde` |
+| 按退格（`0x7f`） | 字符留在屏幕上，整行右移一列 | 擦掉前一格，光标停在原处 |
+| Home 之后按 End | 光标停在行首（被 `ESC[4h` 抢走分支） | 移到行尾文本之后 |
 
 ## Known open
 
@@ -298,6 +336,14 @@ python tools/contrast_audit.py            # ALL 15 CONTRAST PAIRS >= 4.5:1
 - **L-279**：CLI 窗口命令两个纪律：`_emit_window()` 是**白名单**（新字段会被静默
   丢弃，要显式 `keep=`）；`_control_send()` 只吃 `hex=` 且不加行尾（`keys` 复用它）。
   端到端测试里 CLI 必须跑在别的线程/进程，否则和 GUI 线程互相等死。
+- **L-280**：终端只能有**一份**屏幕状态。两份网格（view + mirror）各自解析同一串
+  字节，一方漏一个 chunk 就永久漂移；而且 `~` 结尾的 CSI（Delete/Home/End/
+  PageUp）必须单独分支，否则整类落进 "ignore" 里什么都看不见发生。
+- **L-281**：`0x7f` 在串口上就是退格（很多设备不回显），丢掉它 = 屏幕多一个字符。
+- **L-282**：**`ESC[n~` 与 `ESC[n h/l` 是两套编号**。`ESC[4~` 是 End、`ESC[4h` 是
+  IRM，绝不能用同一个 `first == 4` 判断（否则 End 分支不可达，且只在特定顺序下暴露）。
+- **L-283**：屏幕所有权移到页面后，`view.reset()` 必须在**原地**擦屏；新建 `Screen`
+  会让窗口继续画旧网格而 CLI 读新网格。
 
 - **L-270**：行式控制台（`QPlainTextEdit` + 自己维护 `_col`）**只要吞掉 CSI 光标移动**
   就会在真实设备上出错：设备回显 `ESC[D`、本地列不动、下一个字符写进已占用的格子，

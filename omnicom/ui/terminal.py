@@ -162,8 +162,31 @@ class TerminalView(QWidget):
                      max(1, int(self._cell_h)))
 
     # ------------------------------------------------------------------ output
+    def attach_screen(self, screen: Screen) -> None:
+        """Render this ``Screen`` instead of a private grid (R-212).
+
+        There used to be two: `page.mirror` (fed from `_on_rx` for the CLI) and
+        `view.screen` (fed again from `_flush_rx` only while visible).  Every byte
+        was therefore parsed twice, and the two grids drifted apart as soon as one
+        of them missed a chunk - which is exactly what garbled the echo when the
+        user pressed Left or Backspace.
+        """
+        self.screen = screen
+        self._resize_grid()
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Repaint from the shared screen (no parsing)."""
+        self._scroll_off = min(self._scroll_off, len(self.screen.scrollback))
+        self.update()
+
     def feed(self, data: bytes) -> None:
-        """Consume device bytes: parse to the grid, then answer any queries."""
+        """Consume device bytes when nothing else owns the screen.
+
+        The window path goes through ``TerminalPage.absorb()`` so a byte is parsed
+        exactly once (R-212); this direct entry point is for tests and for a view
+        used on its own.
+        """
         if not data:
             return
         self.screen.feed(data)
@@ -174,8 +197,18 @@ class TerminalView(QWidget):
         self.update()
 
     def reset(self) -> None:
-        self.screen = Screen(self.screen.rows, self.screen.cols, scrollback=5000)
-        self.screen.scrollback_limit = 5000
+        """Blank the shared screen and drop the view's per-screen bookkeeping.
+
+        The screen object is owned by ``TerminalPage`` (R-212), so this blanks it
+        in place instead of allocating a new one - otherwise the window would keep
+        rendering the old grid while the CLI read the new one.
+        """
+        self.screen.erase_in_display(2)
+        self.screen.scrollback.clear()
+        self.screen.cursor_row = 0
+        self.screen.cursor_col = 0
+        self.screen.wrap_pending = False
+        self.screen.take_replies()
         self._sel_anchor = None
         self._sel_active = None
         # Selection bookkeeping has to go too, or a stale mode/anchor makes the
@@ -911,12 +944,14 @@ class TerminalPage(QWidget):
         self.view.keyBytes.connect(self.keyBytes.emit)
         card_layout.addWidget(self.view, 1)
 
-        #: Always-on mirror of the same byte stream, sized 24x80, owned by this
-        #: page and **never painted**.  The window feeds it from `_on_rx` even
-        #: while the terminal page is hidden, so `omnicom.cli screen` can answer
-        #: what the device's screen looks like without depending on which page
-        #: the user happens to be on (R-211).
+        #: The **single** screen state for this device (R-212).  The window feeds
+        #: it from `_on_rx` even while the page is hidden, so `cli screen` never
+        #: depends on which page the user is on.  `TerminalView` renders *this*
+        #: object instead of keeping a private grid - two grids meant two parses
+        #: per byte and, worse, a mirror that silently drifted from what the user
+        #: saw (garbled echo while typing).
         self.mirror = Screen(rows=24, cols=80, scrollback=500)
+        self.view.attach_screen(self.mirror)
 
         self.hint = QLabel(tr("term.hint"))
         self.hint.setStyleSheet("color: rgba(214, 226, 240, 130); font-size: 11px;")
@@ -932,14 +967,31 @@ class TerminalPage(QWidget):
         self.btn_full.clicked.connect(self.toggle_fullscreen)
 
     # ------------------------------------------------------------------ api
-    def feed(self, data: bytes) -> None:
-        self.view.feed(data)
+    def absorb(self, data: bytes) -> None:
+        """Parse device bytes **once** into the shared screen (R-212).
+
+        This is the only place bytes enter the device screen, and the window
+        calls it from `_on_rx` whether or not the page is visible.  Parsing twice
+        (mirror + view) duplicated every character and made the echo garble when
+        the user pressed Left/Backspace, because the two grids had drifted apart.
+        """
+        if not data:
+            return
         self.mirror.feed(data)
+        replies = self.mirror.take_replies()
+        if replies:
+            self.keyBytes.emit(replies)
+        self.view.refresh()
+
+    #: Old name, kept because the tests and the send path call it.
+    feed = absorb
 
     def reset(self) -> None:
-        self.view.reset()
+        """Wipe the shared screen and the view's per-screen bookkeeping."""
         self.mirror = Screen(rows=self.mirror.rows, cols=self.mirror.cols,
                              scrollback=500)
+        self.view.attach_screen(self.mirror)
+        self.view.reset()
 
     def mirror_state(self, scrollback: int = 0) -> dict:
         """The device's screen as plain data, for ``omnicom.cli screen`` (R-211).

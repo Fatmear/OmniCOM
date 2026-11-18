@@ -381,3 +381,39 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
   `keys` 正好可以直接复用它 —— 这正是 `send`（面向行，追加 CR/LF）做不到的事。
 - 写端到端测试时，**CLI 必须跑在别的线程/进程里**：窗口在自己的 GUI 线程处理请求，
   在 GUI 线程里 `subprocess.run` 会死锁，表现为"窗口繁忙/超时"而不是报错。
+
+## L-280 「按删除键乱行」是两个独立缺陷叠在一起
+- **缺陷一：字节被解析了两次。** `_on_rx` 喂 `page.mirror`，`_flush_rx` 又
+  `if console: console.feed(data)` 喂 `view.screen`。两份网格各自演进，只要一方
+  漏掉一个 chunk 就永久漂移 —— 屏幕显示出重复/错位的字符。
+  → 改成**一份屏幕**：`TerminalView.attach_screen(mirror)`，视图只画不解析；
+  字节唯一入口是 `TerminalPage.absorb()`（由 `_on_rx` 无条件调用）。
+- **缺陷二：`~` 序列被整类丢弃。** `_apply_csi` 的分支只处理字母 final
+  （`A`..`u`），而 **`ESC[3~`（Delete）/`ESC[1~`（Home）/`ESC[4~`（End）/
+  `ESC[5~6~`（PageUp/Down）的 final 是 `~`**，全部落进末尾那句
+  "Everything else is a mode/query we can safely ignore."。设备已经删了字符，
+  屏幕没删，下一次回显就落在错位的列上。
+- **判据**：`abcdef` + `ESC[D` + `ESC[3~` 必须得到 `abcde` 而不是 `abcdef`。
+
+## L-281 `0x7f` 不是"控制字符"，在串口上它就是退格
+- `_consume_char` 原来写 `if char == "\x7f": return index + 1` —— **直接丢弃**。
+  真实终端里 DEL 确实不算编辑操作（由 shell 处理并回显），但**很多设备/裸
+  `getchar()` 循环会发 0x7f 表示"删掉上一个字符"且自己不回显**。丢掉它 = 屏幕多一个
+  字符，之后整行右移一列，看起来就是乱行。
+- 修法：退回一列并擦掉该格（光标停在原处，与 xterm 一致），同时清 `wrap_pending`。
+
+## L-282 `ESC[4~`（End）与 `ESC[4h`（IRM）不能共用一个 `first == 4`
+- 我第一版在 `_apply_tilde` 里写 `elif first == 4: self.insert_mode = False`，
+  结果 End 分支 `elif first in (4, 8)` **永远不可达** —— Home 之后按 End 毫无反应，
+  而单独按 End 却"看起来正常"（光标本来就在行尾）。是个只在这种顺序下暴露的 bug。
+- 正确分工：`ESC[n~` 只处理"编辑键"语义（2=Insert, 3=Delete, 1/7=Home,
+  4/8=End, 5/6=PageUp/Down, 200/201=bracketed paste）；IRM 属于
+  **`ESC[4h` / `ESC[4l`**，放进 `_apply_mode` 的 `not private and code == 4`。
+- 教训：**编号参数在不同 final 下含义完全不同**，同一个数字绝不能跨 final 复用。
+
+## L-283 `view.reset()` 只清选区、不清屏，会让老测试悄悄失效
+- R-212 把屏幕所有权移到 `TerminalPage` 之后，`TerminalView.reset()` 如果不擦屏，
+  就变成"重置选区"而不是"重置终端"，R-209/R-210 立刻大面积失败
+  （`selected_text()` 返回 `''`，因为屏幕里还留着上一步的内容）。
+- 修法：`reset()` 在**原地** `erase_in_display(2)` + 清 `scrollback` + 光标归零，
+  不新建 `Screen` —— 新建会让窗口继续画旧网格、CLI 读新网格。

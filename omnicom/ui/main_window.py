@@ -1986,12 +1986,11 @@ class OmniWindow(QMainWindow):
         overflow = len(self._control_ring) - self.CONTROL_RING
         if overflow > 0:
             del self._control_ring[:overflow]
-        # Feed the CLI-facing mirror screen as well.  It is deliberately separate
-        # from the terminal page: the page only parses while it is *visible*
-        # (`_flush_rx` checks `isVisible`), so an agent asking for the screen
-        # while the user sits on the log page would otherwise get an empty
-        # answer (R-211).
-        self.console.mirror.feed(data)
+        # Parse the bytes into the device screen **once**, here, regardless of
+        # which page is visible (R-212).  `TerminalView` renders this very screen
+        # object, so there is no second grid to drift apart - and `cli screen`
+        # keeps working while the user sits on the log page (R-211).
+        self.console.absorb(data)
         self._rx_queue.append((ts, data))
         if not self._rx_timer.isActive():
             self._rx_timer.start()
@@ -2000,13 +1999,10 @@ class OmniWindow(QMainWindow):
         if not self._rx_queue:
             return
         queue, self._rx_queue = self._rx_queue, []
-        console = self.console.isVisible()
         self.log.begin_batch()
         try:
             for ts, data in queue:
                 self._feed(ts, data)
-                if console:
-                    self.console.feed(data)
         finally:
             self.log.end_batch()
         self._check_trim()

@@ -246,6 +246,21 @@ class Screen:
         if char < " ":
             return index + 1
         if char == "\x7f":
+            # DEL / Backspace (R-212).  A *terminal* does not edit the buffer on
+            # its own - the shell does, and re-echoes.  But a device that has
+            # local echo on (or a plain `getchar()` loop) sends 0x7f to mean
+            # "erase the previous character" without echoing anything, and that
+            # used to be dropped on the floor: the character stayed on screen
+            # while the device had already forgotten it, so the next line looked
+            # shifted by one column.  Erasing here matches what every xterm-class
+            # terminal shows for 0x7f.
+            if self.wrap_pending:
+                self.wrap_pending = False
+            elif self.cursor_col > 0:
+                self.cursor_col -= 1
+                row = self._grid[self.cursor_row]
+                if not row[self.cursor_col].continuation:
+                    row[self.cursor_col] = Cell(style=self.style)
             return index + 1
         self._put(char)
         return index + 1
@@ -415,10 +430,6 @@ class Screen:
         for col in range(self.cursor_col,
                          min(self.cols, self.cursor_col + count)):
             row[col] = Cell(style=self.style)
-        # The vacated cells are blanks, not stale copies of what was there.
-        for col in range(self.cursor_col,
-                         min(self.cols, self.cursor_col + count)):
-            row[col] = Cell(style=self.style)
 
     def delete_chars(self, count: int) -> None:
         row = self._grid[self.cursor_row]
@@ -427,6 +438,20 @@ class Screen:
             source = col + count
             row[col] = (copy.copy(row[source]) if source < self.cols
                         else Cell(style=self.style))
+
+    def _line_end(self) -> int:
+        """Column just past the last non-blank cell on the cursor row.
+
+        ``ESC[4~`` (End) must land **after the text**, not at ``cols - 1``: a
+        shell that moves to the far right of the window pushes its next echo off
+        to the wall and the line reads as scrambled (R-212).
+        """
+        row = self._grid[self.cursor_row]
+        last = 0
+        for col, cell in enumerate(row):
+            if cell.char and cell.char != " " and not cell.continuation:
+                last = col + max(1, cell.width)
+        return min(self.cols - 1, last)
 
     # ---------------------------------------------------------------- cursor
     def _move_to(self, row: int, col: int) -> None:
@@ -641,7 +666,41 @@ class Screen:
             saved = getattr(self, "_saved", None)
             if saved:
                 self.cursor_row, self.cursor_col, self.style = saved
+        elif final == "~":
+            self._apply_tilde(first, params)
         # Everything else is a mode/query we can safely ignore.
+
+    def _apply_tilde(self, first: int, params: list[int]) -> None:
+        """``ESC[n ~`` — the numbered editing keys (R-212).
+
+        These were **silently dropped**: ``ESC[3~`` (Delete) hit the catch-all
+        comment at the end of ``_apply_csi`` and did nothing at all, so pressing
+        Delete changed nothing on screen while the device had already removed the
+        character.  The next echo then landed on a stale cursor and the line
+        looked scrambled - the reported 「按删除键乱行」.
+
+        Also here: Home/End (``1``/``4``/``7``/``8``) and PageUp/PageDown
+        (``5``/``6``), which a shell sends when a line is longer than the window.
+        """
+        if first == 2:                         # Insert
+            self.insert_mode = True
+        elif first == 3:                       # Delete: pull the row left
+            self.delete_chars(1)
+        elif first in (1, 7):                  # Home
+            self._move_to(self.cursor_row, 0)
+        elif first in (4, 8):                  # End
+            self._move_to(self.cursor_row, self._line_end())
+        elif first == 5:                       # PageUp
+            self._move_rel(-max(1, self.rows - 1), 0)
+        elif first == 6:                       # PageDown
+            self._move_rel(max(1, self.rows - 1), 0)
+        elif first == 200:                     # bracketed paste begin
+            self.bracketed_paste = True
+        elif first == 201:                     # bracketed paste end
+            self.bracketed_paste = False
+        elif first == 11:                      # ESC[11~ .. : F1..F4 aliases
+            pass
+        del params                              # reserved for modifier suffixes
 
     def _apply_mode(self, params: list[int], enabled: bool, private: bool) -> None:
         for code in params:
@@ -653,6 +712,12 @@ class Screen:
                 self.app_cursor_keys = enabled
             elif private and code == 6:
                 self.origin_mode = enabled
+            elif not private and code == 4:
+                # Insert/Replace (IRM).  ``ESC[4h`` is what a terminal sends;
+                # ``ESC[4~`` is **End** and must not be conflated with it - the
+                # first version of the ``~`` table set insert_mode from 4 and the
+                # End branch became unreachable (R-212).
+                self.insert_mode = enabled
                 self._move_to(0, 0)
             elif private and code == 2004:
                 self.bracketed_paste = enabled

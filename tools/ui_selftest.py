@@ -6997,6 +6997,105 @@ def main() -> int:
         app.processEvents()
         next_()
 
+    def step_terminal_single_screen(next_):
+        """R-212: one screen state, and Delete/Backspace actually edit it.
+
+        The reported symptom was 「终端串口会乱行，按上键或者删除的时候」.  Two
+        independent defects produced it:
+
+        * every byte was parsed **twice** (`_on_rx` fed the mirror, `_flush_rx`
+          fed the view again while visible) so characters appeared duplicated,
+        * ``ESC[3~`` (Delete), ``ESC[1~/4~`` (Home/End) and ``0x7f`` (the
+          backspace a serial device really sends) were **silently dropped** by
+          ``_apply_csi``'s catch-all, so the screen kept the erased character and
+          the next echo landed one column off.
+
+        Driving the real window is the only honest check: the model can be right
+        while the window parses the bytes into a second, drifting grid.
+        """
+        window.switch_page("console")
+        app.processEvents()
+        page = window.console
+        view = page.view
+
+        def send(data: bytes) -> None:
+            window._on_rx(0.0, data)
+            window._flush_rx()
+            app.processEvents()
+
+        page.reset()
+        app.processEvents()
+        check("R-212 视图渲染的就是设备屏幕（只有一个网格）",
+              view.screen is page.mirror,
+              f"{id(view.screen)} vs {id(page.mirror)}")
+
+        # ---- no duplication: one byte in, one character out
+        send(b"root@pi:~# ")
+        for char in b"abc":
+            send(bytes([char]))
+        check("R-212 逐字回显不重复（字节只解析一次）",
+              view.screen.row_text(0) == "root@pi:~# abc",
+              repr(view.screen.row_text(0)))
+
+        # ---- Left arrow then Delete erases the character under the cursor
+        send(b"\x1b[D\x1b[D")
+        check("R-212 左移两次后光标落在 'b' 上",
+              view.screen.cursor_col == 12, str(view.screen.cursor_col))
+        send(b"\x1b[3~")
+        check("R-212 ESC[3~ (Delete) 真的删掉光标处的字符",
+              view.screen.row_text(0) == "root@pi:~# ac",
+              repr(view.screen.row_text(0)))
+
+        # ---- Backspace as a serial device sends it (0x7f)
+        send(b"X")
+        send(b"\x7f")
+        check("R-212 0x7f 退格被处理（不是被丢弃）",
+              view.screen.row_text(0) == "root@pi:~# a",
+              repr(view.screen.row_text(0)))
+
+        # ---- Home / End: End must work *after* Home (the 4~ / 4h clash)
+        send(b"\x1b[1~")
+        check("R-212 ESC[1~ (Home) 回到行首", view.screen.cursor_col == 0,
+              str(view.screen.cursor_col))
+        send(b"\x1b[4~")
+        check("R-212 Home 之后 ESC[4~ (End) 仍然有效（不被当成 IRM）",
+              view.screen.cursor_col == 12, str(view.screen.cursor_col))
+
+        # ---- the CLI keeps seeing the same screen while the page is hidden
+        window.switch_page("terminal")
+        app.processEvents()
+        state = window._control_screen({"scrollback": 0}, {})
+        check("R-212 页面隐藏时 CLI 读到的首行与视图一致",
+              (state.get("text") or "").splitlines()[0] == view.screen.row_text(0),
+              f"{(state.get('text') or '')[:30]!r} vs {view.screen.row_text(0)!r}")
+        window.switch_page("console")
+        app.processEvents()
+        check("R-212 切回终端页后内容没有跳变",
+              view.screen.row_text(0) == "root@pi:~# a",
+              repr(view.screen.row_text(0)))
+
+        # ---- a 200-token burst arrives exactly once
+        page.reset()
+        app.processEvents()
+        send(b"".join(b"%03d-" % index for index in range(200)))
+        joined = "".join(view.screen.row_text(row)
+                         for row in range(view.screen.rows))
+        check("R-212 批量接收每个片段只出现一次",
+              joined.count("000-") == 1 and joined.count("199-") == 1,
+              f"000-={joined.count('000-')} 199-={joined.count('199-')}")
+
+        # ---- resizing must not swap the shared screen out
+        before = view.screen
+        view.resize(700, 380)
+        app.processEvents()
+        check("R-212 改变控件尺寸不会换掉共享屏幕对象",
+              view.screen is page.mirror is before, "objects diverged")
+
+        page.reset()
+        window.switch_page("terminal")
+        app.processEvents()
+        next_()
+
     def step_terminal_buttons(next_):
         """R-188: reset and full screen are two different, working actions."""
         from omnicom.i18n import tr
@@ -8076,6 +8175,7 @@ def main() -> int:
     runner.add("R-193 terminal_caret_tab", step_terminal_caret_tab)
     runner.add("R-207 terminal_grid", step_terminal_grid)
     runner.add("R-211 terminal_cli", step_terminal_cli)
+    runner.add("R-212 terminal_single_screen", step_terminal_single_screen)
     runner.add("R-200 toast_stack", step_toast_stack)
     runner.add("R-201 hex_columns", step_hex_columns)
     runner.add("R-203 hex_partial", step_hex_partial_survives)

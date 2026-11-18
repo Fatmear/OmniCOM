@@ -231,6 +231,48 @@ def run() -> int:
     check("TAB 跳到 8 的倍数", sc.cursor_col == 9 and sc.row_text(0) == "        X",
           f"col={sc.cursor_col} {sc.row_text(0)!r}")
 
+    # ------------------------------------------------- ESC[n~ numbered keys
+    # A backspace key on a serial device often sends DEL (0x7f) instead of BS.
+    # Dropping it on the floor left the erased character on screen while the
+    # device had already forgotten it, so the next line was shifted by one - the
+    # reported 「按删除键乱行」.
+    sc = screen()
+    sc.feed(b"abcdef")
+    sc.feed(b"\x7f")
+    check("0x7f (DEL) 擦掉前一个字符（不是被忽略）",
+          sc.row_text(0) == "abcde" and sc.cursor_col == 5,
+          f"{sc.row_text(0)!r} col={sc.cursor_col}")
+    sc.feed(b"\x7f\x7f")
+    check("连续 DEL 逐步擦除", sc.row_text(0) == "abc", repr(sc.row_text(0)))
+
+    sc = screen()
+    sc.feed(b"abc")
+    sc.feed(b"\x1b[D")                 # cursor on 'c'
+    sc.feed(b"\x1b[3~")                # Delete
+    check("ESC[3~ (Delete) 删掉光标下的字符并左移右侧",
+          sc.row_text(0) == "ab", repr(sc.row_text(0)))
+
+    sc = screen()
+    sc.feed(b"abcdef")
+    sc.feed(b"\x1b[1~")
+    check("ESC[1~ (Home) 回到行首", sc.cursor_col == 0, str(sc.cursor_col))
+    sc.feed(b"\x1b[4~")
+    check("ESC[4~ (End) 移到行尾文本之后（Home 之后也要有效）",
+          sc.cursor_col == 6, str(sc.cursor_col))
+    sc.feed(b"\x1b[8~")
+    check("ESC[8~ 也是 End（xterm 别名）", sc.cursor_col == 6, str(sc.cursor_col))
+
+    sc = screen()
+    sc.feed(b"\x1b[2~")
+    check("ESC[2~ 进入插入模式", sc.insert_mode is True, str(sc.insert_mode))
+    sc.feed(b"xy")
+    sc.feed(b"\x1b[4h")                # IRM on
+    check("ESC[4h 也是插入模式", sc.insert_mode is True)
+    sc.feed(b"\x1b[4l")
+    check("ESC[4l 回到替换模式", sc.insert_mode is False, str(sc.insert_mode))
+    check("ESC[4~ 不会被误当成 ESC[4h（End 与 IRM 是两个东西）",
+          screen().insert_mode is False)
+
     # ----------------------------------------------------- shell-like CLI editing
     sc = screen()
     # bash line editor: type `ls -l`, then two left arrows, delete, retype.
