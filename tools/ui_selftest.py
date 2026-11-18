@@ -7096,6 +7096,92 @@ def main() -> int:
         app.processEvents()
         next_()
 
+    def step_clear_follows_page(next_):
+        """R-213: 清除窗口 clears the view you are looking at; 清空 homes the cursor.
+
+        The button used to be wired straight to ``clear_log``, so on the terminal
+        page it wiped an invisible log and left the terminal untouched (「点了没
+        反应」).  And ``view.clear()`` only ran ``ESC[2J``, which blanks the cells
+        but leaves the cursor where it was - the next output then appeared
+        mid-line (「光标不是从头开始，而是接着清空前的位置」).
+        """
+        window.switch_page("console")
+        app.processEvents()
+        page = window.console
+        view = page.view
+
+        def send(data: bytes) -> None:
+            window._on_rx(0.0, data)
+            window._flush_rx()
+            app.processEvents()
+
+        # ---- 清空 must home the cursor, not just blank the cells
+        page.reset()
+        app.processEvents()
+        send(b"line one\r\nline two")
+        moved = (view.screen.cursor_row, view.screen.cursor_col)
+        check("R-213 清除前光标不在原点（用例有效）", moved != (0, 0), str(moved))
+        view.clear()
+        app.processEvents()
+        check("R-213 终端清空后光标回到 (0,0)",
+              (view.screen.cursor_row, view.screen.cursor_col) == (0, 0),
+              f"{(view.screen.cursor_row, view.screen.cursor_col)}")
+        check("R-213 终端清空后屏幕是空的",
+              view.screen.row_text(0).strip() == ""
+              and view.screen.row_text(1).strip() == "",
+              repr(view.screen.row_text(0)))
+        send(b"fresh")
+        check("R-213 清空后新内容真的从行首开始",
+              view.screen.row_text(0) == "fresh", repr(view.screen.row_text(0)))
+
+        # ---- 清除窗口 on the terminal page clears the terminal, not the log
+        page.reset()
+        app.processEvents()
+        window.clear_log()
+        app.processEvents()
+        send(b"terminal content")
+        window.log.append_line(0.0, "RX", "log content", "rx")
+        app.processEvents()
+        window.switch_page("console")
+        app.processEvents()
+        window.clear_window()
+        app.processEvents()
+        check("R-213 终端页点「清除窗口」清的是终端",
+              view.screen.row_text(0).strip() == "",
+              repr(view.screen.row_text(0)))
+        check("R-213 终端页点「清除窗口」不动日志",
+              "log content" in window.log.plain_text(),
+              repr(window.log.plain_text()[:40]))
+
+        # ---- and on the log page it clears the log, not the terminal
+        page.reset()
+        app.processEvents()
+        send(b"keep me in terminal")
+        window.log.append_line(0.0, "RX", "log to clear", "rx")
+        app.processEvents()
+        window.switch_page("terminal")
+        app.processEvents()
+        check("R-213 当前页识别为 terminal", window.current_page() == "terminal",
+              window.current_page())
+        window.clear_window()
+        app.processEvents()
+        check("R-213 日志页点「清除窗口」清的是日志",
+              "log to clear" not in window.log.plain_text(),
+              repr(window.log.plain_text()[:40]))
+        check("R-213 日志页点「清除窗口」不动终端",
+              "keep me in terminal" in view.screen.row_text(0),
+              repr(view.screen.row_text(0)))
+
+        window.switch_page("console")
+        app.processEvents()
+        check("R-213 当前页识别为 console", window.current_page() == "console",
+              window.current_page())
+        page.reset()
+        window.clear_log()
+        window.switch_page("terminal")
+        app.processEvents()
+        next_()
+
     def step_terminal_buttons(next_):
         """R-188: reset and full screen are two different, working actions."""
         from omnicom.i18n import tr
@@ -8176,6 +8262,7 @@ def main() -> int:
     runner.add("R-207 terminal_grid", step_terminal_grid)
     runner.add("R-211 terminal_cli", step_terminal_cli)
     runner.add("R-212 terminal_single_screen", step_terminal_single_screen)
+    runner.add("R-213 clear_follows_page", step_clear_follows_page)
     runner.add("R-200 toast_stack", step_toast_stack)
     runner.add("R-201 hex_columns", step_hex_columns)
     runner.add("R-203 hex_partial", step_hex_partial_survives)

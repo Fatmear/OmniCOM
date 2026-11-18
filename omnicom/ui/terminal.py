@@ -224,8 +224,20 @@ class TerminalView(QWidget):
         self.update()
 
     def clear(self) -> None:
-        """Context-menu 清屏: blank the screen but keep the size and scrollback."""
+        """Context-menu 清屏: blank the screen and put the cursor back at (0,0).
+
+        ``erase_in_display(2)`` only blanks the cells; the cursor kept whatever
+        column it had, so the next output appeared mid-line - the reported
+        「右键清空后光标不是从头开始」(R-213).  ``ESC[2J`` alone does not home the
+        cursor in a real terminal either; only ``ESC[2J ESC[H`` does.
+        """
         self.screen.erase_in_display(2)
+        self.screen.cursor_row = 0
+        self.screen.cursor_col = 0
+        self.screen.wrap_pending = False
+        self._scroll_off = 0
+        self._sel_anchor = None
+        self._sel_active = None
         self.update()
 
     def toPlainText(self) -> str:
@@ -992,6 +1004,10 @@ class TerminalPage(QWidget):
                              scrollback=500)
         self.view.attach_screen(self.mirror)
         self.view.reset()
+
+    def clear(self) -> None:
+        """清屏 for the window's 清除窗口 button and the page's own button."""
+        self.view.clear()
 
     def mirror_state(self, scrollback: int = 0) -> dict:
         """The device's screen as plain data, for ``omnicom.cli screen`` (R-211).

@@ -1454,6 +1454,27 @@ class OmniWindow(QMainWindow):
             if widget is not None:
                 widget.setFocus()
 
+    def current_page(self) -> str:
+        """Key of the page the user is looking at (``log`` / ``console`` / …)."""
+        index = self.stack.currentIndex()
+        if 0 <= index < len(self._page_keys):
+            return self._page_keys[index]
+        return ""
+
+    def clear_window(self) -> None:
+        """The 清除窗口 button clears **whichever** view is on screen (R-213).
+
+        Clearing was wired straight to ``clear_log``, so pressing it while the
+        terminal was showing wiped a log the user could not see and left the
+        terminal untouched - which reads as "the button does nothing".  The
+        button now follows the *visible* page: log page → log, terminal page →
+        terminal screen.
+        """
+        if self.current_page() == "console":
+            self.console.clear()
+            return
+        self.clear_log()
+
     # -------------------------------------------------------------- plugins
     def _load_plugins(self) -> None:
         self.plugins.load()
@@ -1550,7 +1571,7 @@ class OmniWindow(QMainWindow):
         self.btn_refresh.clicked.connect(lambda: self._on_ports(self.bridge.manager.ports()))
         self.btn_connect.clicked.connect(self.toggle_connection)
 
-        self.btn_clear.clicked.connect(self.clear_log)
+        self.btn_clear.clicked.connect(self.clear_window)
         self.btn_save_log.clicked.connect(self.save_view)
 
         self.search_panel.attach_log(self.log)

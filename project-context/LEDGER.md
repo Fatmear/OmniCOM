@@ -417,3 +417,21 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
   （`selected_text()` 返回 `''`，因为屏幕里还留着上一步的内容）。
 - 修法：`reset()` 在**原地** `erase_in_display(2)` + 清 `scrollback` + 光标归零，
   不新建 `Screen` —— 新建会让窗口继续画旧网格、CLI 读新网格。
+
+## L-284 「清除窗口」绑死 `clear_log`，在终端页等于没反应
+- `btn_clear.clicked.connect(self.clear_log)` 是写死的。用户坐在终端页时按它，
+  清掉的是**看不见的日志**，终端纹丝不动 —— 从用户角度就是「这个按钮坏了」。
+- 修法：`clear_window()` 读 `current_page()`，`console` 页清终端、其余清日志。
+  判据必须两边都测：终端页清完 **log 仍在**，日志页清完 **终端仍在**；
+  只测「清掉了」会漏掉"清错对象"。
+- 同类风险：任何"动作按钮"接到具体视图前，先问一句"它在别的页上应该做什么"。
+
+## L-285 `ESC[2J` 不清光标，所以清屏后输出从半行开始
+- `TerminalView.clear()` 原来只有 `self.screen.erase_in_display(2)`。
+  `ESC[2J` 的语义是**只擦字符、不动光标**（真正的终端也是靠
+  `ESC[2J ESC[H` 两件事才回到左上角）。
+- 于是右键清空后光标停在 `(1, 8)`，下一行输出从第 8 列开始 ——
+  用户看到的就是「光标不是从头开始，而是接着清空前的位置」。
+- 修法：`erase_in_display(2)` 之后显式把 `cursor_row/cursor_col` 归零、
+  清 `wrap_pending`、清选区与回滚偏移。
+- 通用教训：凡是"看起来清干净了但位置不对"的 bug，先查**光标是不是独立的第二件事**。

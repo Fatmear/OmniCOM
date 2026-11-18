@@ -6,7 +6,8 @@ HEX 时间戳 / 可选列 / 不丢半行 → R-201..R-203；边缘拖动缩放 �
 终端改写成真正的 VT100 网格屏幕 → R-207..R-209；终端行内任意位置选块复制 → R-210；
 CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
 **终端不再乱行：单一屏幕 + Delete/Home/End/退格生效 → R-212**；
-`ui_selftest` 862 项，`acceptance_test` 207 需求 / 1233 项检查全 PASS）
+**清除窗口跟随当前页 + 终端清空后光标归零 → R-213**；
+`ui_selftest` 872 项，`acceptance_test` 208 需求 / 1243 项检查全 PASS）
 
 ## Latest State
 
@@ -196,6 +197,17 @@ CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
   `view.reset()` 也从"重建 Screen"改为"原地擦屏"（L-283）——新建会让窗口继续
   画旧网格而 CLI 读新网格。
 
+- **第十二轮（2026-11-18）**：两个清除相关的问题（R-213）。
+
+  1. **「清除窗口」在终端页等于没反应**（L-284）。按钮写死接 `clear_log`，
+     坐在终端页按它，清掉的是看不见的日志、终端纹丝不动。
+     → 新增 `current_page()` + `clear_window()`：`console` 页清终端，其余清日志。
+  2. **终端清空后光标停在原处**（L-285）。`clear()` 只有 `erase_in_display(2)`，
+     而 `ESC[2J` 的语义是**只擦字符、不动光标**（真终端靠 `ESC[2J ESC[H` 两件事）。
+     光标停在 `(1,8)`，下一行输出就从第 8 列开始 —— 用户看到的就是
+     「光标不是从头开始，而是接着清空前的位置」。→ 显式归零光标、清 `wrap_pending`/
+     选区/回滚偏移。
+
 ## What changed this round (files)
 
 - `omnicom/ui/widgets.py` — `Toast.move_to(point, animate)`；`play_in()` 不再用
@@ -266,16 +278,20 @@ CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
   `ESC[4h`/`ESC[4l`；顺手删掉 `insert_chars` 里重复的一段循环。
 - `tools/terminal_selftest.py` — 新增 10 项（DEL / Delete / Home / End / Insert /
   `ESC[4~` 不遮蔽 `ESC[4h`），49 → **59 项**。
-- `tools/ui_selftest.py` — 新增 R-212（11 项）。
-- `project-context/` — REQUIREMENTS 新增 R-212；LEDGER 新增 L-280..L-283。
+- `tools/ui_selftest.py` — 新增 R-212（11 项）与 R-213（10 项）。
+- `omnicom/ui/main_window.py` — 新增 `current_page()` / `clear_window()`；
+  `btn_clear` 改接 `clear_window`。
+- `omnicom/ui/terminal.py` — `TerminalPage.clear()` 新增；`TerminalView.clear()`
+  在 `erase_in_display(2)` 之后显式归零光标。
+- `project-context/` — REQUIREMENTS 新增 R-212 / R-213；LEDGER 新增 L-280..L-285。
 
 ## Verification (all green)
 
 ```
 python -m ruff check .                    # All checks passed!
 python tools/terminal_selftest.py         # 59/59 项通过
-python tools/ui_selftest.py               # 862/862 项通过 / ALL GUI SELFTESTS PASSED
-python tools/acceptance_test.py           # 207 需求，1233 项检查，0 失败，uncovered 空
+python tools/ui_selftest.py               # 872/872 项通过 / ALL GUI SELFTESTS PASSED
+python tools/acceptance_test.py           # 208 需求，1243 项检查，0 失败，uncovered 空
 python tools/protocol_selftest.py         # 23/23
 python tools/contrast_audit.py            # 15/15 pairs >= 4.5:1
 ```
@@ -301,6 +317,8 @@ python tools/contrast_audit.py            # 15/15 pairs >= 4.5:1
 | 按 Delete | 毫无反应（`ESC[3~` 整类被丢弃） | `abcdef` → `abcde` |
 | 按退格（`0x7f`） | 字符留在屏幕上，整行右移一列 | 擦掉前一格，光标停在原处 |
 | Home 之后按 End | 光标停在行首（被 `ESC[4h` 抢走分支） | 移到行尾文本之后 |
+| 终端页点「清除窗口」 | 清掉看不见的日志，终端不动 | **清终端，日志保留** |
+| 终端右键清空后光标 | 停在 `(1,8)`，新内容从第 8 列开始 | **回到 `(0,0)`** |
 
 ## Known open
 
@@ -344,6 +362,10 @@ python tools/contrast_audit.py            # 15/15 pairs >= 4.5:1
   IRM，绝不能用同一个 `first == 4` 判断（否则 End 分支不可达，且只在特定顺序下暴露）。
 - **L-283**：屏幕所有权移到页面后，`view.reset()` 必须在**原地**擦屏；新建 `Screen`
   会让窗口继续画旧网格而 CLI 读新网格。
+- **L-284**：动作按钮不能写死一个目标。`btn_clear` 固定接 `clear_log`，在终端页
+  就成了「清掉看不见的东西」。按 `current_page()` 分派，并且**两边都要断言**
+  （清对了 + 另一个没被动）。
+- **L-285**：`ESC[2J` **只擦字符、不动光标**；清屏后要显式归零光标才算"从头开始"。
 
 - **L-270**：行式控制台（`QPlainTextEdit` + 自己维护 `_col`）**只要吞掉 CSI 光标移动**
   就会在真实设备上出错：设备回显 `ESC[D`、本地列不动、下一个字符写进已占用的格子，
