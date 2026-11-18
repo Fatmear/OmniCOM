@@ -462,3 +462,23 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - 又一次被自己的探针期望骗到：第 4 步我让光标站在行尾空白处按 Delete，
   认为"应该少一个字符"，其实**在空处按 Delete 本来就是无操作**。
   测按键行为前先确认光标下面有没有东西。
+
+## L-288 手画的滚动条不是控件 —— 必须自己实现命中/拖动/跳转
+- `_paint_scrollbar()` 只做了 `drawRoundedRect`：**没有任何输入处理**，所以鼠标在上面
+  按下等于点正文（结果是被当成选区的起点）。用户说的「滚动条无法拖动」就是这个。
+- 修法：把几何抽成 `_scrollbar_geometry() -> (track, thumb)`，**绘制与鼠标共用**这一份
+  （两处各算一遍必然漂移）；再补 `_scrollbar_hit()` / `_set_scroll_from_thumb()` /
+  `mousePress|Move|Release` 的拖拽分支。
+- 两个细节：
+  * **命中区要比滑块宽**。滑块只有 4 px，严格按像素命中几乎抓不住 → 向两侧各放宽 4 px。
+  * **滚动条优先于选区**。否则在滑块上按下会开始一段文字选区，松手后留下一条高亮。
+    press 里先判 `_scrollbar_hit()`，命中就清空选区并进入拖拽态。
+
+## L-289 点击轨道应该"跳过去"，不是"翻一页"
+- 我第一版写的是 `_page_scroll()`（按 `screen.rows - 1` 翻页）。问题：如果点在滑块
+  附近，翻一页几乎看不出变化，用户会以为"点了没反应"。
+- 真实滚动条（Windows/macOS/xterm）的行为是**把滑块中心移到指针处**，然后可以继续拖。
+  改成 `_scroll_drag_offset = thumb.height() / 2` + `_set_scroll_from_thumb()`，
+  一次点击就能跳到任意位置，且手指不松就能接着拖。
+- 自测时也踩了一次：我在 `track.top()+2` 处点击，那里**正是滑块本身**（我们是实时状态，
+  滑块在顶部），于是走了 thumb 分支、`_scroll_off` 当然不变。点轨道要挑**滑块之外**的位置。

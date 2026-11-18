@@ -104,6 +104,10 @@ class TerminalView(QWidget):
         #: Column - 0 of the painted region; the grid is sized to the widget and
         #: the scrollback is shown above row 0 (like a real terminal's history).
         self._scroll_off = 0
+        #: Dragging the painted scrollbar (R-215): the thumb is not a widget, so
+        #: the press/move/release handling lives here.
+        self._scroll_dragging = False
+        self._scroll_drag_offset = 0.0
 
         self._caret_on = True
         self._caret_focused = False
@@ -221,6 +225,7 @@ class TerminalView(QWidget):
         self._autoscroll_dir = 0
         self._autoscroll.stop()
         self._scroll_off = 0
+        self._scroll_dragging = False
         self.update()
 
     def clear(self) -> None:
@@ -398,6 +403,61 @@ class TerminalView(QWidget):
         rows.extend(self.screen._grid)
         return rows
 
+    def _scrollbar_geometry(self) -> tuple[QRectF, QRectF] | None:
+        """``(track, thumb)`` in widget coordinates, or ``None`` when not shown.
+
+        One place computes it, and both the painter and the mouse handlers use
+        it - a hand-painted scrollbar that cannot be dragged is just decoration
+        (the reported 「右侧的滚动条无法拖动」, R-215).
+        """
+        total = len(self.screen.scrollback) + self.screen.rows
+        if not self.screen.scrollback or total <= self.screen.rows:
+            return None
+        track = QRectF(self.rect().adjusted(self.width() - 7, 4, -3, -4))
+        if not track.isValid():
+            return None
+        visible = self.screen.rows / total
+        height = max(12.0, track.height() * visible)
+        travel = track.height() - height
+        position = 0.0
+        if self._scroll_off:
+            maximum = max(1, len(self.screen.scrollback))
+            position = travel * (1 - self._scroll_off / maximum)
+        thumb = QRectF(track.left(), track.top() + position, track.width(),
+                       height)
+        return track, thumb
+
+    def _scrollbar_hit(self, point) -> str:
+        """``"thumb"`` / ``"track"`` / ``""`` for a point in the scrollbar."""
+        geometry = self._scrollbar_geometry()
+        if geometry is None:
+            return ""
+        track, thumb = geometry
+        # Widen the hit area to the full right margin: a 4 px thumb is almost
+        # impossible to grab with a mouse.
+        grab = QRectF(track.left() - 4, track.top(), track.width() + 8,
+                      track.height())
+        if not grab.contains(point):
+            return ""
+        return "thumb" if thumb.contains(point) else "track"
+
+    def _set_scroll_from_thumb(self, y: float) -> None:
+        """Map a thumb top (widget y) to the scrollback offset."""
+        geometry = self._scrollbar_geometry()
+        if geometry is None:
+            return
+        track, thumb = geometry
+        travel = track.height() - thumb.height()
+        if travel <= 0:
+            return
+        ratio = (y - self._scroll_drag_offset - track.top()) / travel
+        ratio = max(0.0, min(1.0, ratio))
+        limit = len(self.screen.scrollback)
+        # ratio 0 = top of the track = fully scrolled back; 1 = live screen.
+        self._scroll_off = round(limit * (1.0 - ratio))
+        self._scroll_off = max(0, min(limit, self._scroll_off))
+        self.update()
+
     def _cell_at(self, point) -> tuple[int, int]:
         col = int((point.x() - self.PAD_X) // self._cell_w)
         row = int((point.y() - self.PAD_Y) // self._cell_h)
@@ -407,6 +467,28 @@ class TerminalView(QWidget):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
+            # The scrollbar wins over text selection: otherwise a drag that
+            # starts on the thumb would select text under it.
+            hit = self._scrollbar_hit(event.position())
+            if hit:
+                if hit == "thumb":
+                    _track, thumb = self._scrollbar_geometry()
+                    self._scroll_drag_offset = event.position().y() - thumb.top()
+                else:
+                    # Clicking the empty track jumps the thumb to the pointer and
+                    # keeps dragging from there - the behaviour every scrollbar
+                    # has (R-215).  Paging instead made a click near the thumb
+                    # look like "nothing happened".
+                    geometry = self._scrollbar_geometry()
+                    _track, thumb = geometry
+                    self._scroll_drag_offset = thumb.height() / 2
+                    self._set_scroll_from_thumb(event.position().y())
+                self._scroll_dragging = True
+                self._sel_anchor = None
+                self._sel_active = None
+                self.update()
+                event.accept()
+                return
             cell = self._cell_at(event.position())
             clicks = self._count_click(event.position())
             if clicks >= 3:
@@ -469,6 +551,10 @@ class TerminalView(QWidget):
         del drag
 
     def mouseMoveEvent(self, event) -> None:
+        if self._scroll_dragging and event.buttons() & Qt.LeftButton:
+            self._set_scroll_from_thumb(event.position().y())
+            event.accept()
+            return
         if self._sel_anchor is not None and event.buttons() & Qt.LeftButton:
             cell = self._cell_at(event.position())
             if self._sel_mode == "word":
@@ -481,6 +567,11 @@ class TerminalView(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self._scroll_dragging:
+            self._scroll_dragging = False
+            self.update()
+            event.accept()
+            return
         if event.button() == Qt.LeftButton and self._sel_anchor is not None:
             if self._sel_mode == "word":
                 # Re-derive from the word instead of snapping to the release
@@ -867,26 +958,21 @@ class TerminalView(QWidget):
             painter.drawRect(column.adjusted(0.5, 0.5, -0.5, -0.5))
 
     def _paint_scrollbar(self, painter) -> None:
-        total = len(self.screen.scrollback) + self.screen.rows
-        if not self.screen.scrollback or total <= self.screen.rows:
+        """Draw the thumb from the same geometry the mouse handlers hit-test."""
+        geometry = self._scrollbar_geometry()
+        if geometry is None:
             return
-        track = self.rect().adjusted(self.width() - 7, 4, -3, -4)
-        if not track.isValid():
-            return
+        track, thumb = geometry
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(255, 255, 255, 26))
-        painter.drawRoundedRect(QRectF(track), 2, 2)
-        visible = self.screen.rows / total
-        height = max(12, int(track.height() * visible))
-        travel = track.height() - height
-        position = 0
-        if self._scroll_off:
-            maximum = max(1, len(self.screen.scrollback))
-            position = int(travel * (1 - self._scroll_off / maximum))
-        painter.setBrush(QColor(255, 255, 255, 90))
-        painter.drawRoundedRect(
-            QRectF(track.left(), track.top() + position, track.width(), height),
-            2, 2)
+        painter.drawRoundedRect(track, 2, 2)
+        # A hand-painted bar is only usable if it says so: widen the thumb while
+        # it is being dragged or hovered (R-215).
+        active = self._scroll_dragging
+        if active:
+            thumb = thumb.adjusted(-1.5, 0, 1.5, 0)
+        painter.setBrush(QColor(255, 255, 255, 150 if active else 90))
+        painter.drawRoundedRect(thumb, 2, 2)
 
 
 class TerminalPage(QWidget):

@@ -7263,6 +7263,129 @@ def main() -> int:
         app.processEvents()
         next_()
 
+    def step_terminal_scrollbar(next_):
+        """R-215: the terminal's scrollbar is a real control, not decoration.
+
+        The user reported 「终端模式右侧的滚动条无法拖动」.  It was a hand-painted
+        rectangle with no hit-testing at all, so the only way to scroll was the
+        wheel or Shift+PageUp.  Everything here goes through real ``QMouseEvent``
+        objects so a regression cannot hide behind a helper call.
+        """
+        from PySide6.QtGui import QMouseEvent
+
+        window.resize(1440, 900)
+        window.reset_layout()
+        app.processEvents()
+        window.switch_page("console")
+        app.processEvents()
+        page = window.console
+        view = page.view
+
+        page.reset()
+        app.processEvents()
+        for index in range(120):
+            window._on_rx(0.0, b"history line %03d\r\n" % index)
+        window._flush_rx()
+        app.processEvents()
+        check("R-215 有回滚历史时滚动条应出现",
+              view._scrollbar_geometry() is not None,
+              str(len(view.screen.scrollback)))
+
+        geometry = view._scrollbar_geometry()
+        if geometry is None:
+            next_()
+            return
+        track, thumb = geometry
+
+        def press(at: QPoint) -> None:
+            app.sendEvent(view, QMouseEvent(
+                QMouseEvent.MouseButtonPress, at, at, Qt.LeftButton,
+                Qt.LeftButton, Qt.NoModifier))
+
+        def move(at: QPoint) -> None:
+            app.sendEvent(view, QMouseEvent(
+                QMouseEvent.MouseMove, at, at, Qt.NoButton, Qt.LeftButton,
+                Qt.NoModifier))
+
+        def release(at: QPoint) -> None:
+            app.sendEvent(view, QMouseEvent(
+                QMouseEvent.MouseButtonRelease, at, at, Qt.LeftButton,
+                Qt.NoButton, Qt.NoModifier))
+
+        # ---- hit testing
+        check("R-215 滚动条区域能被命中",
+              view._scrollbar_hit(track.center()) in ("thumb", "track"),
+              view._scrollbar_hit(track.center()))
+        check("R-215 正文区域不会被当成滚动条",
+              view._scrollbar_hit(QPoint(view.width() // 2, 40)) == "",
+              repr(view._scrollbar_hit(QPoint(view.width() // 2, 40))))
+
+        # ---- drag the thumb to the top => oldest history
+        view._scroll_off = 0
+        app.processEvents()
+        track, thumb = view._scrollbar_geometry()
+        centre_x = int(thumb.center().x())
+        press(QPoint(centre_x, int(thumb.center().y())))
+        check("R-215 按下滑块进入拖拽状态", view._scroll_dragging)
+        move(QPoint(centre_x, int(track.top())))
+        release(QPoint(centre_x, int(track.top())))
+        check("R-215 把滑块拖到顶部 = 滚到最早的历史",
+              view._scroll_off == len(view.screen.scrollback),
+              f"{view._scroll_off} / {len(view.screen.scrollback)}")
+        check("R-215 松手后退出拖拽状态", not view._scroll_dragging)
+
+        # ---- drag back to the bottom => live screen
+        track, thumb = view._scrollbar_geometry()
+        centre_x = int(thumb.center().x())
+        press(QPoint(centre_x, int(thumb.center().y())))
+        move(QPoint(centre_x, int(track.bottom())))
+        release(QPoint(centre_x, int(track.bottom())))
+        check("R-215 把滑块拖回底部 = 回到实时屏幕",
+              view._scroll_off == 0, str(view._scroll_off))
+
+        # ---- clicking empty track jumps there
+        view._scroll_off = 0
+        app.processEvents()
+        track, thumb = view._scrollbar_geometry()
+        below = int(thumb.bottom() + (track.bottom() - thumb.bottom()) / 2)
+        press(QPoint(int(track.center().x()), below))
+        release(QPoint(int(track.center().x()), below))
+        check("R-215 点击轨道空白处会跳到该位置",
+              view._scroll_off > 0, f"scroll_off={view._scroll_off}")
+
+        # ---- dragging the bar must not select text under it
+        view._scroll_off = 0
+        app.processEvents()
+        track, thumb = view._scrollbar_geometry()
+        centre_x = int(thumb.center().x())
+        press(QPoint(centre_x, int(thumb.center().y())))
+        move(QPoint(centre_x, int(track.top())))
+        release(QPoint(centre_x, int(track.top())))
+        check("R-215 拖滚动条不会误选正文",
+              not view.has_selection(), repr(view.selected_text()[:20]))
+
+        # ---- and the body is still selectable
+        view._scroll_off = 0
+        app.processEvents()
+        view.repaint()
+        y = view.PAD_Y + 2
+        press(QPoint(view.PAD_X + 2, y))
+        move(QPoint(view.PAD_X + int(view._cell_w * 6), y))
+        release(QPoint(view.PAD_X + int(view._cell_w * 6), y))
+        check("R-215 正文拖选仍然正常工作",
+              view.has_selection(), repr(view.selected_text()[:24]))
+
+        # ---- no history => no bar, and no phantom hit area
+        page.reset()
+        app.processEvents()
+        check("R-215 没有回滚历史时不显示滚动条",
+              view._scrollbar_geometry() is None,
+              str(view._scrollbar_geometry()))
+
+        window.switch_page("terminal")
+        app.processEvents()
+        next_()
+
     def step_terminal_buttons(next_):
         """R-188: reset and full screen are two different, working actions."""
         from omnicom.i18n import tr
@@ -8345,6 +8468,7 @@ def main() -> int:
     runner.add("R-212 terminal_single_screen", step_terminal_single_screen)
     runner.add("R-213 clear_follows_page", step_clear_follows_page)
     runner.add("R-214 terminal_narrow_reflow", step_terminal_narrow_reflow)
+    runner.add("R-215 terminal_scrollbar", step_terminal_scrollbar)
     runner.add("R-200 toast_stack", step_toast_stack)
     runner.add("R-201 hex_columns", step_hex_columns)
     runner.add("R-203 hex_partial", step_hex_partial_survives)

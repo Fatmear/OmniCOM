@@ -8,7 +8,8 @@ CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
 **终端不再乱行：单一屏幕 + Delete/Home/End/退格生效 → R-212**；
 **清除窗口跟随当前页 + 终端清空后光标归零 → R-213**；
 **窗口变窄时终端按新宽度重新折行 → R-214**；
-`ui_selftest` 882 项，`acceptance_test` 209 需求 / 1253 项检查全 PASS）
+**终端滚动条可拖动 / 点击跳转 → R-215**；
+`ui_selftest` 893 项，`acceptance_test` 210 需求 / 1264 项检查全 PASS）
 
 ## Latest State
 
@@ -223,6 +224,15 @@ CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
   中途踩了一个坑：一开始无条件把多出来的头部行推入 scrollback，结果 `$ ` 提示符
   被推走、屏幕从 `yyyy` 开始（内容没丢，但行首不见了）。
 
+- **第十四轮（2026-11-18）**：终端滚动条无法拖动（R-215，L-288/L-289）。
+  `_paint_scrollbar()` 只做了 `drawRoundedRect` —— **没有任何输入处理**，鼠标在上面
+  按下等于点正文（被当成选区起点）。用户说的「右侧滚动条无法拖动」就是这个。
+  → 几何抽成 `_scrollbar_geometry()`（**绘制与鼠标共用**同一份）、新增
+  `_scrollbar_hit()` / `_set_scroll_from_thumb()` 与 press/move/release 分支。
+  两个细节：命中区向两侧各放宽 4 px（滑块只有 4 px，严格命中抓不住）；
+  **滚动条优先于选区**（否则在滑块上按下会留下一条文字高亮）。
+  点击轨道改为**跳到该位置**而不是翻页（翻页在滑块附近几乎看不出变化）。
+
 ## What changed this round (files)
 
 - `omnicom/ui/widgets.py` — `Toast.move_to(point, animate)`；`play_in()` 不再用
@@ -296,16 +306,20 @@ CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
 - `tools/ui_selftest.py` — 新增 R-212（11 项）、R-213（10 项）与 R-214（10 项）。
 - `omnicom/ui/vt100.py` — **`resize()` 重写为真正的 reflow**：`_reflow()`
   解包逻辑行 → 按新宽重折 → `mapping` 追踪光标 → 只裁尾部空白行。
-- `project-context/` — REQUIREMENTS 新增 R-212 / R-213 / R-214；
-  LEDGER 新增 L-280..L-287。
+- `omnicom/ui/terminal.py` — 新增 `_scrollbar_geometry()` /
+  `_scrollbar_hit()` / `_set_scroll_from_thumb()`；`mousePress|Move|Release`
+  加拖拽分支（命中优先于选区）；`_paint_scrollbar()` 改用共享几何，拖拽时加宽提亮。
+- `tools/ui_selftest.py` — 新增 R-215（11 项，全部走真实 `QMouseEvent`）。
+- `project-context/` — REQUIREMENTS 新增 R-212 / R-213 / R-214 / R-215；
+  LEDGER 新增 L-280..L-289。
 
 ## Verification (all green)
 
 ```
 python -m ruff check .                    # All checks passed!
 python tools/terminal_selftest.py         # 69/69 项通过
-python tools/ui_selftest.py               # 881-882/882（R-055 心跳停顿偶发超标，见 L-277）
-python tools/acceptance_test.py           # 209 需求，1253 项检查，0 失败，uncovered 空
+python tools/ui_selftest.py               # 893/893 项通过 / ALL GUI SELFTESTS PASSED
+python tools/acceptance_test.py           # 210 需求，1264 项检查，0 失败，uncovered 空
 python tools/protocol_selftest.py         # 23/23
 python tools/contrast_audit.py            # 15/15 pairs >= 4.5:1
 ```
@@ -335,6 +349,7 @@ python tools/contrast_audit.py            # 15/15 pairs >= 4.5:1
 | 终端右键清空后光标 | 停在 `(1,8)`，新内容从第 8 列开始 | **回到 `(0,0)`** |
 | 窄窗口折行 | 超出宽度的内容被**截断**，光标留在原坐标 | **按新宽重折，120 字符一个不少** |
 | 缩窄后按上键 | 落在错的行（少一行/少几行） | 逐行递减 `2→1→0` |
+| 终端右侧滚动条 | **画出来的装饰，不能拖也不能点** | 可拖到顶/底、点轨道跳转 |
 
 ## Known open
 
@@ -387,6 +402,10 @@ python tools/contrast_audit.py            # 15/15 pairs >= 4.5:1
   把光标映射到同一字符。
 - **L-287**：reflow 的正确性要同时断言「字符总数不变 + 首行提示符仍在 + 内容连续 +
   光标指向同一字符 + 上下键/Delete 行为正确」。只测"不崩"或只测文本，都会漏。
+- **L-288**：`drawRoundedRect` 画出来的滚动条**不是控件**，没有任何输入处理。几何必须
+  抽成一份函数供绘制与命中**共用**；命中区要比滑块宽（4 px 抓不住）；
+  **滚动条优先于选区**，否则在滑块上按会留下高亮。
+- **L-289**：点轨道应该"跳到那个位置"而不是"翻一页"（跳转才看得出反馈，而且能接着拖）。
 
 - **L-270**：行式控制台（`QPlainTextEdit` + 自己维护 `_col`）**只要吞掉 CSI 光标移动**
   就会在真实设备上出错：设备回显 `ESC[D`、本地列不动、下一个字符写进已占用的格子，
