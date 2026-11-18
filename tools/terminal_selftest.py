@@ -273,6 +273,66 @@ def run() -> int:
     check("ESC[4~ 不会被误当成 ESC[4h（End 与 IRM 是两个东西）",
           screen().insert_mode is False)
 
+    # ------------------------------------------------------------ reflow (R-214)
+    # A narrow window used to truncate the tail of a long line and leave the
+    # cursor where it was: the following Up/Down/Delete then landed on the wrong
+    # cell and the screen looked scrambled.
+    sc = screen(rows=10, cols=80)
+    sc.feed(b"$ " + b"abcdefghij" * 12)          # 122 chars, soft-wrapped
+    cursor_before = (sc.cursor_row, sc.cursor_col)
+    joined = "".join(sc.row_text(row) for row in range(sc.rows)).replace(" ", "")
+    check("R-214 折行写入后内容完整",
+          joined.count("j") == 12 and joined.startswith("$abcdefghij"),
+          f"j={joined.count('j')}")
+
+    sc.resize(10, 40)
+    narrow = "".join(sc.row_text(row) for row in range(sc.rows)).replace(" ", "")
+    check("R-214 缩窄窗口后一个字符都不丢",
+          narrow.count("j") == 12, f"j={narrow.count('j')}（期望 12）")
+    check("R-214 缩窄窗口后不是从行中间开始（提示符仍在）",
+          sc.row_text(0).startswith("$"), repr(sc.row_text(0)[:16]))
+    check("R-214 缩窄窗口后内容仍然连续",
+          narrow.startswith("$abcdefghij"), repr(narrow[:20]))
+    check("R-214 缩窄后光标跟到同一字符（而不是留在原坐标）",
+          (sc.cursor_row, sc.cursor_col) != cursor_before,
+          f"{cursor_before} -> {(sc.cursor_row, sc.cursor_col)}")
+
+    # Up / Delete must work on the re-flowed grid, not the old one.
+    rows_after = sc.cursor_row
+    sc.feed(b"\x1b[A")
+    check("R-214 缩窄后按上键逐行递减",
+          sc.cursor_row == rows_after - 1, f"{rows_after} -> {sc.cursor_row}")
+    sc.feed(b"\x1b[1~")
+    row_before = sc.row_text(sc.cursor_row)
+    sc.feed(b"\x1b[3~")
+    row_after = sc.row_text(sc.cursor_row)
+    check("R-214 缩窄后 Delete 恰好删掉一个字符",
+          len(row_after) == len(row_before) - 1,
+          f"{row_before[:14]!r} -> {row_after[:14]!r}")
+
+    # Widening back must not lose content either.
+    total = len("".join(sc.row_text(r) for r in range(sc.rows)).replace(" ", ""))
+    sc.resize(10, 80)
+    back = len("".join(sc.row_text(r) for r in range(sc.rows)).replace(" ", ""))
+    check("R-214 再拉宽回去字符数不变", abs(back - total) <= 2,
+          f"{total} -> {back}")
+
+    # Reflow must survive a CJK payload (wide cells straddle differently).
+    cjk = screen(rows=6, cols=40)
+    cjk.feed("\u4e2d\u6587".encode() * 30)
+    cjk.resize(6, 20)
+    cjk_text = "".join(cjk.row_text(r) for r in range(cjk.rows))
+    check("R-214 宽字符在缩窄时不被切断",
+          cjk_text.count("\u4e2d") == 30 and "\ufffd" not in cjk_text,
+          f"中={cjk_text.count('中')}")
+
+    # Extreme sizes must not raise.
+    squeeze = screen(rows=6, cols=80)
+    squeeze.feed(b"x" * 500)
+    for width in (8, 20, 8, 80, 12):
+        squeeze.resize(6, width)
+    check("R-214 连续极端 resize 不抛异常", squeeze.cols == 12, str(squeeze.cols))
+
     # ----------------------------------------------------- shell-like CLI editing
     sc = screen()
     # bash line editor: type `ls -l`, then two left arrows, delete, retype.

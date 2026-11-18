@@ -7182,6 +7182,87 @@ def main() -> int:
         app.processEvents()
         next_()
 
+    def step_terminal_narrow_reflow(next_):
+        """R-214: narrowing the window re-flows a long line instead of cutting it.
+
+        The user's report: 「一行命令显示后面会换行，但是换行显示不正确，是显示在
+        这一行前面了，然后导致我上下切换或者删除都会导致显示异常」.  ``resize()``
+        copied the top-left rectangle, so everything past the new width was
+        deleted while the cursor stayed put - every later Up/Down/Delete then hit
+        the wrong row/column.
+        """
+        window.resize(1440, 900)
+        window.reset_layout()
+        app.processEvents()
+        window.switch_page("console")
+        app.processEvents()
+        page = window.console
+        view = page.view
+
+        def send(data: bytes) -> None:
+            window._on_rx(0.0, data)
+            window._flush_rx()
+            app.processEvents()
+
+        def flat() -> str:
+            return "".join(view.screen.row_text(row)
+                           for row in range(view.screen.rows)).replace(" ", "")
+
+        page.reset()
+        app.processEvents()
+        send(b"$ " + b"abcdefghij" * 12)          # 122 chars, soft-wrapped
+        wide_cols = view.screen.cols
+        check("R-214 宽窗口下长命令内容完整", flat().count("j") == 12,
+              f"cols={wide_cols} j={flat().count('j')}")
+
+        window.resize(760, 700)
+        window.reset_layout()
+        app.processEvents()
+        narrow_cols = view.screen.cols
+        check("R-214 窗口确实变窄了（用例有效）", narrow_cols < wide_cols,
+              f"{wide_cols} -> {narrow_cols}")
+        check("R-214 缩窄后字符一个都不丢", flat().count("j") == 12,
+              f"j={flat().count('j')}（期望 12）")
+        check("R-214 缩窄后提示符仍在行首（不是从行中间开始）",
+              view.screen.row_text(0).startswith("$"),
+              repr(view.screen.row_text(0)[:20]))
+        check("R-214 缩窄后内容仍然连续", flat().startswith("$abcdefghij"),
+              repr(flat()[:24]))
+
+        row_before = view.screen.cursor_row
+        send(b"\x1b[A")
+        check("R-214 缩窄后按上键逐行递减",
+              view.screen.cursor_row == row_before - 1,
+              f"{row_before} -> {view.screen.cursor_row}")
+        check("R-214 上键没有破坏内容", flat().count("j") == 12,
+              f"j={flat().count('j')}")
+
+        send(b"\x1b[B")
+        send(b"\x1b[1~")
+        content_row = view.screen.cursor_row
+        before_text = view.screen.row_text(content_row)
+        send(b"\x1b[3~")
+        after_text = view.screen.row_text(content_row)
+        check("R-214 缩窄后 Delete 恰好删掉一个字符",
+              len(after_text) == len(before_text) - 1,
+              f"{before_text[:14]!r} -> {after_text[:14]!r}")
+
+        total = len(flat())
+        window.resize(1440, 900)
+        window.reset_layout()
+        app.processEvents()
+        check("R-214 再拉宽回去字符数不变", abs(len(flat()) - total) <= 2,
+              f"{total} -> {len(flat())}")
+
+        check("R-214 反复 resize 不抛异常（宽度在合理区间）",
+              view.screen.cols >= 20,
+              str(view.screen.cols))
+
+        page.reset()
+        window.switch_page("terminal")
+        app.processEvents()
+        next_()
+
     def step_terminal_buttons(next_):
         """R-188: reset and full screen are two different, working actions."""
         from omnicom.i18n import tr
@@ -8263,6 +8344,7 @@ def main() -> int:
     runner.add("R-211 terminal_cli", step_terminal_cli)
     runner.add("R-212 terminal_single_screen", step_terminal_single_screen)
     runner.add("R-213 clear_follows_page", step_clear_follows_page)
+    runner.add("R-214 terminal_narrow_reflow", step_terminal_narrow_reflow)
     runner.add("R-200 toast_stack", step_toast_stack)
     runner.add("R-201 hex_columns", step_hex_columns)
     runner.add("R-203 hex_partial", step_hex_partial_survives)

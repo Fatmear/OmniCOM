@@ -178,24 +178,115 @@ class Screen:
         return "".join(out).rstrip()
 
     def resize(self, rows: int, cols: int) -> None:
-        """Re-shape the grid, keeping the top-left content (a real reflow is out
-        of scope; what matters is that nothing crashes and the cursor stays on
-        screen, which is what a window resize needs)."""
+        """Re-shape the grid, **re-flowing** the text to the new width (R-214).
+
+        The old version copied the top-left rectangle and cut everything past the
+        new width.  For a device that soft-wraps (every shell, and our own
+        ``_put``) that silently **deleted** the tail of a long line while the
+        cursor stayed where it was - so after narrowing the window, the following
+        Up/Down/Delete landed on the wrong row/column and the screen looked
+        scrambled.  That is the reported 「换行显示在这一行前面，上下切换或删除
+        就显示异常」.
+
+        Re-flow keeps every cell: rows are unwrapped into one logical stream
+        (trailing blanks trimmed), the cursor is tracked through that stream, and
+        the stream is re-wrapped at the new width.
+        """
         rows = max(2, int(rows))
         cols = max(8, int(cols))
         if rows == self.rows and cols == self.cols:
             return
-        new_grid = [[Cell() for _ in range(cols)] for _ in range(rows)]
-        self._spare_rows = []
-        for row in range(min(rows, self.rows)):
-            for col in range(min(cols, self.cols)):
-                new_grid[row][col] = self._grid[row][col]
+        self._reflow(rows, cols)
+
+    def _reflow(self, rows: int, cols: int) -> None:
+        """Re-wrap the logical lines of the grid into ``rows x cols``."""
+        # 1. Unwrap: every grid row becomes a logical line.  Soft-wrapped
+        #    continuations are just the next row, which is exactly how our writer
+        #    produced them, so joining rows is lossless.
+        logical: list[list[Cell]] = []
+        for row in self._grid:
+            line = [cell for cell in row if not cell.continuation]
+            while line and line[-1].char == " " and line[-1].width == 1:
+                line.pop()
+            logical.append(line)
+
+        # 2. Where is the cursor in that model?
+        cursor = (self.cursor_row, self.cursor_col)
+        # 3. Re-wrap.
+        new_grid: list[list[Cell]] = []
+        mapping: dict[tuple[int, int], tuple[int, int]] = {}
+
+        def new_blank() -> list[Cell]:
+            return [Cell(style=self.style) for _ in range(cols)]
+
+        current = new_blank()
+        new_grid.append(current)
+        for src_row, line in enumerate(logical):
+            if src_row:
+                # A hard line end starts a new grid row.
+                current = new_blank()
+                new_grid.append(current)
+            col = 0
+            for src_col, cell in enumerate(line):
+                width = max(1, cell.width) if cell.char else 1
+                if col + width > cols:
+                    current = new_blank()
+                    new_grid.append(current)
+                    col = 0
+                mapping[(src_row, src_col)] = (len(new_grid) - 1, col)
+                if col < cols:
+                    current[col] = copy.copy(cell)
+                    if width == 2 and col + 1 < cols:
+                        current[col + 1] = Cell(style=cell.style, width=2,
+                                                continuation=True)
+                col += width
+
+        # 4. Keep the cursor on the same character (or at the end of its line).
+        target = mapping.get(cursor)
+        if target is None:
+            # Cursor sat just past the last character: land at the end of that
+            # logical line's last wrapped row.
+            src_row = min(cursor[0], len(logical) - 1)
+            last_col = len(logical[src_row]) - 1 if logical[src_row] else 0
+            target = mapping.get((src_row, last_col))
+        if target is None:
+            target = (0, 0)
+
+        # 5. Trim / pad vertically, keeping the cursor visible.
+        overflow = len(new_grid) - rows
+        if overflow > 0:
+            # Re-wrapping a narrow window produces *more* rows than before, and
+            # the extra ones belong at the bottom, not the top: pushing the first
+            # rows into the scrollback silently removed the very beginning of the
+            # line the user was looking at (the `$ ` prompt in the probe, R-214).
+            # Only drop from the top when the cursor itself would fall off the
+            # bottom, i.e. when there is genuinely more text than the window.
+            keep_cursor = target[0] + 1
+            drop_top = max(0, min(overflow, keep_cursor - rows))
+            if drop_top:
+                for row in new_grid[:drop_top]:
+                    if self.scrollback_limit:
+                        self.scrollback.append(row)
+                del new_grid[:drop_top]
+                if len(self.scrollback) > self.scrollback_limit:
+                    del self.scrollback[:len(self.scrollback)
+                                        - self.scrollback_limit]
+                target = (target[0] - drop_top, target[1])
+                overflow -= drop_top
+            if overflow > 0:
+                # Still too many rows below the cursor: drop the tail, which is
+                # blank space the re-wrap created rather than real content.
+                del new_grid[len(new_grid) - overflow:]
+        while len(new_grid) < rows:
+            new_grid.append(new_blank())
+
         self._grid = new_grid
+        self._spare_rows = []
         self.rows, self.cols = rows, cols
         self.scroll_top = 0
         self.scroll_bottom = rows - 1
-        self.cursor_row = min(self.cursor_row, rows - 1)
-        self.cursor_col = min(self.cursor_col, cols - 1)
+        self.cursor_row = max(0, min(rows - 1, target[0]))
+        self.cursor_col = max(0, min(cols - 1, target[1]))
         self.wrap_pending = False
 
     # ---------------------------------------------------------------- output

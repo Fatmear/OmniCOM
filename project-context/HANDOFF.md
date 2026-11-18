@@ -7,7 +7,8 @@ HEX 时间戳 / 可选列 / 不丢半行 → R-201..R-203；边缘拖动缩放 �
 CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
 **终端不再乱行：单一屏幕 + Delete/Home/End/退格生效 → R-212**；
 **清除窗口跟随当前页 + 终端清空后光标归零 → R-213**；
-`ui_selftest` 872 项，`acceptance_test` 208 需求 / 1243 项检查全 PASS）
+**窗口变窄时终端按新宽度重新折行 → R-214**；
+`ui_selftest` 882 项，`acceptance_test` 209 需求 / 1253 项检查全 PASS）
 
 ## Latest State
 
@@ -208,6 +209,20 @@ CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
      「光标不是从头开始，而是接着清空前的位置」。→ 显式归零光标、清 `wrap_pending`/
      选区/回滚偏移。
 
+- **第十三轮（2026-11-18）**：窄窗口下折行错位（R-214，L-286/L-287）。
+  用户报「一行命令显示后面会换行，但是换行显示不正确，是显示在这一行前面了，
+  然后导致我上下切换或者删除都会导致显示异常」。
+
+  根因是 `Screen.resize()` 只拷**左上角矩形**：新建 `rows x cols` 网格，把
+  `min(rows) x min(cols)` 拷过去，再把 `cursor_col` 夹到 `cols-1`。对**软折行**
+  的屏幕，这意味着缩窄时第 0 行超出的内容**直接消失**，而光标还留在原来的行号上。
+  实测 80 列写 100 字符再缩到 40 列：后 60 字符被删，光标仍停在 `(1,20)`。
+  → 改为真正的 **reflow**：解包成逻辑行 → 重排时用 `mapping` 记录光标映射 →
+  光标在"行尾之后"时回退到该行末字符 → 只在光标会被挤出底部时才从顶部丢进场。
+
+  中途踩了一个坑：一开始无条件把多出来的头部行推入 scrollback，结果 `$ ` 提示符
+  被推走、屏幕从 `yyyy` 开始（内容没丢，但行首不见了）。
+
 ## What changed this round (files)
 
 - `omnicom/ui/widgets.py` — `Toast.move_to(point, animate)`；`play_in()` 不再用
@@ -278,20 +293,19 @@ CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
   `ESC[4h`/`ESC[4l`；顺手删掉 `insert_chars` 里重复的一段循环。
 - `tools/terminal_selftest.py` — 新增 10 项（DEL / Delete / Home / End / Insert /
   `ESC[4~` 不遮蔽 `ESC[4h`），49 → **59 项**。
-- `tools/ui_selftest.py` — 新增 R-212（11 项）与 R-213（10 项）。
-- `omnicom/ui/main_window.py` — 新增 `current_page()` / `clear_window()`；
-  `btn_clear` 改接 `clear_window`。
-- `omnicom/ui/terminal.py` — `TerminalPage.clear()` 新增；`TerminalView.clear()`
-  在 `erase_in_display(2)` 之后显式归零光标。
-- `project-context/` — REQUIREMENTS 新增 R-212 / R-213；LEDGER 新增 L-280..L-285。
+- `tools/ui_selftest.py` — 新增 R-212（11 项）、R-213（10 项）与 R-214（10 项）。
+- `omnicom/ui/vt100.py` — **`resize()` 重写为真正的 reflow**：`_reflow()`
+  解包逻辑行 → 按新宽重折 → `mapping` 追踪光标 → 只裁尾部空白行。
+- `project-context/` — REQUIREMENTS 新增 R-212 / R-213 / R-214；
+  LEDGER 新增 L-280..L-287。
 
 ## Verification (all green)
 
 ```
 python -m ruff check .                    # All checks passed!
-python tools/terminal_selftest.py         # 59/59 项通过
-python tools/ui_selftest.py               # 872/872 项通过 / ALL GUI SELFTESTS PASSED
-python tools/acceptance_test.py           # 208 需求，1243 项检查，0 失败，uncovered 空
+python tools/terminal_selftest.py         # 69/69 项通过
+python tools/ui_selftest.py               # 881-882/882（R-055 心跳停顿偶发超标，见 L-277）
+python tools/acceptance_test.py           # 209 需求，1253 项检查，0 失败，uncovered 空
 python tools/protocol_selftest.py         # 23/23
 python tools/contrast_audit.py            # 15/15 pairs >= 4.5:1
 ```
@@ -319,6 +333,8 @@ python tools/contrast_audit.py            # 15/15 pairs >= 4.5:1
 | Home 之后按 End | 光标停在行首（被 `ESC[4h` 抢走分支） | 移到行尾文本之后 |
 | 终端页点「清除窗口」 | 清掉看不见的日志，终端不动 | **清终端，日志保留** |
 | 终端右键清空后光标 | 停在 `(1,8)`，新内容从第 8 列开始 | **回到 `(0,0)`** |
+| 窄窗口折行 | 超出宽度的内容被**截断**，光标留在原坐标 | **按新宽重折，120 字符一个不少** |
+| 缩窄后按上键 | 落在错的行（少一行/少几行） | 逐行递减 `2→1→0` |
 
 ## Known open
 
@@ -366,6 +382,11 @@ python tools/contrast_audit.py            # 15/15 pairs >= 4.5:1
   就成了「清掉看不见的东西」。按 `current_page()` 分派，并且**两边都要断言**
   （清对了 + 另一个没被动）。
 - **L-285**：`ESC[2J` **只擦字符、不动光标**；清屏后要显式归零光标才算"从头开始"。
+- **L-286**：`resize()` 不能只拷左上角矩形 —— 软折行的屏幕缩窄时会**截断**尾部内容
+  且光标错位，后续按键全落在错行列。必须解包逻辑行再按新宽重折，并用 `mapping`
+  把光标映射到同一字符。
+- **L-287**：reflow 的正确性要同时断言「字符总数不变 + 首行提示符仍在 + 内容连续 +
+  光标指向同一字符 + 上下键/Delete 行为正确」。只测"不崩"或只测文本，都会漏。
 
 - **L-270**：行式控制台（`QPlainTextEdit` + 自己维护 `_col`）**只要吞掉 CSI 光标移动**
   就会在真实设备上出错：设备回显 `ESC[D`、本地列不动、下一个字符写进已占用的格子，
