@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -75,6 +76,7 @@ class TerminalView(QWidget):
 
         self.enter = enter
         self.screen = Screen(rows=24, cols=80, scrollback=5000)
+        self._terminal_size: tuple[int, int] | None = None
         self.screen.scrollback_limit = 5000
         self._font = theme.mono_font(theme.log_px())
         self._metrics = QFontMetricsF(self._font)
@@ -125,14 +127,33 @@ class TerminalView(QWidget):
         self._cell_w = max(1.0, self._metrics.horizontalAdvance("M"))
         self._cell_h = max(1.0, self._metrics.lineSpacing())
         self._fonts.clear()
+        self._update_surface_size()
         self._resize_grid()
         self.update()
 
     def _resize_grid(self) -> None:
         """Match the grid to the available area, keeping the cursor on screen."""
+        if self._terminal_size is not None:
+            self.screen.resize(*self._terminal_size)
+            return
         cols = max(20, int((self.width() - 2 * self.PAD_X) // self._cell_w))
         rows = max(4, int((self.height() - 2 * self.PAD_Y) // self._cell_h))
         self.screen.resize(rows, cols)
+
+    def set_terminal_size(self, size: tuple[int, int] | None) -> None:
+        self._terminal_size = size
+        self._update_surface_size()
+        self._resize_grid()
+        self.update()
+
+    def _update_surface_size(self) -> None:
+        if self._terminal_size is None:
+            self.setMinimumSize(0, 0)
+        else:
+            rows, cols = self._terminal_size
+            self.setMinimumSize(
+                int(cols * self._cell_w + 2 * self.PAD_X + 0.999),
+                int(rows * self._cell_h + 2 * self.PAD_Y + 0.999))
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -393,6 +414,7 @@ class TerminalView(QWidget):
         text = QApplication.clipboard().text()
         if not text:
             return
+        self.snap_to_bottom()
         payload = text.replace("\r\n", "\r").replace("\n", "\r")
         if self.screen.bracketed_paste:
             payload = "\x1b[200~" + payload + "\x1b[201~"
@@ -1043,6 +1065,14 @@ class TerminalPage(QWidget):
         self.enter_box.currentIndexChanged.connect(self._enter_changed)
         bar.addWidget(self.enter_box)
 
+        self.size_box = Combo(self)
+        self.size_box.addItem("80 x 24", (24, 80))
+        self.size_box.addItem("132 x 24", (24, 132))
+        self.size_box.addItem(tr("term.size.auto"), None)
+        self.size_box.setToolTip(tr("term.size"))
+        self.size_box.currentIndexChanged.connect(self._size_changed)
+        bar.addWidget(self.size_box)
+
         bar.addStretch(1)
         self.btn_clear = GlyphButton(GlyphButton.CLEAR, self, size=theme.ICON_MD,
                                     object_name="IconBtn")
@@ -1069,7 +1099,15 @@ class TerminalPage(QWidget):
 
         self.view = TerminalView(self)
         self.view.keyBytes.connect(self.keyBytes.emit)
-        card_layout.addWidget(self.view, 1)
+        self.surface = QScrollArea(self)
+        self.surface.setFrameShape(QScrollArea.NoFrame)
+        self.surface.setWidgetResizable(True)
+        self.surface.setMinimumSize(0, 0)
+        self.surface.setStyleSheet(f"QScrollArea {{ background: {theme.TERM_BG}; }}")
+        self.surface.setWidget(self.view)
+        card_layout.addWidget(self.surface, 1)
+        self.view.set_terminal_size((24, 80))
+        self.view.keyBytes.connect(self._reveal_cursor)
 
         #: The **single** screen state for this device (R-212).  The window feeds
         #: it from `_on_rx` even while the page is hidden, so `cli screen` never
@@ -1221,6 +1259,8 @@ class TerminalPage(QWidget):
     def retranslate(self) -> None:
         self.title.setText(tr("term.title"))
         self.enter_label.setText(tr("term.enter"))
+        self.size_box.setItemText(2, tr("term.size.auto"))
+        self.size_box.setToolTip(tr("term.size"))
         self.btn_clear.setToolTip(tr("term.clear"))
         self.btn_reset.setToolTip(tr("term.reset"))
         self.btn_full.setToolTip(tr("term.exitfull") if self._overlay is not None
@@ -1230,6 +1270,13 @@ class TerminalPage(QWidget):
     def _enter_changed(self, _index: int) -> None:
         key = self.enter_box.currentData() or "cr"
         self.view.set_enter({"cr": b"\r", "lf": b"\n", "crlf": b"\r\n"}.get(key, b"\r"))
+
+    def _size_changed(self, _index: int) -> None:
+        self.view.set_terminal_size(self.size_box.currentData())
+
+    def _reveal_cursor(self, _data: bytes) -> None:
+        rect = self.view._caret_rect()
+        self.surface.ensureVisible(rect.center().x(), rect.center().y(), 12, 12)
 
 
 # --------------------------------------------------------------- plugin entry

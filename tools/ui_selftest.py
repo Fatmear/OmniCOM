@@ -7278,6 +7278,14 @@ def main() -> int:
             return "".join(view.screen.row_text(row)
                            for row in range(view.screen.rows)).replace(" ", "")
 
+        # Re-flow is about a grid whose *width actually changes*, which is now
+        # the explicit automatic mode (R-300: the default grid is pinned to the
+        # device's own 80x24 so the remote line editor and the local screen agree
+        # on coordinates).  Without this the step would silently stop exercising
+        # re-flow, because narrowing the window no longer narrows the grid.
+        view.set_terminal_size(None)
+        app.processEvents()
+
         page.reset()
         app.processEvents()
         send(b"$ " + b"abcdefghij" * 12)          # 122 chars, soft-wrapped
@@ -7327,6 +7335,10 @@ def main() -> int:
         check("R-214 反复 resize 不抛异常（宽度在合理区间）",
               view.screen.cols >= 20,
               str(view.screen.cols))
+
+        # Back to the shipped default for the steps that follow.
+        view.set_terminal_size((24, 80))
+        app.processEvents()
 
         page.reset()
         window.switch_page("terminal")
@@ -7495,6 +7507,115 @@ def main() -> int:
         stale = [screen().row_text(r) for r in range(screen().rows)
                  if screen().row_text(r).count("z") > 4]
         check("R-298 上键重绘后不残留上一次的长行内容", not stale, str(stale[:2]))
+
+        page.reset()
+        window.switch_page("terminal")
+        app.processEvents()
+        next_()
+
+    def step_terminal_fixed_grid(next_):
+        """R-300: the character grid must not follow the window's pixel width.
+
+        The reported corruption (long commands and Up-arrow history overwriting
+        existing lines) is a **geometry disagreement**, not a parser bug: the
+        remote line editor asks the tty how wide it is (``stty size`` answered
+        ``24 80`` on the test board) and emits absolute cursor arithmetic such as
+        ``ESC[A`` + N x ``ESC[C`` + ``ESC[K`` + ``CR``.  While the grid was sized
+        from the widget, the same bytes landed on a different row/column
+        locally, ``ESC[K`` erased a different suffix, and the untouched tail of
+        the previous line stayed behind.  A UART has no SSH-style window-size
+        negotiation, so the default must be the conventional 80x24 and the
+        window must scroll instead of silently changing the device's geometry.
+        """
+        window.resize(1440, 900)
+        window.reset_layout()
+        app.processEvents()
+        window.switch_page("console")
+        app.processEvents()
+        page = window.console
+        view = page.view
+
+        def send(data: bytes) -> None:
+            window._on_rx(0.0, data)
+            window._flush_rx()
+            app.processEvents()
+
+        page.reset()
+        app.processEvents()
+        check("R-300 终端默认使用标准 80x24 网格",
+              (view.screen.rows, view.screen.cols) == (24, 80),
+              f"{view.screen.rows}x{view.screen.cols}")
+
+        send(b"root@board:/# " + b"a" * 100)
+        app.processEvents()
+        before = (view.screen.rows, view.screen.cols)
+
+        # Narrow the *window* (and the full-screen overlay path uses the same
+        # widget), then widen it again: the device's coordinate system must not
+        # move either time.
+        for width, height in ((760, 620), (1000, 700), (1440, 900)):
+            window.resize(width, height)
+            window.reset_layout()
+            app.processEvents()
+            check(f"R-300 窗口变为 {width}x{height} 后网格仍是 80x24",
+                  (view.screen.rows, view.screen.cols) == before,
+                  f"{before} -> {view.screen.rows}x{view.screen.cols}")
+
+        # A smaller viewport must still let the user reach every column: the
+        # horizontal scrollbar is what replaces "shrink the grid to fit".
+        window.resize(700, 520)
+        window.reset_layout()
+        app.processEvents()
+        hbar = page.surface.horizontalScrollBar()
+        check("R-300 窄窗口可以用横向滚动条看到后面的列",
+              hbar.maximum() > 0, f"maximum={hbar.maximum()}")
+
+        # readline's real redraw must land where the device intended: the stale
+        # tail is erased, and the prompt is rebuilt on its own line.
+        page.reset()
+        app.processEvents()
+        send(b"root@board:/# " + b"q" * 100 + b"\r\n")
+        send(b"root@board:/# ls\r\n")
+        send(b"root@board:/# ")
+        app.processEvents()
+        # Up-history redraw for the 100-character command, exactly as bash emits
+        # it: rewind one row, carriage return, erase to end of line, rewrite.
+        send(b"\x1b[A\r\x1b[Kroot@board:/# " + b"q" * 100)
+        app.processEvents()
+        rows = [view.screen.row_text(r) for r in range(view.screen.rows)]
+        check("R-300 上键重绘后旧内容没有残留",
+              not any(text.startswith("root@board:/# ls") for text in rows),
+              str([t for t in rows if t][-3:]))
+        # The already-submitted line legitimately stays above (that is history);
+        # what must hold is that the *live* prompt line, wrapped or not, reads
+        # exactly as the recalled command with nothing of the `ls` line bleeding
+        # into it.  The cursor sits on the last wrapped row, so the rows from the
+        # prompt onwards are joined before comparing.
+        rows = [view.screen.row_text(r) for r in range(view.screen.rows)]
+        starts = [index for index, text in enumerate(rows)
+                  if text.startswith("root@board")]
+        live = "".join(rows[starts[-1]:]).rstrip() if starts else ""
+        expected = "root@board:/# " + "q" * 100
+        check("R-300 重绘后的提示符行就是被召回的那条命令",
+              live == expected,
+              f"{len(live)} vs {len(expected)} {live[-24:]!r}")
+
+        # The explicit 132x24 choice and automatic mode must both stay available.
+        page.size_box.setCurrentIndex(1)
+        app.processEvents()
+        check("R-300 可选 132x24 网格",
+              (view.screen.rows, view.screen.cols) == (24, 132),
+              f"{view.screen.rows}x{view.screen.cols}")
+        page.size_box.setCurrentIndex(2)
+        app.processEvents()
+        check("R-300 自动尺寸模式下网格随窗口变化",
+              view._terminal_size is None and view.screen.cols != 80,
+              f"{view._terminal_size} {view.screen.cols}")
+        page.size_box.setCurrentIndex(0)
+        app.processEvents()
+        check("R-300 切回默认后网格恢复 80x24",
+              (view.screen.rows, view.screen.cols) == (24, 80),
+              f"{view.screen.rows}x{view.screen.cols}")
 
         page.reset()
         window.switch_page("terminal")
@@ -9042,6 +9163,7 @@ def main() -> int:
     runner.add("R-213 clear_follows_page", step_clear_follows_page)
     runner.add("R-214 terminal_narrow_reflow", step_terminal_narrow_reflow)
     runner.add("R-294 terminal_keystroke_snaps", step_terminal_keystroke_snaps)
+    runner.add("R-300 terminal_fixed_grid", step_terminal_fixed_grid)
     runner.add("R-215 terminal_scrollbar", step_terminal_scrollbar)
     runner.add("R-217 control_endpoint_async", step_control_endpoint_async)
     runner.add("R-292 terminal_single_send", step_terminal_single_send)

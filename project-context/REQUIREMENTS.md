@@ -1,5 +1,14 @@
 # Current requirements
-Updated: 2026-11-04
+Updated: 2026-11-19
+
+## Current User Gate
+
+| ID | Priority | Scope | Requirement | Acceptance check | Status |
+| --- | --- | --- | --- | --- | --- |
+| R-299 | MUST NOT | Terminal/Delivery | 用户确认终端实机手测通过前，不运行后续全量验收、不打包、不提交或推送、不创建 Release；先依据实际收发定位并提供源码候选修复。此限制暂缓此前 v1.1.6 发布请求（user, 2026-11-19：「你搞完之后我先测一下，没有问题你再进行后续的测试和提交」） | 明确等待用户确认，不将合成测试通过等同于实机修复 | closed（用户 2026-11-19 确认可继续） |
+| R-300 | MUST | Terminal | 修复必须是通用 Linux 串口终端方案，不能针对 COM30、树莓派或某一台测试设备特判；不得默认向未知串口注入 shell 配置命令（user, 2026-11-19：「要任何linux都行，不能针对我这一个测试设备来调」） | 标准终端控制序列与可选择的字符网格尺寸；改变窗口可见区域不应默认改变设备仍在使用的网格坐标；实机交用户确认 | active |
+
+R-214/R-297 的自动重排验收适用于显式选择「自动尺寸」的模式。R-300 本轮候选采用标准 80x24 固定网格默认值，窄视口滚动查看，并提供 132x24 和自动尺寸选项；这不是对任意远端自定义尺寸的自动检测，不宣称无需匹配尺寸即可适用于所有配置。
 
 Source of R-001..R-017: user request on 2026-10-27 (project kickoff). Do not weaken a MUST.
 

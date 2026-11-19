@@ -549,6 +549,8 @@ _TABLE: dict[str, tuple[str, str]] = {
     "term.menu.selectall": ("全选", "Select all"),
     "term.menu.clear": ("清屏", "Clear screen"),
     "term.enter": ("回车发送", "Enter sends"),
+    "term.size": ("终端尺寸", "Terminal size"),
+    "term.size.auto": ("自动尺寸", "Automatic size"),
     "term.clear": ("清屏", "Clear screen"),
     "term.reset": ("清屏并重置终端状态", "Clear screen and reset terminal state"),
     "term.fullscreen": ("终端全屏", "Full-screen terminal"),

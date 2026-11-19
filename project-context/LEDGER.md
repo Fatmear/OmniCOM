@@ -615,3 +615,18 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
   这恰好是真实终端"pending wrap"的状态，不需要额外行。
 - 教训：**"为了放光标而增加内容"是危险操作**。光标是个指针，不是内容；
   为它多出来的任何一格，都会被后续的溢出/裁剪规则当成真实数据。
+
+## L-301 Linux 长行/历史重绘仍错乱：字符网格尺寸与远端不一致（FIXED-verified）
+- 新证据：COM30只读查询为24x80、TERM=vt220；真实长输入/清行/上历史/下历史回包，在80列重放能恢复提示符和草稿，在52或104列重放产生提示符覆盖、历史残留。此前重排合成用例不能证明实机修复。
+- 修法：字符网格与可见视口分开，默认钉死80x24并用滚条查看，另给132x24/自动尺寸（R-300）。不注入stty、不做端口/设备特判（R-300）。R-214/R-297 重排用例改在显式自动尺寸模式下运行，否则默认固定后该用例会静默失效。
+- 证据：`.artifacts/terminal-real-rx.json`；用户实机确认界面正常后提交。
+
+## L-302 插入模式切换错误归零光标（FIXED-verified）
+- `_apply_mode` 的非私有模式4分支多调用了 `_move_to(0,0)`，且有重复不可达分支；移除后，ESC[4h和ESC[4l单点探针均保持(0,11)。真实捕获中未见该序列，不将它冒认为本次实机错行的主因。
+
+## L-303 刚打开的串口上按键被静默丢弃：发送守卫读了过期的状态快照（FIXED-verified）
+- 现象：全量 GUI 里 R-292 偶发失败，详情为 `b'' connected=True write_is_manager=False view_focus=False tx=0`，而单跑必过。
+- 根因：`_plugin_send` 判 `self._status.get("connected")`。`_status` 只在排队的 `status` 信号送达时更新，紧接在成功 open 之后仍是「未连接」，于是 `api.send` 返回 False，一个字节都没写；而 `bridge.state()` 直读 manager，答 `True`。**串口是开的，按键却丢**，属于真产品缺陷，不是测试假阳。
+- 修法：守卫改用 `self.bridge.state() or self._status`（manager 是权威答案，且只是一次字典读）。
+- 判据：污染顺序（R-215→R-217→R-292）下必须 `tx>0`；只放宽断言不算修复（对照 L-269/L-274 的假阳教训）。
+

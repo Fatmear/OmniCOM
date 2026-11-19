@@ -969,11 +969,8 @@ class Screen:
                 # first version of the ``~`` table set insert_mode from 4 and the
                 # End branch became unreachable (R-212).
                 self.insert_mode = enabled
-                self._move_to(0, 0)
             elif private and code == 2004:
                 self.bracketed_paste = enabled
-            elif not private and code == 4:
-                self.insert_mode = enabled
 
     def _apply_sgr(self, codes: list[int]) -> None:
         index = 0

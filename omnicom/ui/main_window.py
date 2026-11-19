@@ -1678,7 +1678,14 @@ class OmniWindow(QMainWindow):
         """
         if not data:
             return False
-        if not self._status.get("connected"):
+        # ``self._status`` only updates when a queued ``status`` signal is
+        # delivered, so right after a successful open it can still say
+        # "closed" and every keystroke was silently dropped while the port was
+        # in fact open (measured: ``connected=True`` from the live manager,
+        # ``tx=0`` from the stale snapshot).  Ask the manager itself - it is the
+        # authoritative answer and a cheap dict read.
+        status = self.bridge.state() or self._status
+        if not status.get("connected"):
             self.notify(tr("console.needport"), "warn")
             return False
         try:
