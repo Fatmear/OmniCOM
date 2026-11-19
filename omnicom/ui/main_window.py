@@ -1463,7 +1463,9 @@ class OmniWindow(QMainWindow):
         self.stack.setCurrentIndex(index)
         self.titlebar.select_tab(page)
         if page == "console":
-            self.console.view.setFocus()
+            view = getattr(self.console, "view", None)
+            if view is not None:
+                view.setFocus()
         elif page.startswith("plugin:"):
             widget = self.stack.widget(index)
             if widget is not None:
@@ -1486,7 +1488,9 @@ class OmniWindow(QMainWindow):
         terminal screen.
         """
         if self.current_page() == "console":
-            self.console.clear()
+            clear = getattr(self.console, "clear", None)
+            if clear is not None:
+                clear()
             return
         self.clear_log()
 
@@ -2034,7 +2038,9 @@ class OmniWindow(QMainWindow):
             return
         if port == status.get("port"):
             return
-        self.console.reset()
+        reset = getattr(self.console, "reset", None)
+        if reset is not None:
+            reset()
         self.notify(tr("misc.switching", port=port), "info")
         self.bridge.open(port, self._serial_opts())
 
@@ -2140,7 +2146,14 @@ class OmniWindow(QMainWindow):
         # which page is visible (R-212).  `TerminalView` renders this very screen
         # object, so there is no second grid to drift apart - and `cli screen`
         # keeps working while the user sits on the log page (R-211).
-        self.console.absorb(data)
+        #
+        # The terminal is a **plugin** now (R-218): when it is disabled the tab
+        # holds a plain placeholder widget, and a received byte must still be
+        # logged instead of raising on every packet (the packaged self-test
+        # caught exactly that: `'QWidget' object has no attribute 'absorb'`).
+        absorb = getattr(self.console, "absorb", None)
+        if absorb is not None:
+            absorb(data)
         self._rx_queue.append((ts, data))
         if not self._rx_timer.isActive():
             self._rx_timer.start()
@@ -3213,9 +3226,11 @@ class OmniWindow(QMainWindow):
         self._refresh_status_dir()
         self.commands_panel.retranslate()
         self.search_panel.retranslate()
-        self.console.retranslate()
         self.send_panel.retranslate()
-        self.transfer.retranslate()
+        for page in (self.console, self.transfer):
+            retranslate = getattr(page, "retranslate", None)
+            if retranslate is not None:
+                retranslate()
         self._rebuild_tabs()
         self._on_status(self._status)
 

@@ -14,9 +14,14 @@ launch.  The folder built here contains
     assets\\  logo.png                    icons and logos
     OmniCOM.cmd / console.cmd            launchers
 
-No ``plugins/\\`` folder is shipped (R-174): every plugin - the data dashboard
-included - is installed from the plugin store, so an update can never shadow the
-copy the user installed or reinstall one they removed.
+No ``plugins/\\`` folder from the store is shipped (R-174): every *optional*
+plugin - the data dashboard included - is installed from the plugin store, so an
+update can never shadow the copy the user installed or reinstall one they removed.
+
+The two **core plugins** (`plugins/terminal`, `plugins/transfer`) are the
+exception (R-218): they own the terminal and the file-transfer tabs, so a fresh
+portable copy without them would have no console at all.  They are copied only
+when the target folder does not already have them.
 
 The embeddable runtime has a ``._pth`` file, which switches off ``site`` and all
 user/site-packages paths, so the app can only import what ships in the folder.
@@ -82,6 +87,17 @@ SKIP_DLL_PREFIXES = (
 #: Qt plugin folders that must stay (platform integration, styles, images).
 KEEP_PLUGINS = ("platforms", "styles", "imageformats", "iconengines",
                 "platformthemes", "webview")
+
+#: Our own plugins that are **core features** and therefore ship with the app
+#: (R-218 / R-293).  R-174 still holds for everything else - the data dashboard,
+#: the launcher and anything from the store are user-installed, so an update can
+#: never shadow a plugin the user replaced or removed.  The terminal and the file
+#: transfer are different: without them the app has no console and no protocol
+#: transfer at all, so a fresh portable copy would look broken.
+#:
+#: They are copied **only when missing**, never overwritten: a user who
+#: customised or upgraded one of them keeps their copy.
+CORE_PLUGINS = ("terminal", "transfer")
 
 #: Chromium resources QtWebEngine cannot start without.  The ``*.debug.*``
 #: variants are ~40 MB of symbols, so they stay out of the portable folder.
@@ -366,6 +382,11 @@ def _copy_pyside(source: Path, target: Path) -> int:
     glue = source / "glue"
     if glue.is_dir():
         shutil.copytree(glue, target / "glue", dirs_exist_ok=True)
+    # Qt looks for its platform/style/image plugins in ``<bundle>/plugins``, so
+    # this is the Qt plugin folder - not ours (those come from
+    # ``_ship_core_plugins``).  Dropping the ``platforms`` subfolder is what
+    # makes the packaged selftest fail with "Could not find the Qt platform
+    # plugin offscreen" (L-296).
     plugins = source / "plugins"
     for folder in KEEP_PLUGINS:
         origin = plugins / folder
@@ -417,12 +438,34 @@ def _size_mb(path: Path) -> float:
                if item.is_file()) / 1048576
 
 
+def _ship_core_plugins(target: Path) -> None:
+    """Copy the core plugins the app cannot work without (R-218).
+
+    R-174 keeps *store* plugins out of the package so an update can never
+    shadow what the user installed.  The terminal and the transfer page are not
+    store plugins - the host has fixed tabs for them - so a portable copy
+    without them has no console at all.  A folder that is already there is left
+    alone, so a user who customised or upgraded one keeps their copy.
+    """
+    for name in CORE_PLUGINS:
+        origin = ROOT / "plugins" / name
+        destination = target / "plugins" / name
+        if not (origin / "plugin.json").is_file():
+            raise SystemExit(f"core plugin '{name}' is missing from {origin}")
+        if destination.exists():
+            print(f"core plugin '{name}': kept the existing copy")
+            continue
+        shutil.copytree(origin, destination)
+        print(f"core plugin '{name}': shipped with the app")
+
+
 def build(target: Path, version: str) -> Path:
     import make_pyz  # same folder
 
     target.mkdir(parents=True, exist_ok=True)
     print(f"== {NAME} {version}")
     make_pyz.build(target)                            # pyz + assets + docs
+    _ship_core_plugins(target)
     runtime = _prepare_runtime(target)
     _install_dependencies(runtime)
 
@@ -446,6 +489,17 @@ def build(target: Path, version: str) -> Path:
 
 def verify(target: Path) -> int:
     """Run the packaged selftest with the bundled runtime only."""
+    # The core plugins are the console and the transfer page (R-218), so a
+    # package without them is broken even when ``--selftest`` is happy - the
+    # host swaps in a placeholder tab and the user only finds out when the
+    # terminal is missing.  Assert it here, before spending minutes on the
+    # updater suite.
+    for name in CORE_PLUGINS:
+        manifest = target / "plugins" / name / "plugin.json"
+        if not manifest.is_file():
+            print(f"bundle is missing the core plugin '{name}' ({manifest})")
+            return 1
+    print(f"core plugins present: {', '.join(CORE_PLUGINS)}")
     python = target / "runtime" / "python.exe"
     # Inherited test variables would make the packaged selftest write its
     # report into the bundle (or into the repo), so they are dropped here.

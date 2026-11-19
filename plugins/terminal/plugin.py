@@ -179,7 +179,13 @@ class TerminalView(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
-        """Repaint from the shared screen (no parsing)."""
+        """Repaint from the shared screen (no parsing).
+
+        Deliberately does **not** snap back to the live screen: xterm and PuTTY
+        keep the user's scroll position while output keeps arriving, which is the
+        whole point of scrollback (reading a boot log while the device still
+        talks).  Only a keystroke leaves the history (``snap_to_bottom``).
+        """
         self._scroll_off = min(self._scroll_off, len(self.screen.scrollback))
         self.update()
 
@@ -290,6 +296,14 @@ class TerminalView(QWidget):
             self.update()
             event.accept()
             return
+
+        # Everything below puts a byte on the wire, so the user is typing into the
+        # live session: leave the history first (R-294).  Scrolling up is not a
+        # mode to escape from - pressing Enter while looking at older output used
+        # to echo the new line off screen, so the cursor and the prompt appeared
+        # frozen.  Every mainstream terminal snaps to the bottom on the first
+        # keystroke (xterm, PuTTY, MobaXterm, iTerm), Ctrl+C included.
+        self.snap_to_bottom()
 
         sequences = {
             Qt.Key_Up: self._arrow(b"A"),
@@ -685,6 +699,19 @@ class TerminalView(QWidget):
         """Positive scrolls back into the history, negative returns to live."""
         limit = len(self.screen.scrollback)
         self._scroll_off = max(0, min(limit, self._scroll_off + lines))
+
+    def snap_to_bottom(self) -> None:
+        """Leave the history and follow the live screen again.
+
+        Every mainstream terminal (xterm, MobaXterm, PuTTY, iTerm) does this the
+        moment you **type**: browsing the scrollback is not a mode you have to
+        escape from, and a user who scrolled up and then pressed Enter expected
+        the view to jump to the newly echoed line - it stayed put instead
+        (R-294).
+        """
+        if self._scroll_off:
+            self._scroll_off = 0
+            self.update()
 
     def selectAll(self) -> None:
         rows = self._visual_rows()

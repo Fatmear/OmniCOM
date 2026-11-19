@@ -839,13 +839,17 @@ def main() -> int:
                 texts.append(widget.text())
         check("R-067 左栏底部不再出现版本号小字",
               window.__class__.__name__ and not any(
-                  text.strip() == "1.1.5" for text in texts), str(texts[-5:]))
+                  text.strip() == __import__("omnicom").__version__
+                  for text in texts), str(texts[-5:]))
         next_()
 
     def step_version(next_):
         from omnicom import __version__ as current
-        check("R-069 版本号为 1.1.5", current == "1.1.5", current)
-        check("R-069 窗口标题显示新版本号", current in window.windowTitle(),
+        # No hard-coded number: the point is that the title and the badge agree
+        # with the package version, whatever it is this release.
+        check("R-069 版本号为 x.y.z 形式",
+              re.fullmatch(r"\d+\.\d+\.\d+", current) is not None, current)
+        check("R-069 窗口标题显示当前版本号", current in window.windowTitle(),
               window.windowTitle())
         next_()
 
@@ -6333,6 +6337,21 @@ def main() -> int:
             check("R-108 应用完更新后待装标记被清掉", update.pending() is None)
         finally:
             shutil_module.rmtree(bundle, ignore_errors=True)
+        # R-293: the terminal and the transfer page live in core plugins, so a
+        # package without them has no console at all.  The dist builder ships
+        # exactly CORE_PLUGINS and keeps the store plugins out.
+        import tools.make_dist as make_dist
+
+        check("R-293 打包脚本登记了 terminal 与 transfer 两个核心插件",
+              make_dist.CORE_PLUGINS == ("terminal", "transfer"),
+              str(make_dist.CORE_PLUGINS))
+        for name in make_dist.CORE_PLUGINS:
+            manifest = os.path.join(ROOT, "plugins", name, "plugin.json")
+            check(f"R-293 核心插件 {name} 在仓库里可打包", os.path.isfile(manifest),
+                  manifest)
+        check("R-293 核心插件与 Qt 插件白名单互不混淆",
+              not set(make_dist.CORE_PLUGINS) & set(make_dist.KEEP_PLUGINS),
+              f"{make_dist.CORE_PLUGINS} vs {make_dist.KEEP_PLUGINS}")
         next_()
 
     def step_send_layout(next_):
@@ -7314,6 +7333,174 @@ def main() -> int:
         app.processEvents()
         next_()
 
+    def step_terminal_keystroke_snaps(next_):
+        """R-294 / R-297: typing leaves the history, and a wider window rejoins.
+
+        Two reports in one place because both are about "what the user sees after
+        the view stops matching the device":
+
+        * 「翻到上面，然后按回车，应该立刻能到底部」「ctrl+c 也是」 - browsing the
+          scrollback is not a mode, every mainstream terminal snaps to the live
+          screen on the first keystroke;
+        * 「又显示在一行」 - after a resize the cursor fell back to (0, 0), so the
+          next echo overwrote the first N columns of an existing line, and a
+          narrowed-then-widened line never rejoined its own tail.
+        """
+        from PySide6.QtGui import QKeyEvent
+
+        window.resize(1440, 900)
+        window.reset_layout()
+        app.processEvents()
+        window.switch_page("console")
+        app.processEvents()
+        page = window.console
+        view = page.view
+
+        def screen():
+            # ``page.reset()`` replaces the Screen object (R-212), so this must
+            # never be cached in a local - a stale reference silently tested the
+            # grid the view no longer renders.
+            return view.screen
+
+        def send(data: bytes) -> None:
+            window._on_rx(0.0, data)
+            window._flush_rx()
+            app.processEvents()
+
+        # Enough lines to have a real history, then scroll all the way up.
+        page.reset()
+        app.processEvents()
+        for index in range(200):
+            send(f"history line {index:03d}\r\n".encode("ascii"))
+        check("R-294 历史足够长（用例有效）", len(screen().scrollback) > 50,
+              str(len(screen().scrollback)))
+
+        # ---- R-294: Enter returns to the bottom -------------------------
+        view._scroll_history(999)              # scroll into the history
+        app.processEvents()
+        check("R-294 滚动后确实停在历史里（用例有效）", view._scroll_off > 0,
+              str(view._scroll_off))
+        view.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Return,
+                                     Qt.NoModifier, "\r"))
+        app.processEvents()
+        check("R-294 翻到历史后按回车立刻回到底部", view._scroll_off == 0,
+              str(view._scroll_off))
+
+        # ---- R-294: Ctrl+C does the same --------------------------------
+        view._scroll_history(999)
+        app.processEvents()
+        check("R-294 Ctrl+C 前确实在历史里（用例有效）", view._scroll_off > 0,
+              str(view._scroll_off))
+        view.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_C,
+                                     Qt.ControlModifier, "\x03"))
+        app.processEvents()
+        check("R-294 翻到历史后按 Ctrl+C 也回到底部", view._scroll_off == 0,
+              str(view._scroll_off))
+
+        # ---- R-294: a plain character snap too, and Shift+PageUp still browses
+        view._scroll_history(999)
+        app.processEvents()
+        view.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_A, Qt.NoModifier, "a"))
+        app.processEvents()
+        check("R-294 输入普通字符同样回到底部", view._scroll_off == 0,
+              str(view._scroll_off))
+        view.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_PageUp,
+                                     Qt.ShiftModifier | Qt.NoModifier, ""))
+        app.processEvents()
+        check("R-294 Shift+PageUp 仍然能翻上去（不是回到底部的功能被写死）",
+              view._scroll_off > 0, str(view._scroll_off))
+        view.snap_to_bottom()
+
+        # ---- R-297: the cursor survives a resize ------------------------
+        page.reset()
+        app.processEvents()
+        send(b"$ echo hello\r\n")
+        send(b"$ ")
+        app.processEvents()
+        before = (screen().cursor_row, screen().cursor_col)
+        check("R-297 光标在提示符之后（用例有效）", before[1] == 2, str(before))
+        screen().resize(screen().rows, max(8, screen().cols - 1))
+        app.processEvents()
+        after = (screen().cursor_row, screen().cursor_col)
+        check("R-297 缩窄一个字符后光标没有被丢到左上角",
+              after != (0, 0), f"{before} -> {after}")
+        check("R-297 缩窄后光标仍停在同一行的同一位置", after == before,
+              f"{before} -> {after}")
+
+        # The device now echoes onto the current line: it must land after the
+        # prompt, not on top of the previous line's first characters.
+        send(b"ls\r\n")
+        app.processEvents()
+        echoed = screen().row_text(before[0])
+        check("R-297 缩窄后新输出接在提示符之后（不覆盖前一行开头）",
+              echoed.startswith("$ ls"), repr(echoed[:24]))
+
+        # ---- R-297: narrowing then widening rejoins a soft-wrapped line ---
+        page.reset()
+        app.processEvents()
+        wide_cols = screen().cols
+        text = "$ " + "x" * 120
+        send(text.encode("ascii"))
+        app.processEvents()
+        joined = "".join(screen().row_text(row) for row in range(screen().rows))
+        check("R-297 宽窗口下长行内容完整（用例有效）",
+              joined.count("x") == 120, str(joined.count("x")))
+        screen().resize(screen().rows, 40)
+        app.processEvents()
+        check("R-297 缩窄后字符一个不丢",
+              "".join(screen().row_text(r) for r in range(screen().rows))
+              .count("x") == 120)
+        screen().resize(screen().rows, wide_cols)
+        app.processEvents()
+        rejoined = screen().row_text(0)
+        # One row again: prompt + as many x as fit in the window width.
+        check("R-297 拉宽回原宽度后长行重新合并成一行（不再从中间断开）",
+              rejoined.startswith("$") and rejoined.count("x") >= wide_cols - 3,
+              f"cols={wide_cols} row0={len(rejoined)} x={rejoined.count('x')}")
+
+        # ---- R-298: a hard newline after a full row must NOT be glued ----
+        # The reported 「不断按上键还是有错乱」: a prompt that exactly filled the
+        # row was followed by \r\n and a *different* line, and the two ended up
+        # joined on one row because "the row is full" was mistaken for "the text
+        # soft-wraps here".
+        page.reset()
+        app.processEvents()
+        cols = screen().cols
+        filler = "root@raspberrypi:/home/" + "y" * max(1, cols - 24)
+        send((filler + "\r\n" + "Quectel-Guest 11111" + "\r\n").encode("ascii"))
+        app.processEvents()
+        rows = [screen().row_text(r) for r in range(screen().rows)]
+        prompt_row = next((t for t in rows if t.startswith("root@")), "")
+        guest_row = next((t for t in rows if t.startswith("Quectel")), "")
+        check("R-298 行满后的硬换行不会被当成软换行粘连",
+              bool(prompt_row) and bool(guest_row) and "Quectel" not in prompt_row,
+              f"prompt={prompt_row!r} guest={guest_row!r}")
+        check("R-298 硬换行后两行各自完整",
+              prompt_row.endswith("y") and guest_row == "Quectel-Guest 11111",
+              f"{prompt_row[-6:]!r} / {guest_row!r}")
+
+        # ---- R-298: bash history redraw (Up) must not leave stale rows ----
+        # readline rewinds with CSI nA, erases with CSI K and rewrites.  If the
+        # previous, longer line is not cleared the leftovers stay on screen -
+        # exactly the 「按上键后历史打印在终端上乱完了」.
+        page.reset()
+        app.processEvents()
+        long_cmd = "# " + "z" * max(8, cols - 4)
+        send((long_cmd + "\r\n").encode("ascii"))
+        send(b"# ls\r\n")
+        send(b"# ")
+        app.processEvents()
+        send(("\x1b[2A\r" + "# ls\x1b[K\r\n# ").encode("ascii"))
+        app.processEvents()
+        stale = [screen().row_text(r) for r in range(screen().rows)
+                 if screen().row_text(r).count("z") > 4]
+        check("R-298 上键重绘后不残留上一次的长行内容", not stale, str(stale[:2]))
+
+        page.reset()
+        window.switch_page("terminal")
+        app.processEvents()
+        next_()
+
     def step_terminal_scrollbar(next_):
         """R-215: the terminal's scrollbar is a real control, not decoration.
 
@@ -7687,6 +7874,82 @@ def main() -> int:
         view.reset()
         window.switch_page("terminal")
         app.processEvents()
+        next_()
+
+    def step_plugin_disabled_rx(next_):
+        """R-218: the window must keep working with the terminal plugin **off**.
+
+        The packaged self-test caught this: with ``terminal`` disabled,
+        ``self.console`` is a plain placeholder ``QWidget``, and ``_on_rx`` called
+        ``.absorb()`` on it - an ``AttributeError`` on **every** received packet,
+        i.e. a serial session that could not log anything.
+
+        Proven on a throwaway window with ``plugins-disabled.json`` written first,
+        so the real window keeps its plugins for the rest of the suite.
+        """
+        import json as json_module
+
+        directory = tempfile.mkdtemp(prefix="omnicom-plugoff-")
+        with open(os.path.join(directory, "plugins-disabled.json"), "w",
+                  encoding="utf-8") as handle:
+            json_module.dump(["terminal", "transfer"], handle)
+        previous = os.environ.get("OMNICOM_DATA_DIR")
+        os.environ["OMNICOM_DATA_DIR"] = directory
+        victim = None
+        try:
+            victim = OmniWindow(demo=False, command_path=os.path.join(
+                directory, "commands.json"))
+            victim.show()
+            app.processEvents()
+            ids = [info.id for info in victim.plugins.loaded()]
+            check("R-218 禁用后 terminal / transfer 确实未加载",
+                  "terminal" not in ids and "transfer" not in ids, str(ids))
+            check("R-218 禁用后终端标签是占位控件",
+                  type(victim.console).__name__ == "QWidget",
+                  type(victim.console).__name__)
+
+            errors: list[str] = []
+            try:
+                for _ in range(5):
+                    victim._on_rx(0.0, b"hello\r\n")
+                    victim._flush_rx()
+                    app.processEvents()
+            except Exception as exc:
+                errors.append(f"{type(exc).__name__}: {exc}")
+            check("R-218 插件禁用时收到数据不抛异常", not errors, str(errors))
+            check("R-218 插件禁用时日志仍正常收数据",
+                  "hello" in victim.log.plain_text(),
+                  repr(victim.log.plain_text()[:40]))
+
+            for label, action in (
+                    ("切到终端页", lambda: victim.switch_page("console")),
+                    ("清除窗口", victim.clear_window),
+                    ("刷新文案", victim.retranslate)):
+                try:
+                    action()
+                    app.processEvents()
+                except Exception as exc:
+                    errors.append(f"{label}: {type(exc).__name__}: {exc}")
+            check("R-218 插件禁用时切页/清空/换语言都不抛异常",
+                  not errors, str(errors))
+
+            state = victim._control_screen({"scrollback": 0}, {})
+            check("R-218 插件禁用时 CLI screen 明确报未启用",
+                  state.get("ok") is False
+                  and "插件未启用" in str(state.get("error") or ""),
+                  str(state.get("error")))
+        finally:
+            if victim is not None:
+                victim.close()
+                victim.deleteLater()
+                app.processEvents()
+            if previous is None:
+                os.environ.pop("OMNICOM_DATA_DIR", None)
+            else:
+                os.environ["OMNICOM_DATA_DIR"] = previous
+            import shutil as shutil_module
+
+            shutil_module.rmtree(directory, ignore_errors=True)
         next_()
 
     def step_terminal_buttons(next_):
@@ -8778,9 +9041,11 @@ def main() -> int:
     runner.add("R-212 terminal_single_screen", step_terminal_single_screen)
     runner.add("R-213 clear_follows_page", step_clear_follows_page)
     runner.add("R-214 terminal_narrow_reflow", step_terminal_narrow_reflow)
+    runner.add("R-294 terminal_keystroke_snaps", step_terminal_keystroke_snaps)
     runner.add("R-215 terminal_scrollbar", step_terminal_scrollbar)
     runner.add("R-217 control_endpoint_async", step_control_endpoint_async)
     runner.add("R-292 terminal_single_send", step_terminal_single_send)
+    runner.add("R-218 plugin_disabled_rx", step_plugin_disabled_rx)
     runner.add("R-200 toast_stack", step_toast_stack)
     runner.add("R-201 hex_columns", step_hex_columns)
     runner.add("R-203 hex_partial", step_hex_partial_survives)

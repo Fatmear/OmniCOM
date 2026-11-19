@@ -145,6 +145,14 @@ class Screen:
         self._grid: list[list[Cell]] = [
             [Cell() for _ in range(self.cols)] for _ in range(self.rows)
         ]
+        #: ``_continued[i]`` is True when row ``i`` is the **continuation** of the
+        #: row above it, i.e. the text ran into the right edge (DECAWM) and kept
+        #: going.  The mark lives on the *destination* row and is set only when a
+        #: wrap actually happens, so a hard ``\r\n`` after a full row starts a
+        #: genuinely new line instead of being glued onto the previous one - the
+        #: reported 「按上键还有错乱」 where two unrelated prompts appeared
+        #: interleaved on one line (L-298).
+        self._continued: list[bool] = [False] * self.rows
         self._decoder_state = ""
 
     # ------------------------------------------------------------------ grid
@@ -198,61 +206,156 @@ class Screen:
             return
         self._reflow(rows, cols)
 
+    @staticmethod
+    def _row_is_full(row: list[Cell]) -> bool:
+        """True when every column of ``row`` is occupied (a soft-wrapped edge).
+
+        Kept for callers that only have a row to look at.  ``_reflow`` no longer
+        uses it: a real shell prompt ends in a space (``"$ "``), so "no blanks"
+        is *not* the same as "the text continues below" and the check silently
+        never fired (L-298).  The authoritative answer is ``Screen._continued``.
+        """
+        for cell in row:
+            if cell.continuation:
+                continue
+            if cell.char in ("", " "):
+                return False
+        return True
+
+    @staticmethod
+    def _cursor_flat_index(row: list[Cell], cursor_col: int) -> int:
+        """How many cells of ``row`` come before ``cursor_col``.
+
+        The grid address is a *column*; the re-wrapped model is a *flat list of
+        cells* (wide glyphs occupy two columns but one entry).  Converting one to
+        the other is what keeps the cursor on the same character after a resize.
+        """
+        index = 0
+        col = 0
+        while col < len(row) and col < cursor_col:
+            cell = row[col]
+            width = max(1, cell.width) if cell.char else 1
+            if not cell.continuation:
+                index += 1
+            col += width
+        return index
+
     def _reflow(self, rows: int, cols: int) -> None:
         """Re-wrap the logical lines of the grid into ``rows x cols``."""
-        # 1. Unwrap: every grid row becomes a logical line.  Soft-wrapped
-        #    continuations are just the next row, which is exactly how our writer
-        #    produced them, so joining rows is lossless.
+        # 1. Unwrap.  ``_continued[i]`` says row ``i`` carries the tail of row
+        #    ``i - 1`` because that one ran into the right edge.  Joining those is
+        #    what lets a widening window *merge* the pieces back into one line;
+        #    treating every grid row as its own logical line left the seam where
+        #    it was, so the tail of a wrapped prompt stayed at the start of a row
+        #    while the rest of the redraw landed after it (「又显示在一行」).
         logical: list[list[Cell]] = []
-        for row in self._grid:
-            line = [cell for cell in row if not cell.continuation]
-            while line and line[-1].char == " " and line[-1].width == 1:
-                line.pop()
-            logical.append(line)
+        #: For each logical line, ``dest[i]`` = where flat cell ``i`` landed,
+        #: with ``dest[len(line)]`` = the cell just past the text.
+        cursor_line = 0
+        cursor_index = 0
+        current: list[Cell] = []
+        found_cursor = False
+        for src_row, row in enumerate(self._grid):
+            if src_row and not self._continued[src_row]:
+                logical.append(current)
+                current = []
+            if src_row == self.cursor_row and not found_cursor:
+                # The cursor's flat index is "everything already collected for
+                # this logical line" plus its offset inside the row.  Using only
+                # the in-row offset put a cursor that sat on the *third* wrapped
+                # segment back at the start of the logical line, so after a resize
+                # it landed on row 0 and Up could not move up any more (R-214).
+                cursor_line = len(logical)
+                cursor_index = len(current) + self._cursor_flat_index(
+                    row, self.cursor_col)
+                found_cursor = True
+            for cell in row:
+                if not cell.continuation:
+                    current.append(cell)
+        logical.append(current)
+        if not found_cursor:
+            # Cursor past the end of the last row.
+            cursor_line = len(logical) - 1
+            cursor_index = len(logical[-1])
 
-        # 2. Where is the cursor in that model?
-        cursor = (self.cursor_row, self.cursor_col)
-        # 3. Re-wrap.
+        # Trailing blanks are layout, not content: trimming them before the
+        # rewrap is what makes a widened window pull the next word up.  The
+        # cursor's own line is trimmed only down to the cursor - trimming the two
+        # blanks of a ``"$ "`` prompt dragged the cursor from column 2 back to 1
+        # on every resize, which then shifted the next echo by one column.
+        for line_index, line in enumerate(logical):
+            floor = cursor_index if line_index == cursor_line else 0
+            while (len(line) > floor and line[-1].char in ("", " ")
+                   and line[-1].width == 1):
+                line.pop()
+
+        # 2. Re-wrap one logical line at a time, recording where every cell and
+        #    the cursor end up.
         new_grid: list[list[Cell]] = []
-        mapping: dict[tuple[int, int], tuple[int, int]] = {}
+        destinations: list[list[tuple[int, int]]] = []
+        new_continued: list[bool] = []
 
         def new_blank() -> list[Cell]:
             return [Cell(style=self.style) for _ in range(cols)]
 
-        current = new_blank()
-        new_grid.append(current)
-        for src_row, line in enumerate(logical):
-            if src_row:
-                # A hard line end starts a new grid row.
-                current = new_blank()
-                new_grid.append(current)
+        def start_row(continued: bool) -> list[Cell]:
+            row_cells = new_blank()
+            new_grid.append(row_cells)
+            new_continued.append(bool(new_grid[:-1]) and continued)
+            return row_cells
+
+        current_row = start_row(False)
+        for line_index, line in enumerate(logical):
+            if line_index:
+                # A hard line end starts a new screen row.
+                current_row = start_row(False)
+            dest: list[tuple[int, int]] = []
+            destinations.append(dest)
             col = 0
-            for src_col, cell in enumerate(line):
+            for cell in line:
                 width = max(1, cell.width) if cell.char else 1
                 if col + width > cols:
-                    current = new_blank()
-                    new_grid.append(current)
+                    # Ran out of room: this new row carries the tail.
+                    current_row = start_row(True)
                     col = 0
-                mapping[(src_row, src_col)] = (len(new_grid) - 1, col)
+                dest.append((len(new_grid) - 1, col))
                 if col < cols:
-                    current[col] = copy.copy(cell)
+                    current_row[col] = copy.copy(cell)
                     if width == 2 and col + 1 < cols:
-                        current[col + 1] = Cell(style=cell.style, width=2,
-                                                continuation=True)
+                        current_row[col + 1] = Cell(style=cell.style, width=2,
+                                                   continuation=True)
                 col += width
+            # Just past the text.  It belongs to the *last* row of this logical
+            # line, and only wraps when the text already reached the edge.
+            if dest:
+                row_index, last_col = dest[-1]
+                width = max(1, line[-1].width) if line[-1].char else 1
+                after = last_col + width
+                if after >= cols:
+                    # No room left on that row.  Do **not** append a row just to
+                    # park the cursor: when the text exactly fills the screen
+                    # that extra row becomes "overflow" and the top line is
+                    # pushed into the scrollback, so a CJK payload lost real
+                    # characters (30 中 became 25).  Stay on the last row at the
+                    # last column instead - which is exactly the pending-wrap
+                    # state a real terminal sits in (L-300).
+                    dest.append((row_index, cols - 1))
+                else:
+                    dest.append((row_index, after))
+            else:
+                dest.append((len(new_grid) - 1, 0))
 
-        # 4. Keep the cursor on the same character (or at the end of its line).
-        target = mapping.get(cursor)
-        if target is None:
-            # Cursor sat just past the last character: land at the end of that
-            # logical line's last wrapped row.
-            src_row = min(cursor[0], len(logical) - 1)
-            last_col = len(logical[src_row]) - 1 if logical[src_row] else 0
-            target = mapping.get((src_row, last_col))
-        if target is None:
-            target = (0, 0)
+        # 3. The cursor keeps its place **in the text**.  It used to be looked up
+        #    in a dict keyed by source cell, which has no entry for a blank row or
+        #    for "one past the last character" - so every resize of a prompt that
+        #    ends in a newline threw the cursor to (0, 0).  The device then wrote
+        #    its next echo at the top-left and overwrote the first N columns of a
+        #    line that already had text (L-297).
+        line_cursor = min(cursor_line, len(destinations) - 1)
+        index = min(cursor_index, len(destinations[line_cursor]) - 1)
+        target = destinations[line_cursor][index]
 
-        # 5. Trim / pad vertically, keeping the cursor visible.
+        # 4. Trim / pad vertically, keeping the cursor visible.
         overflow = len(new_grid) - rows
         if overflow > 0:
             # Re-wrapping a narrow window produces *more* rows than before, and
@@ -268,6 +371,7 @@ class Screen:
                     if self.scrollback_limit:
                         self.scrollback.append(row)
                 del new_grid[:drop_top]
+                del new_continued[:drop_top]
                 if len(self.scrollback) > self.scrollback_limit:
                     del self.scrollback[:len(self.scrollback)
                                         - self.scrollback_limit]
@@ -277,10 +381,13 @@ class Screen:
                 # Still too many rows below the cursor: drop the tail, which is
                 # blank space the re-wrap created rather than real content.
                 del new_grid[len(new_grid) - overflow:]
+                del new_continued[len(new_continued) - overflow:]
         while len(new_grid) < rows:
             new_grid.append(new_blank())
+            new_continued.append(False)
 
         self._grid = new_grid
+        self._continued = new_continued[:rows]
         self._spare_rows = []
         self.rows, self.cols = rows, cols
         self.scroll_top = 0
@@ -311,10 +418,23 @@ class Screen:
         self.wrap_pending = self.wrap_pending and self.autowrap
 
     # -- printable / control ------------------------------------------------
+    def _carriage_return(self) -> None:
+        """``\\r``: column 0 of the **current row**, exactly like xterm.
+
+        Do not "helpfully" jump to the start of the logical (soft-wrapped) line.
+        I tried that and it produced the very bug the user reported: the device
+        echoes ``\\r`` and then re-draws its prompt, so with a logical-line jump
+        the new text landed on an *earlier* row while the old tail stayed on the
+        continuation row below it - two different lines stacked on one
+        (「两行不同的内容叠在同一行里」).  A real terminal moves to column 0 and
+        lets the application repaint whatever it wants (L-299).
+        """
+        self.cursor_col = 0
+        self.wrap_pending = False
+
     def _consume_char(self, char: str, index: int) -> int:
         if char == "\r":
-            self.cursor_col = 0
-            self.wrap_pending = False
+            self._carriage_return()
             return index + 1
         if char == "\n":
             self._line_feed()
@@ -368,7 +488,7 @@ class Screen:
         if self.wrap_pending:
             if self.autowrap:
                 self.cursor_col = 0
-                self._line_feed()
+                self._line_feed(wrap=True)
             self.wrap_pending = False
         if width == 2 and self.cursor_col == self.cols - 1:
             # A wide glyph cannot straddle the edge, so it starts on the next row
@@ -376,7 +496,7 @@ class Screen:
             # flicker of the character's first half in the last column (L-270).
             if self.autowrap:
                 self.cursor_col = 0
-                self._line_feed()
+                self._line_feed(wrap=True)
             else:
                 self.cursor_col = self.cols - 2
         if self.insert_mode:
@@ -390,6 +510,10 @@ class Screen:
         if self.cursor_col >= self.cols:
             self.cursor_col = self.cols - 1
             self.wrap_pending = self.autowrap
+        # NOTE: do **not** mark the row as a continuation here.  A full row is
+        # not the same thing as a soft wrap - the device may well follow it with
+        # ``\r\n`` and start an unrelated line.  The mark is set when the wrap
+        # actually happens, inside ``_line_feed(wrap=True)`` (L-298).
 
     def _shift_right(self, count: int) -> None:
         row = self._grid[self.cursor_row]
@@ -401,11 +525,31 @@ class Screen:
         self.cursor_col = target
         self.wrap_pending = False
 
-    def _line_feed(self) -> None:
+    def _line_feed(self, wrap: bool = False) -> None:
+        """Move the cursor down one row, scrolling at the bottom.
+
+        ``wrap=True`` marks the row the cursor leaves as **soft-wrapped**, i.e.
+        the text continues on the next row because it ran into the right edge.
+        ``resize`` uses that mark to rejoin the pieces when the window gets
+        wider; without it a widened terminal kept the seam from a narrower
+        window forever (L-298).
+        """
+        if wrap:
+            # The row the cursor is *arriving at* continues the current one.
+            target = (self.cursor_row + 1 if self.cursor_row < self.scroll_bottom
+                      else self.cursor_row)
+            if self.cursor_row == self.scroll_bottom:
+                self._scroll_up(1, continuation=True)
+                return
+            self.cursor_row = target
+            self._continued[self.cursor_row] = True
+            return
         if self.cursor_row == self.scroll_bottom:
-            self._scroll_up(1)
+            self._scroll_up(1, continuation=False)
         elif self.cursor_row < self.rows - 1:
             self.cursor_row += 1
+            # A hard line feed starts a line of its own, never a continuation.
+            self._continued[self.cursor_row] = False
 
     def _reverse_line_feed(self) -> None:
         if self.cursor_row == self.scroll_top:
@@ -430,13 +574,21 @@ class Screen:
             return row
         return [Cell(style=self.style) for _ in range(self.cols)]
 
-    def _scroll_up(self, count: int) -> None:
+    def _scroll_up(self, count: int, continuation: bool = False) -> None:
         """Move the region up; leave lines pulled out of the *full* screen in the
-        scrollback so the history is not lost."""
+        scrollback so the history is not lost.
+
+        ``continuation`` marks the blank row that enters at the bottom as the
+        continuation of the line that just scrolled into place - which is what a
+        soft wrap at the last row produces.
+        """
         top, bottom = self.scroll_top, self.scroll_bottom
         full = top == 0 and bottom == self.rows - 1
         for _ in range(max(0, count)):
             removed = self._grid.pop(top)
+            # The mark belongs to the row, so it moves with it.  Dropping it (or
+            # resetting it) would make a later rejoin glue the wrong two rows.
+            was_continued = self._continued.pop(top)
             if full and self.scrollback_limit:
                 self.scrollback.append(removed)
                 overflow = len(self.scrollback) - self.scrollback_limit
@@ -448,18 +600,22 @@ class Screen:
                         self._spare_rows.append(row)
                     del self.scrollback[:overflow]
                 self._grid.insert(bottom, self._blank_row())
+                self._continued.insert(bottom, continuation)
             else:
                 for cell in removed:
                     cell.blank(self.style)
                 self._grid.insert(bottom, removed)
+                self._continued.insert(bottom, was_continued)
 
     def _scroll_down(self, count: int) -> None:
         top, bottom = self.scroll_top, self.scroll_bottom
         for _ in range(max(0, count)):
             removed = self._grid.pop(bottom)
+            was_continued = self._continued.pop(bottom)
             for cell in removed:
                 cell.blank(self.style)
             self._grid.insert(top, removed)
+            self._continued.insert(top, was_continued)
 
     # ------------------------------------------------------------- erase/ins
     def _erase_cells(self, row: int, start: int, end: int) -> None:
@@ -498,6 +654,8 @@ class Screen:
             del self._grid[self.scroll_bottom]
             self._grid.insert(self.cursor_row,
                               [Cell(style=self.style) for _ in range(self.cols)])
+            del self._continued[self.scroll_bottom]
+            self._continued.insert(self.cursor_row, False)
         self.cursor_col = 0
 
     def delete_lines(self, count: int) -> None:
@@ -507,6 +665,8 @@ class Screen:
             del self._grid[self.cursor_row]
             self._grid.insert(self.scroll_bottom,
                               [Cell(style=self.style) for _ in range(self.cols)])
+            del self._continued[self.cursor_row]
+            self._continued.insert(self.scroll_bottom, False)
         self.cursor_col = 0
 
     def insert_chars(self, count: int) -> None:

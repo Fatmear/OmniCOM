@@ -39,15 +39,17 @@ def verify_runtime(target: Path) -> int:
 import os,sys,math,json,zipfile,hashlib,time
 from pathlib import Path
 root=Path(sys.argv[1])
-# R-174: the bundle ships no plugins folder any more, so the plugin source for
-# the install/uninstall cycle comes from the repository (argv[4]).  Keeping a
-# "bundled" mode around made the check reach for a folder that no longer
-# exists, and the whole build died on a StopIteration inside next().
+# R-174 keeps *store* plugins (chart, launcher) out of the bundle; the two
+# core plugins that own the host's terminal / transfer tabs do ship (R-218).
 source_root=Path(sys.argv[4])
 sys.path.insert(0,str(root/'OmniCOM.pyz'))
 os.environ['QT_QPA_PLATFORM']='offscreen'
 def verify(temporary):
-    assert not (root/'plugins').exists(), 'R-174: the bundle must not ship plugins/'
+    # A blanket ``not (root/'plugins').exists()`` would fail on a correct
+    # bundle now, so the assertion names the store plugins instead.
+    for store_plugin in ('chart','launcher'):
+        assert not (root/'plugins'/store_plugin).exists(), (
+            'R-174: the bundle must not ship plugins/'+store_plugin)
     os.environ['OMNICOM_DATA_DIR']=temporary
     # The plugin has to arrive the way a user gets it: through the store, into
     # the data directory.  That is also the only path that proves the ZIP is
