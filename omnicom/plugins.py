@@ -61,6 +61,9 @@ class PluginInfo:
     _rx_listeners: list = field(default_factory=list)
     _theme_listeners: list = field(default_factory=list)
     _cleanups: list = field(default_factory=list)
+    #: ``name -> factory()`` services this plugin offers to the host/other
+    #: plugins while it is loaded (R-218).
+    _services: dict = field(default_factory=dict)
 
     @property
     def id(self) -> str:
@@ -90,12 +93,17 @@ class PluginApi(QObject):
 
     language_changed = Signal(str)
 
-    def __init__(self, info: PluginInfo, notify, log_line, send_bytes=None) -> None:
+    def __init__(self, info: PluginInfo, notify, log_line, send_bytes=None,
+                 service_lookup=None, service_register=None,
+                 port_lookup=None) -> None:
         super().__init__()
         self.info = info
         self._notify = notify
         self._log_line = log_line
         self._send_bytes = send_bytes
+        self._service_lookup = service_lookup
+        self._service_register = service_register
+        self._port_lookup = port_lookup
         self._dir = os.path.join(paths.data_dir(), "plugin-data", info.id)
         os.makedirs(self._dir, exist_ok=True)
         # A plugin's state lives next to its own data, not in the registry, so the
@@ -156,6 +164,26 @@ class PluginApi(QObject):
         except Exception:
             return False
 
+    def port(self):
+        """The host's :class:`PortManager`, or ``None`` (R-218).
+
+        Needed by plugins that speak a *protocol* over the port (X/Y/ZMODEM)
+        rather than just writing bytes: those engines need ``read``/``write``
+        plus a live "is it open" answer.  Ordinary plugins should keep using
+        :meth:`send`/``on_rx`` - this is the escape hatch, not the default.
+        """
+        lookup = self._port_lookup
+        return lookup() if lookup else None
+
+    def is_connected(self) -> bool:
+        manager = self.port()
+        if manager is None:
+            return False
+        try:
+            return bool(manager.status().get("connected"))
+        except Exception:
+            return False
+
     def on_language(self, callback) -> None:
         self.info._listeners.append(callback)
 
@@ -167,6 +195,30 @@ class PluginApi(QObject):
 
     def on_unload(self, callback) -> None:
         self.info._cleanups.append(callback)
+
+    # ------------------------------------------------- plugin-to-host services
+    def service(self, name: str):
+        """Ask the host for a named service object, or ``None`` (R-218).
+
+        Used to keep the CLI contract working when a feature is an optional
+        plugin: ``cli screen`` asks for the ``"terminal"`` service and reports
+        "终端插件未启用" when nothing provides it, instead of returning a blank
+        screen.  A plugin may also call this to reach another plugin.
+        """
+        lookup = self._service_lookup
+        return lookup(name) if lookup else None
+
+    def provide(self, name: str, factory) -> None:
+        """Expose ``factory()`` under ``name`` while this plugin is loaded.
+
+        The factory is called on demand (never eagerly), so an unused service
+        costs nothing.
+        """
+        self.info.manifest.setdefault("services", {})
+        self.info._services[name] = factory
+        register = self._service_register
+        if register:
+            register(self.info.id, name, factory)
 
     @staticmethod
     def theme():
@@ -223,12 +275,37 @@ class PluginHost(QObject):
 
     changed = Signal()
 
-    def __init__(self, notify=None, log_line=None, send_bytes=None, parent=None) -> None:
+    def __init__(self, notify=None, log_line=None, send_bytes=None, parent=None,
+                 port=None) -> None:
         super().__init__(parent)
         self.plugins: list[PluginInfo] = []
         self._notify = notify
         self._log_line = log_line
         self._send_bytes = send_bytes
+        #: Callable returning the host's PortManager (see :meth:`PluginApi.port`).
+        self._port = port
+        #: ``service name -> factory()``, cleared on every reload so a disabled
+        #: plugin cannot keep answering (R-218).
+        self._services: dict[str, Any] = {}
+        self._service_owner: dict[str, str] = {}
+
+    # ------------------------------------------------------------- services
+    def service(self, name: str):
+        """Return a provided service object, or ``None`` (R-218)."""
+        factory = self._services.get(name)
+        if factory is None:
+            return None
+        try:
+            return factory()
+        except Exception:                      # a broken plugin must not crash us
+            return None
+
+    def has_service(self, name: str) -> bool:
+        return name in self._services
+
+    def _register_service(self, plugin_id: str, name: str, factory) -> None:
+        self._services[name] = factory
+        self._service_owner[name] = plugin_id
 
     # ----------------------------------------------------------------- scan
     @staticmethod
@@ -335,7 +412,10 @@ class PluginHost(QObject):
         create = getattr(module, "create", None)
         if create is None:
             raise AttributeError("插件必须定义 create(api) -> QWidget")
-        api = PluginApi(info, self._notify, self._log_line, self._send_bytes)
+        api = PluginApi(info, self._notify, self._log_line, self._send_bytes,
+                        service_lookup=self.service,
+                        service_register=self._register_service,
+                        port_lookup=(lambda: self._port))
         info.api = api
         widget = create(api)
         from PySide6.QtWidgets import QWidget
@@ -363,6 +443,10 @@ class PluginHost(QObject):
     def unload(self) -> None:
         import sys
 
+        # Services die with their plugin, or a disabled terminal would keep
+        # answering `cli screen` from a half-torn-down widget (R-218).
+        self._services.clear()
+        self._service_owner.clear()
         for info in self.plugins:
             for callback in list(info._cleanups):
                 try:

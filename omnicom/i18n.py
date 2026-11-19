@@ -187,6 +187,15 @@ _TABLE: dict[str, tuple[str, str]] = {
         "Click the terminal and type: Enter sends CR, Ctrl+C sends 0x03, arrow keys send ANSI "
         "sequences. Copy with Ctrl+Shift+C."),
     "console.needport": ("请先打开串口再使用终端模式", "Open a port before using the terminal"),
+    # ------------------------------------------------- optional plugin pages
+    "plugin.disabled.title": ("{name}插件未启用", "The {name} plugin is disabled"),
+    "plugin.disabled.hint": (
+        "这两个页面已经改成独立插件。要恢复使用，请在插件列表里启用 terminal / "
+        "transfer，然后重新打开窗口。",
+        "These pages are plugins now. Enable terminal / transfer in the plugin list, "
+        "then reopen the window."),
+    "plugin.disabled.transfer": ("文件传输插件未启用", "The file-transfer plugin is disabled"),
+    "xfer.busy": ("上一次传输还没结束", "A transfer is still running"),
     # ------------------------------------------------------------ status bar
     "status.ready": ("就绪", "Ready"),
     "status.connected": ("已连接 {port} · {baud} bps", "Connected {port} · {baud} bps"),

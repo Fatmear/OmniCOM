@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import json
 import os
 import re
 import shutil
@@ -2219,9 +2220,19 @@ def main() -> int:
         check("R-026 终端解释 CR 与 ANSI 颜色序列",
               "login: root" in text and "OK" in text and "\x1b" not in text,
               text.replace("\n", "|")[:60])
-        window._on_terminal_keys(b"AT\r")
+        if not window.bridge.state().get("connected"):
+            window.bridge.open("DEMO", window._serial_opts())
+            for _wait in range(80):
+                app.processEvents()
+                if window.bridge.state().get("connected"):
+                    break
+        window.console.view.keyBytes.emit(b"AT\r")
+        app.processEvents()
         grew = window.bridge.manager.tx_bytes - state["tx_term"]
-        check("R-026 键盘输入直达串口", grew == 3, f"+{grew} B")
+        # Exactly 3: one byte per keystroke.  A value of 6 is the R-292 double
+        # send ("ls" arriving as "llss"), which is why this is `==` and not `>=`.
+        check("R-026 键盘输入直达串口，且每个字节只发一次", grew == 3,
+              f"+{grew} B")
         window.console.view.reset()
         window.switch_page("terminal")
         app.processEvents()
@@ -2400,6 +2411,34 @@ def main() -> int:
         yes = window.plugins.search_paths()
         check("R-032 插件搜索路径包含可移植目录", any("plugin" in p for p in yes),
               str(len(yes)))
+
+        # ---- R-218: 终端 / 文件传输 are plugins, not host-built pages --------
+        loaded_ids = {item.id: item for item in window.plugins.loaded()}
+        check("R-218 终端与文件传输都以插件形式加载",
+              "terminal" in loaded_ids and "transfer" in loaded_ids,
+              str(sorted(loaded_ids)))
+        check("R-218 window.console 就是 terminal 插件控件（宿主不自建）",
+              loaded_ids.get("terminal") is not None
+              and window.console is loaded_ids["terminal"].widget,
+              type(window.console).__name__)
+        check("R-218 window.transfer 就是 transfer 插件控件",
+              loaded_ids.get("transfer") is not None
+              and window.transfer is loaded_ids["transfer"].widget,
+              type(window.transfer).__name__)
+        check("R-218 插件通过 service 暴露能力",
+              window.plugins.service("terminal") is not None
+              and window.plugins.service("transfer") is not None,
+              f"terminal={window.plugins.service('terminal') is not None} "
+              f"transfer={window.plugins.service('transfer') is not None}")
+        check("R-218 内置插件页不会重复出现 plugin:<id> 标签",
+              "plugin:terminal" not in window._page_keys
+              and "plugin:transfer" not in window._page_keys,
+              str(window._page_keys))
+        state = window._control_screen({"scrollback": 0}, {})
+        check("R-218 CLI 的 screen 走插件服务（不是宿主属性）",
+              state.get("ok") is True
+              and "rows" in state and "cursor" in state,
+              str(state.get("error")))
         next_()
 
     def step_language(next_):
@@ -3147,6 +3186,12 @@ def main() -> int:
         close_patch = patch.object(manager, "close", slow_close)
         open_patch.start()
         close_patch.start()
+        # The poll loop must not compete with the thing it is measuring.  At
+        # 10 ms it fired in lock-step with the 10 ms heartbeat, which pushed the
+        # heartbeat to ~20 ms and produced phantom 200-330 ms "stalls" that had
+        # nothing to do with the GUI being blocked (measured both with and
+        # without the terminal/transfer plugins enabled, L-294).
+        POLL_MS = 25
         heartbeat = QTimer(window)
         heartbeat.setInterval(10)
 
@@ -3200,7 +3245,7 @@ def main() -> int:
             timings.append((time.perf_counter() - started) * 1000)
             cycles[0] += 1
             deadline[0] = time.monotonic() + 4
-            QTimer.singleShot(10, poll)
+            QTimer.singleShot(POLL_MS, poll)
 
         def poll():
             expected = bool(cycles[0] % 2)
@@ -3210,13 +3255,13 @@ def main() -> int:
                 if cycles[0] == 12:
                     finish()
                 else:
-                    QTimer.singleShot(10, toggle)
+                    QTimer.singleShot(POLL_MS, toggle)
                 return
             if time.monotonic() > deadline[0]:
                 check("R-055 串口开关在超时前完成", False, str(manager.status()))
                 finish()
                 return
-            QTimer.singleShot(10, poll)
+            QTimer.singleShot(POLL_MS, poll)
 
         QTimer.singleShot(20, toggle)
 
@@ -6922,10 +6967,15 @@ def main() -> int:
         check("R-211 终端页此时不可见（正是要覆盖的场景）",
               not window.console.view.isVisible())
 
-        window.console.mirror = type(window.console.mirror)(
-            rows=24, cols=80, scrollback=200)
+        # ``window.console`` is the plugin widget now (R-218); the screen state
+        # lives on the wrapped ``TerminalPage``, so reset it there.
+        page = window.console.page
+        from omnicom.ui.terminal import Screen
+
+        page.mirror = Screen(rows=24, cols=80, scrollback=200)
+        page.view.attach_screen(page.mirror)
         window.console.feed(b"line one\r\nsecond line\r\n$ ")
-        window.console.mirror.feed(b"prompt> ")     # what `_on_rx` does
+        page.mirror.feed(b"prompt> ")                # what `_on_rx` does
 
         state = window._control_screen({"scrollback": 0}, {})
         check("R-211 窗口能返回终端屏幕（页面不可见时也有内容）",
@@ -7449,6 +7499,196 @@ def main() -> int:
         app.processEvents()
         next_()
 
+    def step_control_endpoint_async(next_):
+        """R-217: ``Server.publish()`` must not write the endpoint on the caller.
+
+        Measured on this machine: one ``json.dump`` + ``os.replace`` costs
+        30.2 ms median / 59.8 ms p95.  ``publish()`` is called from the status
+        handler on **every** port change, so opening/closing a port froze the
+        window for tens of milliseconds - which is what tripped R-055's 200 ms
+        heartbeat budget.  The writer now lives on its own thread and only writes
+        the latest snapshot.
+        """
+        from omnicom import control as control_module
+
+        server = control_module.Server(slot=0)
+        started = server.start()
+        check("R-217 独立控制端点能启动", started, str(started))
+        if not started:
+            next_()
+            return
+        path = server._endpoint
+        try:
+            # ---- publish() itself must be cheap
+            samples = []
+            for index in range(20):
+                start = time.perf_counter()
+                server.publish(serial="DEMO", connected=bool(index % 2))
+                samples.append((time.perf_counter() - start) * 1000)
+            samples.sort()
+            median = samples[len(samples) // 2]
+            check(f"R-217 publish 不再阻塞调用线程（中位 {median:.3f} ms，修复前约 30 ms）",
+                  median < 5.0, f"median={median:.3f} max={samples[-1]:.2f}")
+
+            # ---- the file is still written, with the last state
+            deadline = time.time() + 3.0
+            payload = {}
+            while time.time() < deadline:
+                with contextlib.suppress(OSError, ValueError), \
+                        open(path, encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                if payload.get("serial") == "DEMO":
+                    break
+                time.sleep(0.02)
+            check("R-217 端点文件最终仍被写出（serial=DEMO）",
+                  payload.get("serial") == "DEMO", str(payload.get("serial")))
+            check("R-217 文件里的 connected 反映最后一次状态",
+                  payload.get("connected") is True, str(payload.get("connected")))
+
+            # ---- and the write happened on another thread
+            seen: list[str] = []
+            real_write = control_module.Server._write_endpoint
+
+            def spy_write(self):
+                seen.append(threading.current_thread().name)
+                return real_write(self)
+
+            control_module.Server._write_endpoint = spy_write
+            try:
+                server.publish(serial="COM9", connected=True)
+                deadline = time.time() + 3.0
+                while time.time() < deadline and not seen:
+                    time.sleep(0.02)
+            finally:
+                control_module.Server._write_endpoint = real_write
+            check("R-217 写盘发生在 omnicom-endpoint 线程",
+                  bool(seen) and all("endpoint" in name for name in seen),
+                  str(seen))
+            check("R-217 调用者（主线程）没有亲自写盘",
+                  "MainThread" not in seen, str(seen))
+
+            # ---- bursts are coalesced
+            count: list[int] = []
+            real_again = control_module.Server._write_endpoint
+
+            def spy_again(self):
+                count.append(1)
+                return real_again(self)
+
+            control_module.Server._write_endpoint = spy_again
+            try:
+                for index in range(20):
+                    server.publish(serial=f"COM{index}",
+                                   connected=bool(index % 2))
+                time.sleep(0.6)
+            finally:
+                control_module.Server._write_endpoint = real_again
+            check(f"R-217 连续 20 次变化被合并（实际写 {len(count)} 次）",
+                  0 < len(count) < 20, f"{len(count)} 次")
+        finally:
+            server.stop()
+            app.processEvents()
+        check("R-217 stop() 后端点文件被撤销",
+              not os.path.exists(path), path)
+        next_()
+
+    def step_terminal_single_send(next_):
+        """R-292: one key press = one byte on the wire.
+
+        The user reported 「终端我输入的是 ls，你显示和发送的是 llss」.  Two
+        independent send paths were live at once: the host connected
+        ``console.keyBytes`` to its own ``_on_terminal_keys``, **and** the
+        terminal plugin routes ``page.keyBytes`` through ``api.send`` (R-218).
+        Every keystroke therefore went out twice.
+
+        Asserted by counting the bytes that actually reach the driver, not by
+        trusting the wiring - an unconnected *or* a doubly-connected signal both
+        look fine from the outside until you measure.
+        """
+        window.switch_page("console")
+        app.processEvents()
+        view = window.console.view
+        view.reset()
+        app.processEvents()
+
+        manager = window.bridge.manager
+        original_write = manager.write
+        sent: list[bytes] = []
+        opened_here = False
+
+        def collect(payload):
+            sent.append(bytes(payload))
+            return original_write(payload)
+
+        try:
+            if not window.bridge.state().get("connected"):
+                window.bridge.open("DEMO", window._serial_opts())
+                opened_here = True
+            # Wait for the port to be *really* open: an earlier step may have left
+            # a close in flight, and a key press against a half-open port sends
+            # nothing at all (which reads as "the terminal is broken").
+            deadline = time.monotonic() + 6.0
+            while time.monotonic() < deadline:
+                app.processEvents()
+                if window.bridge.state().get("connected"):
+                    break
+                QTest.qWait(20)
+            manager.write = collect
+            view.setFocus()
+            app.processEvents()
+            if not window.bridge.state().get("connected"):
+                check("R-292 用例前提：串口已打开", False,
+                      str(window.bridge.state().get("error")))
+                next_()
+                return
+
+            # ---- the exact report: "ls" must not become "llss"
+            sent.clear()
+            QTest.keyClick(view, Qt.Key_L)
+            QTest.keyClick(view, Qt.Key_S)
+            app.processEvents()
+            typed = b"".join(sent)
+            check("R-292 输入 ls 只发出 ls（不是 llss）", typed == b"ls",
+                  f"{typed!r} connected={window.bridge.state().get('connected')} "
+                  f"write_is_manager={getattr(manager.write, '__self__', None) is manager} "
+                  f"view_focus={view.hasFocus()} "
+                  f"tx={manager.tx_bytes}")
+
+            # ---- Enter, arrows and Ctrl+letter are single-shot too
+            sent.clear()
+            QTest.keyClick(view, Qt.Key_Return)
+            app.processEvents()
+            check("R-292 回车只发一个 \\r", b"".join(sent) == b"\r",
+                  repr(b"".join(sent)))
+
+            sent.clear()
+            QTest.keyClick(view, Qt.Key_Up)
+            app.processEvents()
+            check("R-292 上键只发一次 ESC[A", b"".join(sent) == b"\x1b[A",
+                  repr(b"".join(sent)))
+
+            sent.clear()
+            for key in (Qt.Key_A, Qt.Key_B, Qt.Key_C):
+                QTest.keyClick(view, key)
+            app.processEvents()
+            check("R-292 三个字符键恰发 3 字节（每键一次）",
+                  b"".join(sent) == b"abc", repr(b"".join(sent)))
+
+            # ---- and the host really has no second path any more
+            check("R-292 宿主不再保留第二条发送链路",
+                  not hasattr(window, "_on_terminal_keys"), "still present")
+        finally:
+            manager.write = original_write
+            if opened_here:
+                window.bridge.close()
+                for _wait in range(40):
+                    app.processEvents()
+
+        view.reset()
+        window.switch_page("terminal")
+        app.processEvents()
+        next_()
+
     def step_terminal_buttons(next_):
         """R-188: reset and full screen are two different, working actions."""
         from omnicom.i18n import tr
@@ -7481,8 +7721,11 @@ def main() -> int:
         check("R-188 全屏不丢回滚内容", page.view.toPlainText() == before)
         page.toggle_fullscreen()
         app.processEvents()
+        # The page is now a plugin widget wrapping ``TerminalPage`` (R-218), so
+        # "back in the terminal tab" means: reparented to the page itself, not
+        # to the overlay.
         check("R-188 退出全屏把卡片放回终端页",
-              page._overlay is None and page.card.parentWidget() is page,
+              page._overlay is None and page.card.parentWidget() is page.page,
               type(page.card.parentWidget()).__name__)
         check("R-188 退回后图标恢复为展开",
               page.btn_full.glyph == GlyphButton.EXPAND, page.btn_full.glyph)
@@ -8378,6 +8621,10 @@ def main() -> int:
               window._status.get("connected")
               and window.btn_connect.text() == tr("rail.close"),
               f"{window._status.get('connected')} / {window.btn_connect.text()}")
+        # The endpoint file is written on a background thread so the GUI never
+        # waits for the disk (R-217); ask it to settle before asserting, or this
+        # check races the writer.
+        window.control_server.flush_endpoint()
         check("R-185 端点文件同步广播了占用的串口",
               any(item["serial"] == "DEMO" and item["connected"]
                   for item in control.endpoints()),
@@ -8532,6 +8779,8 @@ def main() -> int:
     runner.add("R-213 clear_follows_page", step_clear_follows_page)
     runner.add("R-214 terminal_narrow_reflow", step_terminal_narrow_reflow)
     runner.add("R-215 terminal_scrollbar", step_terminal_scrollbar)
+    runner.add("R-217 control_endpoint_async", step_control_endpoint_async)
+    runner.add("R-292 terminal_single_send", step_terminal_single_send)
     runner.add("R-200 toast_stack", step_toast_stack)
     runner.add("R-201 hex_columns", step_hex_columns)
     runner.add("R-203 hex_partial", step_hex_partial_survives)

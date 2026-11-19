@@ -10,7 +10,8 @@ CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
 **窗口变窄时终端按新宽度重新折行 → R-214**；
 **终端滚动条可拖动 / 点击跳转 → R-215**；
 **滚动条滑块位置正确（拉到底不跳回顶部）→ R-216**；
-`ui_selftest` 900 项，`acceptance_test` 211 需求 / 1264 项检查全 PASS）
+**终端与文件传输已拆成独立插件 → R-218；一次按键只发一个字节 → R-292**；
+`ui_selftest` 919 项，`acceptance_test` 213 需求 / 1290 项检查全 PASS）
 
 ## Latest State
 
@@ -243,6 +244,21 @@ CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
   教训：变量的**零值本身是有意义且最常见的状态**时，绝不能用 `if value:` 代充
   "是否初始化"（同类：`if self.count:` / `if self.offset:`）。
 
+- **第十六轮（2026-11-19）**：把终端与文件传输拆成独立插件（R-218），
+  顺手修掉由此暴露的 `llss` 双发（R-292）。
+
+  * **R-218 插件化**：`omnicom/ui/terminal.py`（1206 行）与
+    `transfer_panel.py`（331 行）的**控件**搬进 `plugins/terminal`、`plugins/transfer`；
+    `omnicom/ui/` 里只剩**兼容 shim**（`_LazyType` 转发到插件模块）。
+    `PluginApi` 新增 `provide(name, factory)` / `service(name)` / `port()` /
+    `is_connected()`；宿主 `_plugin_page()` 从插件取页，插件被禁用时显示说明页。
+    CLI 的 `screen`/`keys` 改走 `"terminal"` 服务，未启用时明确报错。
+  * **R-292 双发**：插件自己把 `page.keyBytes` 接到 `api.send`，而宿主**仍保留**
+    `console.keyBytes → _on_terminal_keys`，于是每键发两遍（`ls` → `llss`）。
+    → 删掉宿主的连接与 `_on_terminal_keys`（L-292/L-293）。
+  * 自测 R-026 原来直接调 `_on_terminal_keys`，**根本没走信号**，所以多一条连接
+    也测不出来；改为 `view.keyBytes.emit` 并断言 `== 3`（不是 `>=`）。
+
 ## What changed this round (files)
 
 - `omnicom/ui/widgets.py` — `Toast.move_to(point, animate)`；`play_in()` 不再用
@@ -320,18 +336,45 @@ CLI 也能读终端屏幕 / 发裸按键（screen / keys）→ R-211；
   `_scrollbar_hit()` / `_set_scroll_from_thumb()`；`mousePress|Move|Release`
   加拖拽分支（命中优先于选区）；`_paint_scrollbar()` 改用共享几何，拖拽时加宽提亮。
 - `tools/ui_selftest.py` — 新增 R-215（11 项）与 R-216（7 项），全部走真实 `QMouseEvent`。
-- `project-context/` — REQUIREMENTS 新增 R-212..R-216；LEDGER 新增 L-280..L-291。
+- `plugins/terminal/plugin.py` — **新增**：`TerminalView` + `TerminalPage` 从
+  `omnicom/ui/terminal.py` 整体搬入，外加 `TerminalPlugin`（tab 外壳）、
+  `TerminalService`（`state`/`text`/`absorb`/`clear`/`reset`/`send_keys`）与
+  `create(api)`；`__getattr__` 把未知属性转发给内层页面。
+- `plugins/transfer/plugin.py` — **新增**：`TransferPanel` 搬入，外加
+  `TransferPlugin`（自己持有 `TransferWorker`）与 `TransferService`。
+- `omnicom/ui/terminal.py`、`omnicom/ui/transfer_panel.py` — 缩成**兼容 shim**：
+  保留 `Screen`/`ANSI_COLORS` 等再导出，`TerminalView`/`TerminalPage`/`TransferPanel`
+  用 `_LazyType` 转发到插件模块；插件未启用时抛带说明的 `RuntimeError`。
+- `omnicom/plugins.py` — `PluginApi` 新增 `provide()` / `service()` / `port()` /
+  `is_connected()`；`PluginHost` 维护服务注册表（`unload()` 时清空），
+  新增 `port=` 构造参数。
+- `omnicom/ui/main_window.py` — 插件在 `_build_ui()` **之前**加载；新增
+  `_plugin_page()` / `_disabled_page()` / `_rebind_builtin_pages()`；
+  `suspend_plugins()` 先换占位页再卸载（否则 `self.console` 指向已销毁对象）；
+  **删除** `_on_terminal_keys` 与 `console.keyBytes` 连接（R-292）；
+  `start_transfer`/`abort_transfer` 改走 `"transfer"` 服务；
+  `_control_screen` 改走 `"terminal"` 服务；`notify()` 在 UI 就绪前降级到 stderr。
+- `omnicom/i18n.py` — 新增 `plugin.disabled.title` / `plugin.disabled.hint` /
+  `plugin.disabled.transfer` / `xfer.busy`。
+- `tools/ui_selftest.py` — 新增 R-218（6 项）、R-292（5 项）；R-026 改为走
+  `view.keyBytes.emit` 并断言 `== 3`；R-188 的"卡片回到终端页"改比 `page.page`；
+  R-211 改用 `console.page.mirror`；R-055 的轮询间隔 10 → 25 ms（L-294）。
+- `project-context/` — REQUIREMENTS 新增 R-212..R-216 / R-218 / R-292；
+  LEDGER 新增 L-280..L-295。
 
 ## Verification (all green)
 
 ```
 python -m ruff check .                    # All checks passed!
 python tools/terminal_selftest.py         # 69/69 项通过
-python tools/ui_selftest.py               # 900/900 项通过 / ALL GUI SELFTESTS PASSED
-python tools/acceptance_test.py           # 211 需求，1264 项检查，0 失败，uncovered 空
+python tools/ui_selftest.py               # 919/919 项通过 / ALL GUI SELFTESTS PASSED
+python tools/acceptance_test.py           # 213 需求，1290 项检查，0 失败，uncovered 空
 python tools/protocol_selftest.py         # 23/23
 python tools/contrast_audit.py            # 15/15 pairs >= 4.5:1
 ```
+
+（R-055 心跳停顿在本机会偶发超 200 ms；已用"把全部插件停用"的对照证明与插件化
+无关（median 191 ms / max 243 ms），见 L-295。预算未改。）
 
 （R-055 心跳停顿偶发超标，单独复跑必过 —— 本机负载噪声，见 L-277。）
 

@@ -293,6 +293,16 @@ class Server:
         #: change so a CLI can pick the window that already has the port it was
         #: asked about instead of hijacking another window's session (R-119).
         self.info: dict[str, Any] = {"serial": "", "connected": False}
+        #: Endpoint writes are **off the GUI thread** (R-217).  One JSON dump plus
+        #: ``os.replace`` measured 30.5 ms median / 59.8 ms p95 on this machine,
+        #: and ``publish()`` runs from the status handler on every port change -
+        #: so opening/closing a port froze the window for tens of milliseconds
+        #: (that is what made R-055's heartbeat trip).  The writer thread only
+        #: ever writes the *latest* snapshot, so a burst costs one file write.
+        self._write_wanted = threading.Event()
+        self._write_lock = threading.Lock()
+        self._write_thread: threading.Thread | None = None
+        self._write_stop = False
 
     @property
     def running(self) -> bool:
@@ -329,6 +339,12 @@ class Server:
         return True
 
     def _write_endpoint(self) -> None:
+        """Write the endpoint file **now**, on the calling thread.
+
+        Kept for ``start()`` (one write at startup is fine) and for tests.  The
+        steady-state path is :meth:`_request_write`, which hands the work to the
+        writer thread so a port open/close never blocks the GUI (R-217).
+        """
         path = self._endpoint or endpoint_path(os.getpid())
         data = {"host": self.host, "port": self.port, "token": self.token,
                 "pid": os.getpid(), "version": __version__,
@@ -345,11 +361,66 @@ class Server:
             with contextlib.suppress(OSError):
                 os.remove(temp)
 
+    def _request_write(self) -> None:
+        """Ask the writer thread to publish the latest state (R-217).
+
+        Coalescing is the point: the writer always reads ``self.info`` *when it
+        gets there*, so ten status changes in a row still produce one file write.
+        """
+        if not self._running:
+            return
+        with self._write_lock:
+            if self._write_thread is None or not self._write_thread.is_alive():
+                self._write_stop = False
+                self._write_thread = threading.Thread(
+                    target=self._write_loop, name="omnicom-endpoint", daemon=True)
+                self._write_thread.start()
+        self._write_wanted.set()
+
+    def _write_loop(self) -> None:
+        while not self._write_stop:
+            if not self._write_wanted.wait(0.2):
+                continue
+            self._write_wanted.clear()
+            if self._write_stop:
+                return
+            with contextlib.suppress(Exception):   # a path we cannot write
+                self._write_endpoint()
+
+    def flush_endpoint(self) -> None:
+        """Block until the endpoint file reflects ``self.info`` (R-217).
+
+        The writer coalesces, so a caller that must be *certain* the file already
+        says the new state (a test, or a shutdown path) needs a way to wait for
+        it.  This is the only blocking entry point, and nothing on the GUI thread
+        calls it on the hot path.
+        """
+        if not self._running:
+            return
+        self._write_wanted.set()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if not self._write_wanted.is_set():
+                return
+            time.sleep(0.005)
+
     def publish(self, **fields: Any) -> None:
         """Republish the endpoint when the owned serial port changes.
 
         Only a real change costs a write: this runs from the status handler,
         which also fires for statistics updates several times a second.
+
+        The write is dispatched to the ``omnicom-endpoint`` thread (R-217): one
+        ``json.dump`` + ``os.replace`` measured **30 ms median / 60 ms p95** on
+        this machine, and opening or closing a port fires this a dozen times, so
+        writing inline froze the window for hundreds of milliseconds (that is
+        exactly what tripped R-055's heartbeat budget).
+
+        The file is a *hint* for the CLI - `Client` still proves the binding by
+        talking to the window, and `pick_endpoint()` re-reads the file on every
+        call.  A few milliseconds of staleness is therefore harmless; a frozen
+        GUI is not.  Callers that need the file to be current right now use
+        :meth:`flush_endpoint`.
         """
         changed = False
         for key, value in fields.items():
@@ -357,11 +428,21 @@ class Server:
                 self.info[key] = value
                 changed = True
         if changed and self._running:
-            self._write_endpoint()
+            self._request_write()
 
     def stop(self) -> None:
         """Stop listening and withdraw the endpoint (only if it is ours)."""
         self._running = False
+        # Stop the writer first, so it cannot recreate the file we are about to
+        # remove (R-217).
+        self._write_stop = True
+        self._write_wanted.set()
+        with self._write_lock:
+            thread = self._write_thread
+            self._write_thread = None
+        if thread is not None and thread.is_alive() and \
+                thread is not threading.current_thread():
+            thread.join(0.5)
         sock, self._socket = self._socket, None
         if sock is not None:
             with contextlib.suppress(OSError):

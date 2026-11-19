@@ -1,0 +1,16 @@
+{
+  "id": "transfer",
+  "name": {
+    "zh": "文件传输",
+    "en": "File Transfer"
+  },
+  "version": "1.0.0",
+  "author": "OmniCOM",
+  "description": {
+    "zh": "X / Y / ZMODEM 收发，带进度条与实时日志",
+    "en": "X / Y / ZMODEM send & receive with a progress bar and a live log"
+  },
+  "entry": "plugin.py",
+  "icon": "icon.png",
+  "api": 2
+}

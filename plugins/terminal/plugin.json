@@ -1,0 +1,19 @@
+{
+  "id": "terminal",
+  "name": {
+    "zh": "终端",
+    "en": "Terminal"
+  },
+  "version": "1.0.0",
+  "author": "OmniCOM",
+  "description": {
+    "zh": "VT100 屏幕终端：方向键/删除/退格、选中复制、回滚历史，可被 CLI 的 screen/keys 驱动",
+    "en": "VT100 screen terminal: arrow keys, Delete/Backspace, selection copy, scrollback, drivable from the CLI via screen/keys"
+  },
+  "entry": "plugin.py",
+  "icon": "icon.png",
+  "api": 2,
+  "services": {
+    "terminal": "VT100 屏幕服务（CLI screen/keys 用）"
+  }
+}

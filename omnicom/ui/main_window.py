@@ -69,9 +69,7 @@ from .log_view import LogView
 from .search_panel import SearchPanel
 from .send_panel import SendPanel
 from .settings_store import UiSettings, open_settings
-from .terminal import TerminalPage
 from .tooltips import install as install_tooltips
-from .transfer_panel import TransferPanel
 from .update_dialog import UpdateDialog, UpdateWatcher
 from .widgets import (
     Badge,
@@ -86,7 +84,7 @@ from .widgets import (
     Toast,
 )
 from .widgets import Button as QPushButton
-from .workers import SerialBridge, TransferWorker
+from .workers import SerialBridge
 
 
 def ui_settings() -> UiSettings:
@@ -818,7 +816,8 @@ class OmniWindow(QMainWindow):
         self._hex_offset = 0
         self._appended = 0
         self._status: dict = {}
-        self._transfer: TransferWorker | None = None
+        # The transfer worker now lives inside the transfer plugin (R-218); the
+        # window only reaches it through the "transfer" service.
         self._search_overlay: QWidget | None = None
         self._toasts: list[Toast] = []
         self._page_keys: list[str] = []
@@ -870,8 +869,13 @@ class OmniWindow(QMainWindow):
         self.tooltips = install_tooltips()
 
         self.plugins = PluginHost(notify=self.notify, log_line=self._plugin_log,
-                                  send_bytes=self._plugin_send, parent=self)
+                                  send_bytes=self._plugin_send, parent=self,
+                                  port=lambda: self.bridge.manager)
 
+        # Plugins are loaded **before** the UI is built (R-218): 终端 and 文件
+        # 传输 are plugins now, so the stack has to ask the host for those pages
+        # instead of constructing them itself.
+        self.plugins.load()
         self._build_ui()
         self._wire()
         self._load_plugins()
@@ -912,10 +916,16 @@ class OmniWindow(QMainWindow):
         # impossible. An explicit minimum overrides the hint.
         self.stack.setMinimumWidth(400)
         self.stack.addWidget(self._build_terminal_page())
-        self.console = TerminalPage()
-        self.console.keyBytes.connect(self._on_terminal_keys)
+        # 终端 and 文件传输 are plugins (R-218).  When a plugin is disabled the
+        # tab stays but shows a short explanation instead of vanishing, so the
+        # user can see *why* the page is gone and where to turn it back on.
+        #
+        # NB: do **not** connect ``keyBytes`` here.  The terminal plugin already
+        # routes its keys through ``api.send`` itself; a second connection sent
+        # every keystroke twice ("ls" arrived as "llss", L-292).
+        self.console = self._plugin_page("terminal")
+        self.transfer = self._plugin_page("transfer")
         self.stack.addWidget(self.console)
-        self.transfer = TransferPanel(self.notify)
         self.stack.addWidget(self.transfer)
         self.body_split.addWidget(self.stack)
 
@@ -1432,6 +1442,11 @@ class OmniWindow(QMainWindow):
         ]
         self._page_keys = ["terminal", "console", "transfer"]
         for info in self.plugins.loaded():
+            if info.id in self.BUILTIN_PLUGIN_PAGES:
+                # terminal / transfer already own a fixed tab; adding a
+                # `plugin:<id>` tab as well would show the same page twice
+                # (R-218).
+                continue
             key = f"plugin:{info.id}"
             entries.append((key, info.name(), info.manifest.get("description", "")
                             if isinstance(info.manifest.get("description"), str)
@@ -1476,11 +1491,57 @@ class OmniWindow(QMainWindow):
         self.clear_log()
 
     # -------------------------------------------------------------- plugins
+    #: Plugin ids that own a **built-in tab** instead of getting a
+    #: ``plugin:<id>`` tab of their own (R-218).  They are still ordinary
+    #: plugins - disabling one leaves an explanation page in its place.
+    BUILTIN_PLUGIN_PAGES = ("terminal", "transfer")
+
+    def _plugin_page(self, plugin_id: str) -> QWidget:
+        """The widget of a built-in-tab plugin, or a "disabled" placeholder.
+
+        Returns a plain ``QWidget`` either way, so the rest of the window can call
+        the page without a ``hasattr`` dance.  The placeholder carries the plugin
+        name so the user knows which switch to flip.
+        """
+        for info in self.plugins.loaded():
+            if info.id == plugin_id and info.widget is not None:
+                return info.widget
+        return self._disabled_page(plugin_id)
+
+    def _disabled_page(self, plugin_id: str) -> QWidget:
+        """Placeholder shown in a built-in tab whose plugin is disabled."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(8)
+        title = QLabel(tr("plugin.disabled.title", name=self._plugin_label(plugin_id)))
+        title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        layout.addWidget(title)
+        hint = QLabel(tr("plugin.disabled.hint"))
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {theme.DIM};")
+        layout.addWidget(hint)
+        layout.addStretch(1)
+        return page
+
+    @staticmethod
+    def _plugin_label(plugin_id: str) -> str:
+        return "终端 / Terminal" if plugin_id == "terminal" \
+            else "文件传输 / File Transfer"
+
     def _load_plugins(self) -> None:
-        self.plugins.load()
+        # ``plugins.load()`` already ran before `_build_ui` (R-218) so the built-in
+        # tabs could be built from it; calling it again would *re-instantiate*
+        # every plugin and the pages in the stack would be the discarded copies.
+        if not self.plugins.loaded():
+            self.plugins.load()
         for info in self.plugins.loaded():
             widget = info.widget
             if widget is None:
+                continue
+            if info.id in self.BUILTIN_PLUGIN_PAGES:
+                # It already has a fixed tab (built by `_plugin_page`), so it must
+                # not also get a `plugin:<id>` one.
                 continue
             key = f"plugin:{info.id}"
             self._plugin_pages[key] = widget
@@ -1497,15 +1558,75 @@ class OmniWindow(QMainWindow):
             widget = info.widget
             if widget is None:
                 continue
+            if info.id in self.BUILTIN_PLUGIN_PAGES:
+                continue
             key = f"plugin:{info.id}"
             self._plugin_pages[key] = widget
             self.stack.addWidget(widget)
+        # terminal / transfer are rebuilt as well: unloading destroyed the old
+        # widgets, so `self.console` would otherwise point at a dead C++ object
+        # and every later call would raise "already deleted" (R-218).
+        self._rebind_builtin_pages()
         self._rebuild_tabs()
         if key_before in self._plugin_pages:
             self.switch_page(key_before)
         self.notify(tr("plugin.reloaded", n=len(self.plugins.loaded())), "ok")
 
+    #: Stack index of each built-in plugin tab, in `_page_keys` order.
+    _BUILTIN_SLOTS = (("terminal", 0), ("transfer", 2))
+
+    def _rebind_builtin_pages(self) -> None:
+        """Point ``self.console`` / ``self.transfer`` at the live plugin pages.
+
+        Called after a reload (the old widgets were destroyed) and it is also the
+        single place that swaps in the "plugin disabled" placeholder.
+        """
+        for plugin_id, slot in self._BUILTIN_SLOTS:
+            old = getattr(self, "console" if plugin_id == "terminal" else "transfer",
+                          None)
+            widget = self._plugin_page(plugin_id)
+            if widget is old:
+                continue
+            index = -1
+            if old is not None:
+                with contextlib.suppress(RuntimeError):
+                    index = self.stack.indexOf(old)
+                    self.stack.removeWidget(old)
+            if index < 0:
+                index = slot
+            self.stack.insertWidget(min(index, self.stack.count()), widget)
+            if plugin_id == "terminal":
+                # ``console`` is only a reference: the plugin owns the key ->
+                # ``api.send`` wiring, so the window must not connect again
+                # (a second connection duplicated every keystroke, L-292).
+                self.console = widget
+            else:
+                self.transfer = widget
+
     def suspend_plugins(self) -> None:
+        """Unload every plugin, including the built-in-tab ones (R-218).
+
+        ``self.console`` / ``self.transfer`` point *into* those widgets, so they
+        are swapped for placeholders **before** the unload destroys them -
+        otherwise the window would keep a reference to a dead C++ object and the
+        next ``retranslate()``/``apply_font()`` would raise "already deleted".
+        """
+        for plugin_id in self.BUILTIN_PLUGIN_PAGES:
+            attribute = "console" if plugin_id == "terminal" else "transfer"
+            widget = getattr(self, attribute, None)
+            if widget is None or not self._is_builtin_page(plugin_id):
+                continue
+            placeholder = self._disabled_page(plugin_id)
+            index = self.stack.indexOf(widget)
+            if index >= 0:
+                self.stack.removeWidget(widget)
+                self.stack.insertWidget(index, placeholder)
+            else:
+                self.stack.addWidget(placeholder)
+            setattr(self, attribute, placeholder)
+            widget.setParent(None)
+            with contextlib.suppress(RuntimeError):
+                widget.deleteLater()
         self.plugins.unload()
         for key in list(self._plugin_pages):
             widget = self._plugin_pages.pop(key)
@@ -1515,6 +1636,14 @@ class OmniWindow(QMainWindow):
             widget.setParent(None)
             widget.deleteLater()
         self._rebuild_tabs()
+
+    def _is_builtin_page(self, plugin_id: str) -> bool:
+        """True when the current page for ``plugin_id`` is a live plugin widget."""
+        for info in self.plugins.loaded():
+            if info.id == plugin_id and info.widget is not None:
+                attribute = "console" if plugin_id == "terminal" else "transfer"
+                return getattr(self, attribute, None) is info.widget
+        return False
 
     def open_plugin_store(self) -> None:
         from .plugin_store import PluginStoreDialog
@@ -1623,8 +1752,8 @@ class OmniWindow(QMainWindow):
 
         self.commands_panel.sendRequested.connect(self.send_payload)
         self.log.fontZoomed.connect(self._on_log_zoom)
-        self.transfer.startRequested.connect(self.start_transfer)
-        self.transfer.abortRequested.connect(self.abort_transfer)
+        # The transfer plugin wires its own signals (R-218); the window only
+        # calls start_transfer/abort_transfer through the service.
 
         self.stats_timer = QTimer(self)
         self.stats_timer.timeout.connect(self._refresh_stats)
@@ -2250,16 +2379,10 @@ class OmniWindow(QMainWindow):
         self.log.autoscroll = True
         self.scroll_pill.hide_pill()
 
-    def _on_terminal_keys(self, data: bytes) -> None:
-        if not data:
-            return
-        if not self._status.get("connected"):
-            self.notify(tr("console.needport"), "warn")
-            return
-        try:
-            self.bridge.manager.write(data)
-        except Exception as exc:
-            self.notify(str(exc), "warn")
+    #: Terminal keystrokes are sent by the **terminal plugin** through
+    #: ``api.send`` (R-218) - the window used to own ``_on_terminal_keys`` and
+    #: connecting it *as well* made every keystroke go out twice ("ls" -> "llss",
+    #: L-292).  Nothing in the host sends terminal bytes any more.
 
     # ------------------------------------------------------- search fullscreen
     def set_search_fullscreen(self, value: bool) -> None:
@@ -2597,59 +2720,25 @@ class OmniWindow(QMainWindow):
 
     # -------------------------------------------------------------- transfer
     def start_transfer(self, protocol: str, direction: str, path: str) -> None:
+        """Start a transfer through the **transfer plugin** (R-218).
+
+        The window no longer owns the worker: the plugin does, and this method is
+        just the menu/CLI entry point.  When the plugin is disabled the user gets
+        an explanation rather than a silent no-op.
+        """
+        service = self.plugins.service("transfer")
+        if service is None:
+            self.notify(tr("plugin.disabled.transfer"), "warn")
+            return
         if not self._status.get("connected"):
             self.notify(tr("misc.needport"), "warn")
             return
-        if self._transfer is not None and self._transfer.isRunning():
-            return
-        data = b""
-        name = "file.bin"
-        if direction == "send":
-            try:
-                with open(path, "rb") as handle:
-                    data = handle.read()
-            except OSError as exc:
-                self.notify(f"{exc}", "error")
-                return
-            name = os.path.basename(path)
-        self.transfer.set_running(True)
-        self.transfer.set_state(f"{protocol.upper()}MODEM")
-        self.transfer.progress.setValue(0)
-        self.transfer.log(f"=== {protocol.upper()}MODEM {direction} · {name} ===")
-        self._log_line(time.time() * 1000, "··",
-                       f"{protocol.upper()}MODEM {direction} · {name}", "evt")
-        self._transfer = TransferWorker(self.bridge.manager, protocol, direction, name,
-                                        data, self)
-        self._transfer.log.connect(self.transfer.log)
-        self._transfer.progress.connect(self.transfer.set_progress)
-        self._transfer.succeeded.connect(self._transfer_done)
-        self._transfer.failed.connect(self._transfer_failed)
-        self._transfer.aborted.connect(self._transfer_aborted)
-        self._transfer.start()
-
-    def _transfer_done(self, result: dict) -> None:
-        files = result.get("files") or []
-        if files:
-            listing = ", ".join(item.get("path", item.get("name", "")) for item in files)
-            self.transfer.finish(True, human_bytes(result.get("bytes", 0)), listing)
-        else:
-            self.transfer.finish(True, human_bytes(result.get("bytes", 0)))
-        self.notify(human_bytes(result.get("bytes", 0)), "ok")
-        self.transfer.set_running(False)
-
-    def _transfer_failed(self, message: str) -> None:
-        self.transfer.finish(False, message)
-        self.notify(message, "error")
-
-    def _transfer_aborted(self, message: str) -> None:
-        self.transfer.finish(False, message or "—")
-        self.notify(message or "—", "warn")
+        service.start(protocol, direction, path)
 
     def abort_transfer(self) -> None:
-        if self._transfer is not None:
-            self._transfer.cancel()
-            self._transfer.wait(2000)
-            self._transfer = None
+        service = self.plugins.service("transfer")
+        if service is not None:
+            service.abort()
 
     # ---------------------------------------------------------------- record
     def toggle_record(self) -> None:
@@ -2784,7 +2873,14 @@ class OmniWindow(QMainWindow):
         """
         if not text:
             return
-        if level in ("warn", "error"):
+        if getattr(self, "titlebar", None) is None:
+            # Plugins load before the UI is built (R-218); a toast needs a window
+            # to hang on, so fall back to stderr until then.
+            import sys as _sys
+
+            print(f"[plugin] {text}", file=_sys.stderr)
+            return
+        if level in ("warn", "error") and getattr(self, "search_panel", None) is not None:
             self._log_line(time.time() * 1000, "!!", text, "evt")
         # A dismissed toast has already been deleteLater()'d, so touching it
         # raises RuntimeError("Internal C++ object already deleted").
@@ -3657,15 +3753,19 @@ class OmniWindow(QMainWindow):
         return {"ok": True}
 
     def _control_screen(self, args: dict, _job: dict) -> dict:
-        """The device's VT100 screen, for ``omnicom.cli screen`` (R-211).
+        """The device's VT100 screen, for ``omnicom.cli screen`` (R-211/R-218).
 
-        Read from the always-on mirror, not from the page: the terminal page only
-        parses while it is visible (`_flush_rx` checks `isVisible`), so an agent
-        would get a blank screen whenever the user was on the log page.
+        Read through the ``"terminal"`` **plugin service**: the terminal is an
+        optional plugin now, so when it is disabled the CLI must say so instead of
+        returning a blank screen that looks like a broken device.
         """
         scrollback = int(args.get("scrollback") or 0)
+        service = self.plugins.service("terminal")
+        if service is None:
+            return {"ok": False,
+                    "error": "终端插件未启用：请在插件列表中启用 terminal 插件"}
         try:
-            state = self.console.mirror_state(scrollback=max(0, scrollback))
+            state = service.state(scrollback=max(0, scrollback))
         except Exception as exc:
             return {"ok": False, "error": f"读取终端屏幕失败：{exc}"}
         return {"ok": True, **self._control_snapshot(), **state}
@@ -4255,9 +4355,11 @@ class OmniWindow(QMainWindow):
         # ~227 ms ``QSettings.sync()``; it now runs with nothing to show, which
         # is why the delay is invisible to the user (L-216).
         self.settings.release()
-        if self._transfer is not None and self._transfer.isRunning():
-            self._transfer.cancel()
-            self._transfer.wait(2000)
+        # Ask the transfer plugin to stop its worker (R-218).
+        service = self.plugins.service("transfer")
+        if service is not None:
+            with contextlib.suppress(Exception):
+                service.abort()
         # Withdraw the CLI endpoint *before* the port goes away: a CLI request
         # must fail fast instead of waiting for a window that is already gone.
         self._control_timer.stop()
