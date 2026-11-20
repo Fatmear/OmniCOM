@@ -98,7 +98,7 @@ def build(chinese: bool = True) -> str:
 </style>
 </head>
 <body>
-<div id="canvas">{empty}</div>
+<div id="canvas"><div id="surface">{empty}</div></div>
 <div id="toast"></div>
 <script>
 {library}

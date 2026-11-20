@@ -12,5 +12,5 @@
   },
   "entry": "plugin.py",
   "icon": "icon.png",
-  "api": 2
+  "api": 3
 }

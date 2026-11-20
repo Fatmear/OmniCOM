@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -41,11 +42,18 @@ KINDS = ("line", "gauge", "value", "bar", "lamp")
 CHECKS = []
 
 
-def check(name, condition) -> None:
+def check(name, condition, detail="") -> None:
+    """Record one assertion.
+
+    ``detail`` is optional so both call styles work: most checks fold the value
+    into the name, but a few (R-182's zeroed-lamp case) pass it separately.  A
+    call with three arguments used to raise ``TypeError`` and abort the whole
+    suite before the remaining checks ran.
+    """
     CHECKS.append({"name": name, "ok": bool(condition)})
     if not condition:
-        raise AssertionError(name)
-    print("PASS", name)
+        raise AssertionError(f"{name} [{detail}]" if detail else name)
+    print("PASS", name + (f" [{detail}]" if detail else ""))
 
 
 def package(root, version="1.0.0", extra=None):
@@ -406,12 +414,13 @@ def chart_checks(app, kinds):
 
     # ------------------------------------------------------- drag persistence
     before = {w["id"]: [w["x"], w["y"], w["w"], w["h"]] for w in described["widgets"]}
-    # R-173: the 16 px grid belongs to the canvas itself, so it is painted from
-    # the moment the page mounts.  There is deliberately no edit switch any
-    # more - dragging and the × always work - so the page must not even expose
-    # ``setEditing``.
+    # R-173: the 16 px grid belongs to the drawing surface, so it is painted
+    # from the moment the page mounts.  R-313 moved the grid one level in:
+    # ``#canvas`` is now the scroll viewport and ``#surface`` the content box
+    # that grows with the cards, so the grid lives on the surface (a grid on the
+    # scroller would stay glued to the viewport while the cards move).
     grid = json.loads(_js(app, chart, """(function () {
-      var cs = getComputedStyle(document.getElementById('canvas'));
+      var cs = getComputedStyle(document.getElementById('surface'));
       return JSON.stringify({ image: cs.backgroundImage,
                               size: cs.backgroundSize });
     })()""") or "{}")
@@ -804,6 +813,10 @@ def chart_checks(app, kinds):
                                  "channels": ["AA", "BB"]}]}
     _js(app, chart, "omniDashboard.setLayout(" + json.dumps(multi_layout) + ")")
     chart.layout_data = multi_layout
+    # ``flush()`` is incremental now (R-301): it ships only what the page does
+    # not have yet.  This check is about the *full* window, so it has to ask for
+    # a resync explicitly - exactly what a layout/points change does in the app.
+    chart.request_resync()
     started = time.perf_counter()
     chart.flush()
     flush_ms = (time.perf_counter() - started) * 1000
@@ -811,9 +824,17 @@ def chart_checks(app, kinds):
                    "document.querySelector('.plot')).getOption().series.map("
                    "s => [s.data.length, s.data[0], s.data[s.data.length-1]]))")
     series = json.loads(rendered)
-    check(f"R-164 ECharts receives both full histories (flush={flush_ms:.1f} ms, series={series})",
-          len(series) == 2 and all(item[0] == 5000 and item[1][0] == 0
-                                   and item[2][0] == 4999 for item in series))
+    # R-164 keeps 5000 samples *retained* per channel; the page draws only the
+    # 展示帧数 window (default 300) because 5000 points cost ~22 ms per card per
+    # frame and made the dashboard stutter.  Both halves are asserted: nothing
+    # was thrown away, and what ECharts holds is the newest slice.
+    drawn = chart._visible_points()
+    check(f"R-164 every curve draws the newest 展示帧数 window "
+          f"(drawn={drawn}, flush={flush_ms:.1f} ms, series={series})",
+          len(series) == 2 and all(item[0] == drawn for item in series)
+          and all(item[2][0] == 4999 for item in series))
+    check("R-164 the retained history behind that window is still 5000 points",
+          all(len(chart.samples[name]) == 5000 for name in ("AA", "BB")))
     chart.seconds.setValue(10)
     history = chart.history_for_page()
     check("R-164 selected time window still filters history",
@@ -1432,6 +1453,15 @@ def store_ui_checks(app) -> None:
         picker_dialog.rebuild()
         entry = picker_dialog.rows["demo"]
         combo = entry["picker"].combo
+        # Revised 2026-11-19: the drop-down opens on the version that is
+        # *installed*, because that is the state the user is actually in.  It
+        # used to jump to the older downloadable build so the button had
+        # something to do, which made a current plugin look out of date.
+        check("R-178 the drop-down opens on the installed version",
+              entry["picked"] == "1.1.0" and entry["state"] == "same"
+              and not entry["install"].isEnabled()
+              and entry["install"].text() == "已安装")
+        combo.setCurrentIndex(combo.findData("1.0.5"))
         check("R-178 only the older downloadable build stays actionable",
               entry["picked"] == "1.0.5" and entry["state"] == "downgrade"
               and entry["install"].text() == "降级安装" and entry["install"].isEnabled())
@@ -1461,8 +1491,14 @@ def store_ui_checks(app) -> None:
               # both tags; 1.0.5 is the plain older one.
               and "installed" in entry["picker"].combo.itemText(0)
               and "1.0.5" in entry["picker"].combo.itemText(1)
-              and picker_dialog.filter_edit.placeholderText() == "Search plugins"
-              and entry["install"].text() == "Install older")
+              and picker_dialog.filter_edit.placeholderText() == "Search plugins")
+        # The row opens on the installed build (revised 2026-11-19), so the
+        # button reads 已安装/installed until the user picks another version.
+        entry["picker"].combo.setCurrentIndex(
+            entry["picker"].combo.findData("1.0.5"))
+        check("R-178 choosing an older build offers the downgrade label",
+              entry["install"].text() == "Install older"
+              and entry["install"].isEnabled())
         set_language("zh")
         picker_dialog.retranslate()
         entry = picker_dialog.rows["demo"]
@@ -1557,15 +1593,152 @@ def store_ui_checks(app) -> None:
         picker_dialog.close()
 
 
-def benchmark(app, chart, parser_class) -> dict:
-    """Parser throughput plus the Python-side cost of one dashboard frame.
+def sustained_chart_checks(app, chart) -> list:
+    from PySide6.QtCore import QTimer
 
-    The ``push`` numbers cover parsing, history trimming and the JSON hand-off to
-    the renderer -- they deliberately exclude the renderer's paint, which is not
-    observable from this process (ECharts owns that clock).
-    """
+    reports = []
+
+    def percentile(values, fraction=0.95):
+        ordered = sorted(values)
+        return round(ordered[min(len(ordered) - 1, math.ceil(len(ordered) * fraction) - 1)], 2) if ordered else 0
+
+    chart.page_ready = chart.view is not None
+    chart.show()
+    chart.resize(1350, 900)
+    check("R-321 sustained workload uses the live WebEngine page",
+        _js(app, chart, "omniDashboard.ready()") is True)
+    for cards, drawn in ((4, 300), (6, 300), (6, 5000), (24, 5000)):
+        chart.timer.stop()
+        timeouts_before = chart.ack_timeouts
+        chart.clear_data()
+        chart.seconds.setValue(0)
+        chart.points.setValue(0)
+        chart.drawn.setValue(drawn)
+        chart.layout_data = {"widgets": [
+            {"id": f"load{index}", "kind": "line", "channel": f"CH{index % 6}",
+             "title": f"CH{index % 6}", "x": (index % 3) * 420,
+             "y": (index // 3) * 320, "w": 400, "h": 300}
+            for index in range(cards)]}
+        chart._push_layout()
+        chart._push_points()
+        _js(app, chart, "document.getElementById('canvas').scrollTo(0,0)")
+        for index in range(5000):
+            chart.feed(index * 5, ("[OmniCOM-chart] " + " ".join(
+                f"CH{channel}={index}" for channel in range(6)) + "\n").encode())
+        chart.request_resync()
+        chart.flush_live()
+        deadline = time.perf_counter() + 10
+        while chart._pending_ack and time.perf_counter() < deadline:
+            app.processEvents()
+            time.sleep(0.001)
+        check(f"R-321 load {cards}/{drawn} initial frame completes", not chart._pending_ack)
+        heartbeat = []
+        completed = []
+        interactions = []
+        previous = [time.perf_counter()]
+        sequence = [5000]
+        stalls = []
+        stop_watch = threading.Event()
+        main_thread = threading.get_ident()
+
+        def watch_stalls(stop_watch=stop_watch, previous=previous, stalls=stalls, main_thread=main_thread):
+            while not stop_watch.wait(0.02):
+                if time.perf_counter() - previous[0] > 0.08 and len(stalls) < 6:
+                    frame = sys._current_frames().get(main_thread)
+                    if frame is not None:
+                        stalls.append("".join(traceback.format_stack(frame)[-8:]))
+
+        def beat(heartbeat=heartbeat, previous=previous):
+            now = time.perf_counter()
+            heartbeat.append((now - previous[0]) * 1000)
+            previous[0] = now
+
+        def produce(sequence=sequence):
+            for _ in range(4):
+                index = sequence[0]
+                chart.feed(index * 5, ("[OmniCOM-chart] " + " ".join(
+                    f"CH{channel}={index}" for channel in range(6)) + "\n").encode())
+                sequence[0] += 1
+
+        def acknowledged(epoch, completed=completed):
+            if epoch == chart._acked_epoch:
+                completed.append((time.perf_counter() - chart._ack_started) * 1000)
+
+        chart.bridge.acked.connect(acknowledged)
+        pulse = QTimer()
+        pulse.timeout.connect(beat)
+        pulse.start(10)
+        producer = QTimer()
+        producer.timeout.connect(produce)
+        producer.start(20)
+        _js(app, chart, "window.loadGaps=[];window.loadTick=performance.now();window.loadTimer=setInterval(function(){var n=performance.now();loadGaps.push(n-loadTick);loadTick=n;},10)")
+        chart.timer.start()
+        watcher = threading.Thread(target=watch_stalls, daemon=True)
+        watcher.start()
+        started = time.perf_counter()
+        next_interaction = started + 0.5
+        added = False
+        try:
+            while time.perf_counter() - started < 5:
+                app.processEvents()
+                now = time.perf_counter()
+                if now >= next_interaction:
+                    before = time.perf_counter()
+                    _js(app, chart, "document.getElementById('canvas').scrollTop=" +
+                        ("320" if cards > 6 and not added else "0") + ";performance.now()")
+                    interactions.append((time.perf_counter() - before) * 1000)
+                    next_interaction = now + 0.5
+                if not added and now - started > 2:
+                    before = time.perf_counter()
+                    chart.add_widget({"kind": "value", "channel": "CH0", "title": "load add"})
+                    menu = chart.build_menu()
+                    menu.deleteLater()
+                    interactions.append((time.perf_counter() - before) * 1000)
+                    added = True
+                time.sleep(0.001)
+        finally:
+            producer.stop()
+            pulse.stop()
+            stop_watch.set()
+            watcher.join()
+            chart.bridge.acked.disconnect(acknowledged)
+        page_gaps = json.loads(_js(app, chart, "clearInterval(window.loadTimer);JSON.stringify(window.loadGaps)") or "[]")
+        deadline = time.perf_counter() + 10
+        while (chart._pending_ack or chart.has_fresh_data()) and time.perf_counter() < deadline:
+            app.processEvents()
+            time.sleep(0.001)
+        chart.timer.stop()
+        diagnostic = json.loads(_js(app, chart, "omniDashboard.diagnostics()"))
+        report = {"cards": cards, "drawn": drawn, "duration_s": 5,
+                  "received_per_channel": sequence[0] - 5000,
+                  "completed_batches": len(completed),
+                  "batch_p95_ms": percentile(completed),
+                  "gui_heartbeat_p95_ms": percentile(heartbeat),
+                  "gui_heartbeat_max_ms": round(max(heartbeat, default=0), 2),
+                  "page_heartbeat_p95_ms": percentile(page_gaps),
+                  "page_heartbeat_max_ms": round(max(page_gaps, default=0), 2),
+                  "interaction_p95_ms": percentile(interactions),
+                  "ack_timeouts": chart.ack_timeouts - timeouts_before,
+                  "stalls": stalls,
+                  "diagnostic": diagnostic}
+        reports.append(report)
+        atomic_json(ROOT / ".artifacts" / "chart-sustained.json", reports)
+        print("CHART LOAD", json.dumps(report, ensure_ascii=False))
+        check(f"R-321 load {cards}/{drawn} continues completing frames", len(completed) >= 10)
+        check(f"R-321 load {cards}/{drawn} history stays bounded and reaches newest sample",
+              len(diagnostic["retained"]) == min(cards, 6)
+              and all(item["count"] == 5000 and item["last"][1] == sequence[0] - 1
+                      for item in diagnostic["retained"]))
+        check(f"R-320 load {cards}/{drawn} interaction p95 stays below 200ms",
+              report["interaction_p95_ms"] < 200, str(report))
+        chart.grab().save(str(ROOT / ".artifacts" / f"chart-load-{cards}-{drawn}.png"))
+    return reports
+
+
+def benchmark(app, chart, parser_class) -> dict:
+    """Parser throughput and sustained, acknowledged rendering workloads."""
     results = {"python": sys.version, "platform": sys.platform,
-               "parser": [], "push": []}
+               "parser": []}
     for channels in (2, 8, 32):
         line = ("[OmniCOM-chart] "
                 + " ".join(f"CH{index}={index + 0.125}" for index in range(channels))
@@ -1579,43 +1752,710 @@ def benchmark(app, chart, parser_class) -> dict:
         results["parser"].append({"channels": channels, "line_bytes": len(line),
                                   "frames_per_s": 20000 / elapsed,
                                   "MB_per_s": len(payload) * 20 / elapsed / 1e6})
-    for channels in (2, 8, 32):
-        chart.clear_widgets()
-        chart.clear_data()
-        chart.channel_combo.clear()
-        chart.channel_combo.addItem("CH0")
-        chart.kind_combo.setCurrentIndex(chart.kind_combo.findData("line"))
-        chart.add_widget_from_palette()
-        app.processEvents()
-
-        def frame(index, channels=channels):
-            body = " ".join(f"CH{number}={math.sin(index / 10 + number)}"
-                            for number in range(channels))
-            chart.feed(1000 + index * 20, f"[OmniCOM-chart] {body}\n".encode())
-
-        for index in range(5000):
-            frame(index)
-        chart.flush()
-        app.processEvents()
-        timings = []
-        for index in range(60):
-            started = time.perf_counter()
-            frame(5000 + index)
-            chart.flush()
-            app.processEvents()
-            timings.append((time.perf_counter() - started) * 1000)
-        ordered = sorted(timings)
-        results["push"].append({
-            "channels": channels, "points_per_channel": 5000, "frames": 60,
-            "mean_ms": sum(timings) / len(timings),
-            "p95_ms": ordered[math.ceil(0.95 * len(ordered)) - 1],
-            "measured_max_fps": 1000 * len(timings) / sum(timings),
-            "timer_target_fps": 1000 / 33})
+    results["sustained"] = sustained_chart_checks(app, chart)
     return results
+
+def chart_stream_checks(app, chart, api_like=None) -> None:
+    """R-301/R-302/R-303: bounded frames, log replay, and the hex viewer.
+
+    These three are one family: they all answer "what happens when the data is
+    bigger than one screen".  The dashboard used to re-send the whole retained
+    window 30 times a second, which is why a long session lagged further and
+    further behind the log; replay and the hex viewer are the two new ways the
+    user wants to look at data that is already on disk.
+    """
+    panel = chart
+    chart_mod = sys.modules[type(panel).__module__]
+    panel.clear_widgets()
+    panel.add_widget({"kind": "line", "channel": "A", "channels": ["A"],
+                      "title": "A", "x": 0, "y": 0, "w": 320, "h": 200})
+    sent = []
+    original = panel._call_js
+    panel._call_js = lambda name, payload: sent.append((name, payload))
+    try:
+        panel.page_ready = True
+        panel.begin_replay("replay.log")
+
+        # ---- R-301: the frame cap is honoured and cannot go below the floor
+        panel.points.setValue(150)
+        check("R-301 曲线点数按设置生效", panel._capacity() == 150,
+              panel._capacity())
+        for index in range(400):
+            panel.replay_line(index * 0.1, f"[OmniCOM-chart] A={index}")
+        check("R-301 超过点数后只保留最新的帧",
+              len(panel.samples["A"]) == 150, len(panel.samples["A"]))
+        newest = list(panel.samples["A"])[-1]
+        check("R-301 保留的是最新的一帧而不是最旧的",
+              newest[1] == 399.0, newest)
+        panel.points.setValue(1)
+        check("R-301 过小的点数被夹到下限",
+              panel._capacity() == 100, panel._capacity())
+        panel.points.setValue(0)
+
+        # ---- R-302: replay preserves the file's own timestamps
+        panel.begin_replay("session.log")
+        panel.replay_line(0.5, "收←◇[OmniCOM-chart] A=9")
+        panel.replay_line(1.5, "收←◇[OmniCOM-chart] A=10")
+        stamps = [stamp for stamp, _ in panel.samples["A"]]
+        check("R-302 重放使用日志里的原始时间戳",
+              stamps == [0.5, 1.5], stamps)
+        check("R-302 重放复用同一个解析器与通道缓冲",
+              panel.replayed_lines == 2 and panel.values["A"] == 10.0,
+              f"{panel.replayed_lines} {panel.values.get('A')}")
+
+        # ---- the delta frame carries only the tail, and back-pressure holds it
+        panel.request_resync()
+        panel.flush_live()
+        name, payload = sent[-1]
+        check("R-301 首帧是全量历史",
+              name == "setValues" and payload["append"] is False, name)
+        busy = len(sent)
+        panel.flush_live()
+        check("R-301 未收到确认时不再堆积下一帧",
+              len(sent) == busy and panel.throttled >= 1,
+              f"{len(sent)} {panel.throttled}")
+        panel._on_acked(payload["epoch"])
+        panel.replay_line(2.5, "[OmniCOM-chart] A=11")
+        panel.flush_live()
+        name, payload = sent[-1]
+        check("R-301 确认之后只发送新增的尾部",
+              name == "setValues"
+              and payload["append"] is True
+              and payload["history"]["A"] == [[2.5, 11.0]],
+              payload["history"])
+
+        # ---- R-305: an idle dashboard must not repaint, and the frame interval
+        # adapts to what the renderer reported.  Without this the 30 fps loop
+        # kept calling setOption (measured 22 ms for 5000 points) and the window
+        # stuttered while the log ran on (user, 2026-11-19).
+        panel._on_acked(payload["epoch"])
+        idle = len(sent)
+        panel.refresh()
+        check("R-305 没有新数据时刷新不发送任何帧",
+              len(sent) == idle, f"{len(sent)} vs {idle}")
+        panel._on_paint_cost(0.0)
+        check("R-305 页面很快时刷新间隔回到 33 ms",
+              panel.frame_ms == 33, panel.frame_ms)
+        panel._on_paint_cost(40.0)
+        check("R-305 页面耗时 40 ms 时节拍包含绘制时间而非重复等待",
+              panel.frame_ms == 48 and panel.timer.interval() == panel.frame_ms,
+              f"{panel.frame_ms} / {panel.timer.interval()}")
+        panel._on_paint_cost(400.0)
+        check("R-305 极慢时不超过 200 ms 上限",
+              panel.frame_ms == 200, panel.frame_ms)
+        panel._on_paint_cost(0.0)
+        panel.begin_replay("fresh.log")
+        panel.replay_line(0.1, "[OmniCOM-chart] A=1")
+        panel.refresh()
+        check("R-305 有新数据时仍然发帧",
+              len(sent) > idle, f"{len(sent)} vs {idle}")
+
+        # ---- R-307: the *drawing* must stay bounded even at 展示帧数 = 5000.
+        # Plain rendering of two 5000-point curves measured ~47 ms per frame,
+        # which is what froze the whole dashboard once the user raised the
+        # setting.  LTTB down-sampling plus progressive rendering brought that
+        # to ~28 ms; the data itself is never reduced.
+        option = _js(app, chart, """JSON.stringify((() => {
+          const series = omniDashboard ? true : true;
+          const host = document.querySelector('#canvas .card .plot');
+          const inst = echarts.getInstanceByDom(host);
+          const s = (inst.getOption().series || [])[0] || {};
+          return {sampling: s.sampling || null,
+                  progressive: s.progressive || null,
+                  progressiveThreshold: s.progressiveThreshold || null,
+                  large: !!s.large};
+        })())""")
+        cfg = json.loads(option) if option else {}
+        check(f"R-307 曲线开启 LTTB 降采样（绘制层，不改数据）({cfg})",
+              cfg.get("sampling") == "lttb", cfg.get("sampling"))
+        check(f"R-307 曲线开启分帧绘制 progressive ({cfg})",
+              cfg.get("progressive") == 800
+              and cfg.get("progressiveThreshold") == 1500, cfg)
+        check(f"R-307 大数据曲线仍走 large 批渲染 ({cfg})",
+              cfg.get("large") is True, cfg.get("large"))
+    finally:
+        panel._call_js = original
+        panel.page_ready = False
+
+    # ---- R-312: an unanswered ack must never freeze the dashboard.
+    # Opening a HEX file leaves this tab hidden; Chromium stops compositing it,
+    # so a batch can go unacknowledged.  Before the deadline the panel throttles
+    # (that is the intended back-pressure), after it the panel must redraw
+    # instead of waiting for ever - the reported "看完 HEX 之后曲线就不刷了".
+    original = panel._call_js
+    shipping: list[dict] = []
+    panel._call_js = lambda name, payload: shipping.append(payload)
+    try:
+        panel.page_ready = True
+        panel.layout_data = {"widgets": [
+            {"id": "ack1", "kind": "line", "channel": "AA", "x": 16, "y": 16,
+             "w": 480, "h": 256},
+            {"id": "ack2", "kind": "line", "channel": "BB", "x": 512, "y": 16,
+             "w": 480, "h": 256}]}
+        panel.samples.clear()
+        panel._sent.clear()
+        for index in range(4):
+            panel.feed(5000.0 + index, b"[OmniCOM-chart] AA=%d BB=%d\n"
+                       % (index, index * 2))
+        panel.show()
+        app.processEvents()
+        panel.refresh()
+        panel._on_acked(panel._pending_ack)
+        panel.flush()
+
+        panel._on_acked(panel._pending_ack)
+        panel.feed(5100.0, b"[OmniCOM-chart] AA=7 BB=14\n")
+        panel.refresh()
+        before = len(shipping)
+        panel.feed(5200.0, b"[OmniCOM-chart] AA=8 BB=16\n")
+        throttled_before = panel.throttled
+        for _ in range(3):
+            panel.refresh()
+        check("R-312 未确认期间按背压跳过，不堆积帧",
+              len(shipping) == before and panel.throttled > throttled_before,
+              f"{len(shipping) - before} / {panel.throttled}")
+
+        panel._ack_started = (time.perf_counter()
+                              - (chart_mod.ACK_TIMEOUT_S + 0.1))
+        panel.feed(5300.0, b"[OmniCOM-chart] AA=9 BB=18\n")
+        panel.refresh()
+        check("R-312 确认超时后自动重同步，曲线恢复刷新",
+              len(shipping) == before + 1 and panel.ack_timeouts == 1,
+              f"{len(shipping) - before} timeouts={panel.ack_timeouts}")
+        check("R-312 超时恢复送完整窗口而不是空增量",
+              shipping[-1].get("append") is False
+              and set(shipping[-1].get("history", {})) == {"AA", "BB"},
+              str({k: len(v) for k, v in shipping[-1].get("history", {}).items()}))
+
+        panel._on_acked(panel._pending_ack)
+        panel._was_visible = False
+        panel.feed(5400.0, b"[OmniCOM-chart] AA=10 BB=20\n")
+        before = len(shipping)
+        panel.refresh()
+        check("R-312 从其它标签页切回来会重发完整窗口",
+              len(shipping) > before and shipping[-1].get("append") is False,
+              str(shipping[-1].get("append")))
+
+        # ---- R-314: adding a card must not re-ship the retained history.
+        # Every add used to call request_resync(), which re-serialised the whole
+        # window (83 KB for ten channels x 5000 points).  On a long-running
+        # session that is what made 添加控件 slow or apparently dead.
+        panel._on_acked(panel._pending_ack)
+        panel.feed(5500.0, b"[OmniCOM-chart] AA=11 BB=22\n")
+        panel.refresh()
+        panel._on_acked(panel._pending_ack)
+        resyncs_before = panel.resyncs
+        resync_flag_before = panel._resync_needed
+        calls = []
+        panel._call_js = lambda name, payload: calls.append(name)
+        added = panel.add_widget({"kind": "line", "channel": "AA",
+                                  "title": "another AA"})
+        panel._call_js = original
+        check("R-314 添加已推送通道的控件不触发全量重发",
+              panel.resyncs == resyncs_before
+              and panel._resync_needed == resync_flag_before
+              and calls == ["addWidget"],
+              f"{calls} resyncs+{panel.resyncs - resyncs_before}")
+        check("R-314 新卡片立即入库且不需要额外数据帧",
+              any(widget["id"] == added
+                  for widget in panel.layout_data.get("widgets", [])),
+              str(added))
+
+        # A channel the page has never seen still asks for one full window.
+        panel.feed(5600.0, b"[OmniCOM-chart] BRAND=1\n")
+        panel._on_acked(panel._pending_ack)
+        panel.request_resync()               # clean state, as after a frame
+        panel.flush()
+        check("R-314 全量帧已发送时 resync 标记已清除",
+              not panel._resync_needed, str(panel._resync_needed))
+        panel.add_widget({"kind": "line", "channel": "BRAND", "title": "brand"})
+        check("R-314 绑定全新通道时仍请求一次完整历史",
+              panel._resync_needed, str(panel._resync_needed))
+
+        # ---- R-315: the toolbar is compact, the rest lives in one menu.
+        toolbar = panel.layout().itemAt(0).layout()
+        bar_widgets = [toolbar.itemAt(index).widget()
+                       for index in range(toolbar.count())
+                       if toolbar.itemAt(index).widget() is not None]
+        bar_buttons = [widget.text() for widget in bar_widgets
+                       if hasattr(widget, "text")]
+        check("R-315 顶栏只剩暂停、清空控件、菜单三个按钮",
+              len(bar_buttons) == 3, str(bar_buttons))
+        check("R-315 顶栏不再有数字框",
+              not any(widget.__class__.__name__ == "QSpinBox"
+                      for widget in bar_widgets),
+              str([widget.__class__.__name__ for widget in bar_widgets]))
+        menu = panel.build_menu()
+        from PySide6.QtWidgets import QLabel as _MenuLabel
+
+        entries = [action.text() for action in menu.actions()]
+        for action in menu.actions():
+            holder = (action.defaultWidget()
+                      if hasattr(action, "defaultWidget") else None)
+            if holder is not None:
+                label = holder.findChild(_MenuLabel)
+                if label is not None:
+                    entries.append(label.text())
+        needed = ("保存截图", "导出 CSV", "导出看板", "导入看板", "显示设置",
+                  "时间窗 / 秒", "曲线点数", "展示帧数")
+        check("R-315 菜单包含截图/CSV/导入导出/显示设置",
+              all(item in entries for item in needed), str(entries))
+
+        # ---- R-313: a small window must be able to scroll to every card.
+        # ``#canvas`` is the scroll viewport and ``#surface`` the content box;
+        # before this the surface was ``overflow: hidden`` and a board wider
+        # than the window was simply unreachable.  Overflow is created on
+        # purpose here: new cards are centred now (R-316), so simply resizing
+        # would not produce a card outside the view.
+        panel._call_js = original
+        panel._push_layout()
+        actual = _describe(app, panel)
+        far_id = actual["widgets"][0]["id"]
+        _js(app, panel, "omniDashboard.updateWidget(" + json.dumps(
+            {"id": far_id, "x": 2400, "y": 1600, "w": 480, "h": 256}) + ")")
+        panel.resize(640, 380)
+        app.processEvents()
+        deadline = time.perf_counter() + 3
+        while time.perf_counter() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        panel._call_js = original
+        canvas_metrics = json.loads(_js(app, panel, """(function () {
+          var c = document.getElementById('canvas');
+          var s = document.getElementById('surface');
+          return JSON.stringify({
+            sw: c.scrollWidth, sh: c.scrollHeight,
+            cw: c.clientWidth, ch: c.clientHeight,
+            ox: getComputedStyle(c).overflowX,
+            oy: getComputedStyle(c).overflowY,
+            surface: !!s,
+            cards: document.querySelectorAll('#surface .card').length});
+        })()""") or "{}")
+        check("R-313 小窗口下画布可横向滚动",
+              canvas_metrics.get("ox") == "auto"
+              and canvas_metrics.get("sw", 0) > canvas_metrics.get("cw", 1),
+              str(canvas_metrics))
+        check("R-313 小窗口下画布可纵向滚动",
+              canvas_metrics.get("oy") == "auto"
+              and canvas_metrics.get("sh", 0) > canvas_metrics.get("ch", 1),
+              str(canvas_metrics))
+        check("R-313 卡片仍挂在可滚动的内容层上",
+              canvas_metrics.get("surface") is True
+              and canvas_metrics.get("cards", 0) > 0, str(canvas_metrics))
+
+        # ---- R-316: no stray number box on the toolbar, and new cards land in
+        # the middle of what the user is looking at (they used to tile by index,
+        # so the tenth card "flew away" several screens down).
+        from PySide6.QtWidgets import QSpinBox as _MenuSpinBox
+
+        visible_boxes = [box for box in panel.findChildren(_MenuSpinBox)
+                         if box.isVisible()]
+        check("R-316 未打开菜单时顶栏没有可见的数字框",
+              not visible_boxes, str([box.value() for box in visible_boxes]))
+        panel.build_menu().close()
+        app.processEvents()
+        check("R-316 菜单关闭后数字设置仍存活",
+              panel.drawn.value() > 0 and panel.points is not None,
+              f"drawn={panel.drawn.value()}")
+        panel.resize(1000, 620)
+        app.processEvents()
+        centred = []
+        for attempt in range(3):
+            _js(app, panel, "document.getElementById('canvas').scrollTo(" +
+                str(attempt * 200) + "," + str(attempt * 120) + ")")
+            panel._on_acked(panel._pending_ack)
+            new_id = panel.add_widget({"kind": "line", "channel": "AA",
+                                       "title": "centre"})
+            deadline = time.perf_counter() + 8
+            while time.perf_counter() < deadline:
+                app.processEvents()
+                time.sleep(0.01)
+                where = json.loads(_js(app, panel, """(function () {
+              var c = document.getElementById('canvas');
+              var n = document.querySelector('#surface .card[data-id="%s"]');
+              if (!n) { return "{}"; }
+              return JSON.stringify({x: parseInt(n.style.left, 10),
+                                     y: parseInt(n.style.top, 10),
+                                     w: parseInt(n.style.width, 10),
+                                     h: parseInt(n.style.height, 10),
+                                     vw: c.clientWidth, vh: c.clientHeight,
+                                     left: c.scrollLeft, top: c.scrollTop});
+                })()""".replace("%s", new_id)) or "{}")
+                if where and abs(where["x"] + where["w"] / 2 - where["left"] - where["vw"] / 2) <= 24 and abs(where["y"] + where["h"] / 2 - where["top"] - where["vh"] / 2) <= 24:
+                    break
+            centred.append(where)
+        offscreen = [spot for spot in centred
+                     if not (spot.get("x", 0) >= spot.get("left", 0)
+                             and spot.get("y", 0) >= spot.get("top", 0)
+                             and spot.get("x", 0) + spot.get("w", 0)
+                             <= spot.get("left", 0) + spot.get("vw", 1)
+                             and spot.get("y", 0) + spot.get("h", 0)
+                             <= spot.get("top", 0) + spot.get("vh", 1))]
+        check("R-316 新控件落在可视区内（不再飞到列表底部）",
+              bool(centred) and not offscreen, str(centred))
+        check("R-316 每张新卡片均在当前滚动视口中心附近",
+              len(centred) == 3 and all(
+                abs(spot["x"] + spot["w"] / 2 - spot["left"] - spot["vw"] / 2) <= 24
+                and abs(spot["y"] + spot["h"] / 2 - spot["top"] - spot["vh"] / 2) <= 24
+                for spot in centred), str(centred))
+
+        # ---- R-317: a gauge must not inherit the line option.
+        panel._on_acked(panel._pending_ack)
+        panel.feed(7000.0, b"[OmniCOM-chart] AA=5\n")
+        gauge_id = panel.add_widget({"kind": "gauge", "channel": "AA",
+                                     "title": "dial"})
+        deadline = time.perf_counter() + 8
+        while time.perf_counter() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+            if _js(app, panel, "!!document.querySelector('#surface .card"
+                               "[data-id=\\'" + gauge_id + "\\'] .plot canvas')"):
+                break
+        gauge_shape = json.loads(_js(app, panel, """(function () {
+          var host = document.querySelector('#surface .card[data-id="%s"] .plot');
+          var inst = echarts.getInstanceByDom(host);
+          var option = inst ? inst.getOption() : null;
+          return JSON.stringify({
+            xAxis: option ? (option.xAxis || []).length : -1,
+            yAxis: option ? (option.yAxis || []).length : -1,
+            dataZoom: option ? (option.dataZoom || []).length : -1,
+            kinds: option ? (option.series || []).map(function (s) {
+              return s.type; }) : []});
+        })()""".replace("%s", gauge_id)) or "{}")
+        check("R-317 仪表没有 X/Y 轴与缩放拖动条",
+              gauge_shape.get("xAxis") == 0
+              and gauge_shape.get("yAxis") == 0
+              and gauge_shape.get("dataZoom") == 0
+              and gauge_shape.get("kinds") == ["gauge"], str(gauge_shape))
+
+        # ---- R-318: a filled curve window must keep moving.
+        # ``drawnBuffer`` used to derive "how many rows are already merged" from
+        # the *length difference*; once both the source and the drawn buffer sat
+        # at 展示帧数 that difference is 0 for ever, so a live curve froze as
+        # soon as it had been running long enough - and switching tabs was
+        # merely when the user noticed.
+        panel._on_acked(panel._pending_ack)
+        for index in range(360):
+            panel.feed(9000.0 + index * 10, b"[OmniCOM-chart] AA=%d\n" % index)
+        # Pin a curve card first: earlier steps may have cleared the board.
+        panel.clear_widgets()
+        panel.add_widget({"kind": "line", "channel": "AA", "title": "roll"})
+        panel.request_resync()
+        panel.flush()
+        app.processEvents()
+        deadline = time.perf_counter() + 10
+        while time.perf_counter() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+            if _js(app, panel, "JSON.stringify(omniDashboard.describe())"):
+                break
+        panel._on_acked(panel._pending_ack)
+        tail_before = json.loads(_js(app, panel, """(function () {
+          var c = document.getElementById('canvas');
+          var n = document.querySelector('#surface .card .plot');
+          var i = n ? echarts.getInstanceByDom(n) : null;
+          var o = i ? i.getOption() : null;
+          var s = o && o.series && o.series[0] ? o.series[0].data : null;
+          return JSON.stringify({n: s ? s.length : -1,
+                                 last: s && s.length ? s[s.length - 1] : null});
+        })()""") or "{}")
+        for index in range(360, 460):
+            panel.feed(9000.0 + index * 10, b"[OmniCOM-chart] AA=%d\n" % index)
+        deadline = time.perf_counter() + 10
+        while time.perf_counter() < deadline:
+            app.processEvents()
+            time.sleep(0.02)
+        tail_after = json.loads(_js(app, panel, """(function () {
+          var n = document.querySelector('#surface .card .plot');
+          var i = n ? echarts.getInstanceByDom(n) : null;
+          var o = i ? i.getOption() : null;
+          var s = o && o.series && o.series[0] ? o.series[0].data : null;
+          return JSON.stringify({n: s ? s.length : -1,
+                                 last: s && s.length ? s[s.length - 1] : null});
+        })()""") or "{}")
+        check("R-318 曲线窗口填满后仍继续前进（切标签页后不冻结）",
+              tail_after.get("last") is not None
+              and tail_before.get("last") is not None
+              and tail_after["last"][0] > tail_before["last"][0],
+              f"{tail_before.get('last')} -> {tail_after.get('last')}")
+        check("R-318 页面对已填满窗口的回传确认仍然到达",
+              panel._pending_ack == 0,
+              str(panel._pending_ack) + " " + str(_js(app, panel, "omniDashboard.diagnostics()")))
+
+        # ---- R-320: the per-frame drawing call must not block the renderer.
+        # Measured with four curve cards: a synchronous ``setOption`` costs
+        # 34-42 ms per frame, the lazy form 1.4-2.9 ms.  The live path must
+        # therefore pass ``lazyUpdate`` and must not rebuild the whole option.
+        lazy_flags = []
+        script = """(function () {
+          var host = document.querySelector('#surface .card .plot');
+          var inst = host ? echarts.getInstanceByDom(host) : null;
+          if (!inst) { return "no chart"; }
+          window.__omniLazy = [];
+          var real = inst.setOption.bind(inst);
+          inst.setOption = function (option, settings) {
+            window.__omniLazy.push(!!(settings && settings.lazyUpdate));
+            return real(option, settings);
+          };
+          return "hooked";
+        })()"""
+        check("R-320 能挂上 setOption 观察器", _js(app, panel, script) == "hooked")
+        panel._on_acked(panel._pending_ack)
+        for index in range(560, 600):
+            panel.feed(9000.0 + index * 10, b"[OmniCOM-chart] AA=%d\n" % index)
+        deadline = time.perf_counter() + 8
+        while time.perf_counter() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        lazy_flags = json.loads(_js(app, panel, "JSON.stringify(window.__omniLazy)")
+                                or "[]")
+        check("R-320 实时帧都走懒更新（不阻塞渲染线程）",
+              bool(lazy_flags) and all(lazy_flags), str(lazy_flags))
+    finally:
+        panel._call_js = original
+        panel.page_ready = False
+        panel.hide()
+
+    # ``module`` is also the name used for the hex viewer below; keep that one.
+    import importlib.util
+
+    # Mirror how ``PluginHost._instantiate`` loads a folder: the module is
+    # registered as a *package* (``submodule_search_locations``), which is what
+    # makes the plugin's own ``from .text import TEXT`` work.  Loading it as a
+    # bare module made that relative import fail (R-322).
+    hex_folder = ROOT / "plugins" / "hexview"
+    spec = importlib.util.spec_from_file_location(
+        "omnicom_plugin_hexview", hex_folder / "plugin.py",
+        submodule_search_locations=[str(hex_folder)])
+    module = importlib.util.module_from_spec(spec)
+    # ``from .text import TEXT`` resolves through ``sys.modules``, so the module
+    # has to be registered before it executes - same as the host loader does.
+    sys.modules["omnicom_plugin_hexview"] = module
+    spec.loader.exec_module(module)
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "sample.bin"
+        path.write_bytes(bytes(range(256)) * 2)
+        doc = module.HexDocument()
+        doc.open(str(path))
+        first = doc.render(0, 1)
+        check("R-303 十六进制视图按 8 位偏移 + 16 字节 + ASCII 列渲染",
+              first.startswith("00000000  00 01 02 03")
+              and first.endswith("|\x00\x01\x02\x03".replace(
+                  "\x00", ".").replace("\x01", ".").replace("\x02", ".").replace(
+                  "\x03", ".") + "." * 12 + "|"),
+              first)
+        check("R-303 查找同时支持文本与十六进制",
+              doc.find(b"\x41\x42") == 0x41
+              and module.parse_hex("41 42") == b"AB"
+              and module.parse_hex("zz") is None)
+        doc.write(0x10, b"\xAA\xBB")
+        doc.save()
+        check("R-303 修改后保存真的写回文件",
+              path.read_bytes()[0x10:0x12] == b"\xaa\xbb" and not doc.dirty)
+        short = Path(temporary) / "short.bin"
+        short.write_bytes(b"ABC")
+        doc.open(str(short))
+        doc.write(5, b"\x01")
+        check("R-303 越过文件末尾写入时按零扩展",
+              bytes(doc.data) == b"ABC\x00\x00\x01", bytes(doc.data))
+
+        # R-310: the inline editor must show both digits.  It used to inherit
+        # the application's 20 px ``QLineEdit`` padding, which left ~20 px for a
+        # 26 px wide ``00`` - the first digit was clipped (measured, L-306).
+        class _HexApi:
+            """Only what :class:`HexPage` touches: messages and a menu factory."""
+
+            def __init__(self) -> None:
+                self.messages: list[tuple[str, str]] = []
+
+            def notify(self, text, level="info"):
+                self.messages.append((level, str(text)))
+
+            def menu(self, parent=None):
+                from PySide6.QtWidgets import QMenu
+
+                return QMenu(parent)
+
+        page = module.HexPage(_HexApi())
+        page.resize(900, 600)
+        page.show()
+        page.doc.open(str(path))
+        page.refresh()
+        app.processEvents()
+        text_w = page.view.fontMetrics().horizontalAdvance("00")
+        box_issues = []
+        for offset in (0, 15, 38):
+            page.begin_inline_edit(offset)
+            editor = page._editor
+            image = editor.grab().toImage()
+            ink = [x for x in range(image.width()) for y in range(image.height())
+                   if image.pixelColor(x, y).lightness() < 140]
+            box = editor.geometry()
+            if not page.view.viewport().rect().contains(box):
+                box_issues.append((offset, "outside viewport", box.getRect()))
+            if ink and (min(ink) <= 1 or max(ink) >= image.width() - 2):
+                box_issues.append((offset, "ink on border", min(ink), max(ink)))
+            if ink and max(ink) - min(ink) + 1 < text_w - 2:
+                box_issues.append((offset, "clipped", max(ink) - min(ink) + 1, text_w))
+            if image.height() < editor.fontMetrics().height():
+                box_issues.append((offset, "too short", image.height()))
+            page._close_editor()
+        check("R-310 双击编辑框完整显示两位十六进制且不越界",
+              not box_issues, str(box_issues))
+
+
+def chart_transport_checks(panel) -> None:
+    original = panel._call_js
+    messages = []
+    panel.timer.stop()
+    panel._call_js = lambda name, payload: messages.append((name, payload))
+    try:
+        panel.page_ready = True
+        panel.layout_data = {"widgets": [{"id": "config", "kind": "line", "channel": "A",
+                                          "channels": ["A", "B"], "title": "pair", "unit": "V",
+                                          "decimals": 4, "min": -5, "max": 5,
+                                          "x": 160, "y": 320, "w": 480, "h": 256}]}
+        payload = panel.config_payload()
+        with tempfile.TemporaryDirectory() as temporary:
+            filename = str(Path(temporary) / "dashboard.json")
+            panel.export_config(filename)
+            saved = json.loads(Path(filename).read_text(encoding="utf-8"))
+        check("R-311 export retains channels, precision and geometry", saved == payload)
+        panel.clear_widgets()
+        panel.apply_config(saved)
+        check("R-311 import round trip retains every card setting",
+              panel.config_payload() == saved and saved["widgets"][0]["channels"] == ["A", "B"]
+              and saved["widgets"][0]["decimals"] == 4)
+        before = json.dumps(panel.layout_data, sort_keys=True)
+        invalid = [None, [], {}, dict(saved, version=999), dict(saved, widgets="wrong"),
+                   dict(saved, widgets=[dict(saved["widgets"][0], min=float("nan"))]),
+                   dict(saved, widgets=saved["widgets"] * 2),
+                   dict(saved, widgets=saved["widgets"] * (panel.MAX_WIDGETS + 1))]
+        for document in invalid:
+            try:
+                panel.apply_config(document)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("R-311 invalid import accepted")
+        check("R-311 invalid imports leave the current layout unchanged",
+              json.dumps(panel.layout_data, sort_keys=True) == before)
+        panel.points.setValue(100)
+        panel.begin_replay()
+        panel.layout_data = {"widgets": [{"id": "transport", "kind": "line", "channel": "A"}]}
+        for index in range(100):
+            panel.replay_line(index, f"[OmniCOM-chart] A={index}")
+        panel.flush_live()
+        first = messages[-1][1]["epoch"]
+        for index in range(100, 110):
+            panel.replay_line(index, f"[OmniCOM-chart] A={index}")
+        before_flush = len(messages)
+        panel._flush_if_ready()
+        check("R-321 completion-driven pump never overlaps a pending batch", len(messages) == before_flush)
+        panel._on_acked(first)
+        check("R-321 confirmation schedules the waiting tail without polling", panel._flush_timer.isActive())
+        panel._ack_started -= 1
+        panel._flush_if_ready()
+        second = messages[-1][1]
+        check("R-321 overflow during acknowledgement retains the entire new tail",
+              [row[1] for row in second["history"]["A"]] == list(range(100, 110)))
+        check("R-321 batch identities increase monotonically", second["epoch"] > first)
+        panel._on_acked(first)
+        check("R-321 stale acknowledgement cannot release a newer batch",
+              panel._pending_ack == second["epoch"])
+        panel._on_acked(second["epoch"])
+        panel.request_resync()
+        panel.flush_live()
+        third = messages[-1][1]["epoch"]
+        check("R-321 resync never reuses a batch identity", third > second["epoch"])
+        panel._on_acked(second["epoch"])
+        check("R-321 stale pre-resync acknowledgement is ignored", panel._pending_ack == third)
+        panel._on_acked(third)
+        for kind in ("value", "gauge", "bar", "lamp"):
+            panel.layout_data = {"widgets": [{"id": "reading", "kind": kind, "channel": "A"}]}
+            panel.replay_line(120, "[OmniCOM-chart] A=0")
+            check(f"R-321 {kind}-only board detects a new reading", panel.has_fresh_data())
+            panel.flush_live()
+            panel._on_acked(messages[-1][1]["epoch"])
+            check(f"R-321 {kind}-only board becomes idle after confirmation", not panel.has_fresh_data())
+    finally:
+        panel._call_js = original
+        panel.clear_data()
+        panel.clear_widgets()
+        panel.points.setValue(0)
+        panel.timer.start()
+
+
+def decoupling_checks() -> None:
+    """R-322: an installed plugin must not reach into host internals.
+
+    A plugin folder is copied to a user's disk and stays there.  If it imports
+    ``omnicom.ui.widgets`` or ``omnicom.i18n`` directly, then renaming or moving
+    one host file breaks every already-installed plugin - and nothing in the app
+    notices until the user opens the tab.  The API facade exists for exactly
+    this, so the rule is checked statically over the shipped source.
+
+    The check deliberately reads the *sources* rather than the imported modules:
+    an accidental ``import`` inside a function still pins the plugin, and a
+    runtime check would only fire once that branch happens to run.
+    """
+    import ast
+
+    root = ROOT / "plugins"
+    offenders: list[str] = []
+    text_tables: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        if "vendor" in path.parts:
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            for name in names:
+                if name == "omnicom" or name.startswith("omnicom."):
+                    offenders.append(f"{path.relative_to(ROOT).as_posix()}:{node.lineno} -> {name}")
+        if path.name == "text.py":
+            text_tables.append(path.relative_to(ROOT).as_posix())
+    check("R-322 no plugin imports host internals", not offenders, offenders[:8])
+    check("R-322 each decoupled plugin ships its own text table",
+          {"plugins/hexview/text.py", "plugins/terminal/text.py",
+           "plugins/transfer/text.py"} <= set(text_tables), text_tables)
+    # The host table must not carry plugin copy any more: a key that belongs to
+    # a plugin would keep working only while that plugin's table is registered.
+    from omnicom import i18n
+
+    leftovers = [key for key in i18n._TABLE
+                 if key.startswith(("hex.", "term.", "xfer."))]
+    check("R-322 the host text table holds no plugin copy", not leftovers, leftovers[:8])
+    # Register the shipped tables the way ``create()`` does and prove the keys
+    # resolve; the panels may not be loaded in this suite.
+    registered = []
+    for plugin_id, relative in (("hexview", "plugins/hexview/text.py"),
+                                ("terminal", "plugins/terminal/text.py"),
+                                ("transfer", "plugins/transfer/text.py")):
+        namespace: dict = {}
+        exec(compile((ROOT / relative).read_text(encoding="utf-8"),
+                     relative, "exec"), namespace)
+        table = namespace["TEXT"]
+        i18n.register_plugin_table(plugin_id, table)
+        registered.append((plugin_id, table))
+    check("R-322 registered plugin copy resolves through tr()",
+          all(i18n.tr(key) not in ("", key)
+              for key in ("hex.open", "term.title", "xfer.protocol", "xfer.needport")),
+          [i18n.tr(key) for key in ("hex.open", "term.title", "xfer.protocol")])
+    for plugin_id, _table in registered:
+        i18n.unregister_plugin_table(plugin_id)
+    check("R-322 unloading a plugin drops its copy", i18n.tr("hex.open") == "hex.open")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark", action="store_true")
+    parser.add_argument("--chart-only", action="store_true")
     args = parser.parse_args()
     data = Path(os.environ["OMNICOM_DATA_DIR"])
     if data.exists():
@@ -1638,14 +2478,19 @@ def main() -> int:
         QFontDatabase.addApplicationFont("C:/Windows/Fonts/" + font)
     app.setStyle("Fusion")
     app.setStyleSheet(theme.app_stylesheet())
-    store_checks()
-    multi_source_checks()
-    catalog_build_checks()
+    if not args.chart_only:
+        store_checks()
+        multi_source_checks()
+        catalog_build_checks()
+        decoupling_checks()
     host, chart, parser_class = chart_checks(app, KINDS)
+    chart_transport_checks(chart)
     chart_readout_checks(app, chart)
-    launcher_checks(app)
-    search_checks(app)
-    store_ui_checks(app)
+    chart_stream_checks(app, chart)
+    if not args.chart_only:
+        launcher_checks(app)
+        search_checks(app)
+        store_ui_checks(app)
     if args.benchmark:
         results = benchmark(app, chart, parser_class)
         atomic_json(ROOT / ".artifacts" / "chart-benchmark.json", results)

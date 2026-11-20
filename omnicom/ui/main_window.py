@@ -58,7 +58,7 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
-from .. import __version__, control, paths, power
+from .. import __version__, control, log_replay, paths, power
 from ..commands import CommandStore
 from ..i18n import language, set_language, tr
 from ..plugins import PluginHost
@@ -550,6 +550,17 @@ class TitleBar(GlassFrame):
         if button is not None:
             button.setChecked(True)
 
+    def set_read_only(self, value: bool) -> None:
+        """No-op kept for compatibility.
+
+        An earlier revision disabled the terminal / transfer tabs while a log was
+        open.  The user clarified (2026-11-19) that only the **serial controls**
+        should go dead - the rest of the window must behave like a normal,
+        not-yet-connected session - so nothing is disabled here any more.  The
+        method stays because callers still pair it with log mode.
+        """
+        del value
+
     # ------------------------------------------------------------------ menu
     def _add_update_action(self, menu: QMenu):
         window = self.window_ref
@@ -583,6 +594,13 @@ class TitleBar(GlassFrame):
         menu.setStyleSheet(theme.menu_stylesheet())
 
         menu.addAction(tr("menu.preferences"), window.open_preferences)
+
+        file_menu = menu.addMenu(tr("menu.file"))
+        if window.log_mode_path():
+            action = file_menu.addAction(tr("menu.closelog"), window.close_log_mode)
+            action.setToolTip(window.log_mode_path())
+        else:
+            file_menu.addAction(tr("menu.openlog"), window.open_log_for_replay)
 
         plugin_menu = menu.addMenu(tr("plugin.menu"))
         plugin_menu.addAction(tr("store.title"), window.open_plugin_store)
@@ -867,6 +885,16 @@ class OmniWindow(QMainWindow):
         # One app-wide tooltip watcher: 1 s of steady hover, never restarted by
         # a mouse move (R-080).
         self.tooltips = install_tooltips()
+
+        # Every window shows the **same** command library (R-308).  ``save()``
+        # already merges on write, but a running window never noticed a change
+        # another window made until it saved itself, so one window kept showing
+        # stale commands.  A cheap (mtime, size) poll closes that gap; it costs
+        # one ``os.stat`` per tick and only re-reads when the file really moved.
+        self._command_timer = QTimer(self)
+        self._command_timer.setInterval(700)
+        self._command_timer.timeout.connect(self._sync_commands)
+        self._command_timer.start()
 
         self.plugins = PluginHost(notify=self.notify, log_line=self._plugin_log,
                                   send_bytes=self._plugin_send, parent=self,
@@ -1303,9 +1331,16 @@ class OmniWindow(QMainWindow):
         pinned through the **splitter sizes** rather than a maximum height: the
         splitter owns the geometry and would otherwise stretch a collapsed card
         straight back to its half of the column.
+
+        "Collapsed" is read from the **body's visibility**, not from the panels'
+        ``_collapsed`` flags.  Those two disagree in two real paths - a search
+        panel restored from full screen, and a fold performed while the other
+        card was still open - and the flag was what made ``relayout_sidebar()``
+        take the "both expanded" branch, so 扩展命令 jumped to a full 230 px
+        half even though both headers were folded (R-319).
         """
-        cmd_open = not self.commands_panel._collapsed
-        search_open = not self.search_panel._collapsed
+        cmd_open = not self.commands_panel.body.isHidden()
+        search_open = not self.search_panel.body.isHidden()
         # ``header.height()`` is **not** usable here: once the body is hidden the
         # header is the only visible child and stretches to the whole card, so
         # measuring it returned 215 px for a 38 px strip (measured, L-253).
@@ -1317,6 +1352,10 @@ class OmniWindow(QMainWindow):
         # collapsed strip into a tall blank plate.
         self.cmd_block.setMaximumHeight(big if cmd_open else cmd_h)
         self.search_block.setMaximumHeight(big if search_open else search_h)
+        # A stretch factor is what lets the splitter hand the spare room to a
+        # card; a folded one must not claim any of it.
+        self.sidebar_split.setStretchFactor(0, 3 if cmd_open else 0)
+        self.sidebar_split.setStretchFactor(1, 2 if search_open else 0)
 
         total = max(1, self.sidebar_split.height())
         if not (cmd_open or search_open):
@@ -2032,6 +2071,10 @@ class OmniWindow(QMainWindow):
             self.notify(tr("misc.noport"), "warn")
             return
         self.settings.setValue("serial/lastPort", port)
+        if getattr(self, "_log_file_loaded", False):
+            self.clear_log()
+            self.log.autoscroll = True
+            self._log_file_loaded = False
         self.bridge.open(port, self._serial_opts())
 
     def _on_port_picked(self, _index: int) -> None:
@@ -2075,6 +2118,14 @@ class OmniWindow(QMainWindow):
     def _on_status(self, status: dict) -> None:
         self._status = status
         self._publish_channel(status)
+        if getattr(self, "_log_mode", ""):
+            # In log mode the single button is 关闭日志 (R-304): a status event
+            # from the close we just asked for must not repaint it as 打开串口,
+            # and the port controls stay disabled until the log is closed.
+            chip = self.titlebar.status_chip
+            chip.set_state("idle", tr("status.chip.logmode"))
+            self.status_line.setText(tr("menu.openlog.lockedshort"))
+            return
         self.btn_connect.setEnabled(not status.get("busy", False))
         chip = self.titlebar.status_chip
         if status.get("connected"):
@@ -2869,6 +2920,139 @@ class OmniWindow(QMainWindow):
             return
         lines = text.count("\n") + 1
         self.notify(tr("log.saved", n=lines, name=os.path.basename(path)), "ok")
+
+    # ------------------------------------------------------------ open a log
+    def open_log_for_replay(self) -> None:
+        """File > 打开日志: view a saved log, and replay its chart frames.
+
+        The user made the scope explicit (R-302, revised 2026-11-19): the basic
+        job is *reading a log file*, and the dashboard is a bonus that only
+        applies when the file carries ``[OmniCOM-chart]`` lines.  The previous
+        version refused a file with no chart data and switched to the dashboard
+        unconditionally, which treated a plain log as an error.
+
+        Opening a log also **locks the serial port**: a file being read and a
+        device being written must not be confused for one another (R-304), so the
+        port controls are disabled until the log is closed.
+        """
+        if getattr(self, "_log_mode", ""):
+            return                       # already reading a file
+        default_dir = paths.data_dir()
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("menu.openlog"), default_dir, tr("log.filter.all"))
+        if not path:
+            return
+        try:
+            text, encoding = log_replay.read_text(path)
+        except OSError as exc:
+            self.notify(tr("menu.openlog.failed", err=exc), "error")
+            return
+
+        self._enter_log_mode(path)
+        self._show_log_text(path, text, encoding)
+
+        frames, chart_lines = log_replay.read_frames(path)
+        if not frames:
+            self.notify(tr("menu.openlog.plain", name=os.path.basename(path)),
+                        "info")
+            return
+        dashboard = self.plugins.service("dashboard")
+        if dashboard is None:
+            self.notify(tr("menu.openlog.noplugin"), "warn")
+            return
+        span = frames[-1][0] if frames else 0.0
+        dashboard.begin_replay(os.path.basename(path))
+        # Feed in bounded slices so a hundred-megabyte log cannot freeze the
+        # window: the batches are handed to the event loop, not run in one go.
+        batch = 500
+        for start in range(0, len(frames), batch):
+            for seconds, payload in frames[start:start + batch]:
+                self.plugins.publish_replay(seconds, payload)
+            QApplication.processEvents()
+        dashboard.end_replay()
+        self.notify(tr("menu.openlog.done", lines=chart_lines, seconds=span), "ok")
+
+    def _show_log_text(self, path: str, text: str, encoding: str) -> None:
+        """Put the file's text into the log view as one batched replace."""
+        self.clear_log()
+        self._log_file_loaded = True
+        self.log.begin_batch()
+        try:
+            # The file already contains the ``[time]收←◇`` prefixes, so the
+            # renderer must not add a second set: set the timestamp/direction
+            # switches off for the duration of the load.
+            self.log.set_plain_text(text)
+        finally:
+            self.log.end_batch()
+        self.switch_page("terminal")
+        self.notify(tr("menu.openlog.loaded",
+                       name=os.path.basename(path), enc=encoding,
+                       n=text.count("\n") + 1), "ok")
+
+    def _sync_commands(self) -> None:
+        """Adopt a command-library change another window made (R-308).
+
+        Two windows must show the same library.  ``CommandStore.save()`` already
+        merges concurrent writes, but a window only noticed them when it saved
+        itself, so a second window kept showing stale commands while the first
+        one edited.  This runs on a slow timer and does nothing at all unless
+        the file's ``(mtime, size)`` actually moved.
+        """
+        try:
+            self.command_store.reload_if_changed()
+        except Exception as exc:               # a broken library must not crash
+            self.notify(str(exc), "warn")
+            self._command_timer.stop()
+
+    def _enter_log_mode(self, path: str) -> None:
+        """Lock **only** the serial controls while a file is being read (R-304).
+
+        Revised 2026-11-19: the window stays fully usable - commands, search,
+        the dashboard, panels - exactly like a session that is merely not
+        connected yet.  What goes dead is the port itself: the port drop-down,
+        the refresh button and the open/close button are disabled, and that one
+        button becomes 关闭日志.  Nothing else is greyed out, and no tab is
+        disabled any more (the previous build disabled the terminal and transfer
+        tabs, which was more than the user asked for).
+        """
+        # A captured file is not a live session: close the port first so the two
+        # can never be mixed, then disable every control that would reopen it.
+        if self._status.get("connected") or self._status.get("reconnecting"):
+            self.bridge.close()
+        self._log_mode = os.path.abspath(path)
+        self.port_combo.setEnabled(False)
+        self.btn_refresh.setEnabled(False)
+        self.btn_connect.setText(tr("menu.closelog"))
+        self.btn_connect.setObjectName("Ghost")
+        # Keep it clickable: this is the way back out of log mode.
+        self.btn_connect.setEnabled(True)
+        with contextlib.suppress(RuntimeError, TypeError):
+            self.btn_connect.clicked.disconnect(self.toggle_connection)
+        self.btn_connect.clicked.connect(self.close_log_mode)
+        self.btn_connect.style().unpolish(self.btn_connect)
+        self.btn_connect.style().polish(self.btn_connect)
+        self.titlebar.set_read_only(True)
+        self.notify(tr("menu.openlog.locked"), "warn")
+
+    def close_log_mode(self) -> None:
+        """Leave file mode and hand the serial controls back to the user."""
+        if not getattr(self, "_log_mode", ""):
+            return
+        self._log_mode = ""
+        with contextlib.suppress(RuntimeError, TypeError):
+            self.btn_connect.clicked.disconnect(self.close_log_mode)
+        self.btn_connect.clicked.connect(self.toggle_connection)
+        self.port_combo.setEnabled(True)
+        self.btn_refresh.setEnabled(True)
+        self.btn_connect.setEnabled(True)
+        self.titlebar.set_read_only(False)
+        self._on_status(dict(self._status))
+        self._on_ports(self.bridge.manager.ports())
+        self.notify(tr("menu.closelog.done"), "ok")
+
+    def log_mode_path(self) -> str:
+        """The file currently open in log mode, or ``""``."""
+        return getattr(self, "_log_mode", "")
 
     # ----------------------------------------------------------------- toast
     #: The stack of notifications may not stand taller than this fraction of the

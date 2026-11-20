@@ -15,17 +15,26 @@ the decoupling requirement.
 
 The API handed to :func:`create` is deliberately small and stable:
 
-    api.tr(key)                 -> translated string
+    api.tr(key)                 -> translated string (host + registered plugin keys)
+    api.register_text(table)    -> add this plugin's own (zh, en) text table
     api.t(name_zh, name_en)     -> pick the right string for the active language
     api.notify(text, level)     -> toast in the main window
     api.data_dir                -> a writable folder unique to this plugin
     api.settings                -> QSettings scoped to this plugin
-    api.theme                   -> the theme module (colour/metric tokens)
-    api.glyph(name)             -> a painted icon button class
+    api.theme                   -> read-only theme facade (colours + metrics)
+    api.widget(kind, **kwargs)  -> host-styled control (button/combo/card/...)
+    api.glyph(name)             -> a painted icon button factory
     api.language()              -> "zh" / "en"
     api.on_language(fn)         -> call fn when the language changes
     api.log(text)               -> append a line to the serial log as a system note
     api.send(data)              -> write bytes to the open port (False if closed)
+    api.paths                   -> read-only host path facade
+    api.terminal_screen()       -> the VT100 screen model (terminal plugin)
+    api.transfer_worker()       -> the X/Y/ZMODEM worker class (transfer plugin)
+
+Everything above is a *facade*: no plugin imports ``omnicom.ui.*`` or
+``omnicom.i18n`` directly, so the host can refactor those modules without
+breaking an installed plugin (R-322).  ``plugin_selftest`` enforces it.
 """
 
 from __future__ import annotations
@@ -44,7 +53,11 @@ from . import __version__, i18n, paths
 MANIFEST = "plugin.json"
 REQUIRED_FIELDS = ("id", "entry")
 #: API version the host guarantees.  Bump when the shape below changes.
-API_VERSION = 2
+#:
+#: 3 - plugins stopped importing ``omnicom.ui.*`` / ``omnicom.i18n`` and use the
+#:     facades instead (``api.theme``, ``api.widget``, ``api.paths``,
+#:     ``api.terminal_screen``, ``api.transfer_worker``, ``api.register_text``).
+API_VERSION = 3
 
 
 @dataclass
@@ -60,6 +73,7 @@ class PluginInfo:
     _listeners: list = field(default_factory=list)
     _rx_listeners: list = field(default_factory=list)
     _theme_listeners: list = field(default_factory=list)
+    _replay_listeners: list = field(default_factory=list)
     _cleanups: list = field(default_factory=list)
     #: ``name -> factory()`` services this plugin offers to the host/other
     #: plugins while it is loaded (R-218).
@@ -133,6 +147,17 @@ class PluginApi(QObject):
     def tr(key: str, **kwargs) -> str:
         return i18n.tr(key, **kwargs)
 
+    def register_text(self, table: dict[str, tuple[str, str]]) -> None:
+        """Add this plugin's own translation table (R-322).
+
+        A plugin ships its copy with its own folder instead of pushing 58 keys
+        into the host's table: the host table stays about the host, and an
+        uninstalled plugin leaves no orphaned strings behind.  Keys registered
+        here are looked up by :meth:`tr` and are removed on unload.
+        """
+        i18n.register_plugin_table(self.info.id, table)
+        self.info.manifest.setdefault("text_keys", sorted(table))
+
     @staticmethod
     def language() -> str:
         return i18n.language()
@@ -193,6 +218,15 @@ class PluginApi(QObject):
     def on_theme(self, callback) -> None:
         self.info._theme_listeners.append(callback)
 
+    def on_replay(self, callback) -> None:
+        """Call ``callback(seconds, payload)`` for every line of a replayed log.
+
+        Replaying a saved log is a *host* action (File > Open log → Replay), but
+        only the plugin knows how to interpret its own payload lines.  Giving
+        plugins a subscription keeps that knowledge where it belongs (R-302).
+        """
+        self.info._replay_listeners.append(callback)
+
     def on_unload(self, callback) -> None:
         self.info._cleanups.append(callback)
 
@@ -222,9 +256,75 @@ class PluginApi(QObject):
 
     @staticmethod
     def theme():
-        from .ui import theme as theme_module
+        """A read-only view of the host palette (colours + metrics).
 
-        return theme_module
+        Returning the module itself let a plugin set ``theme.CARD`` and repaint
+        every window, which is not something an installed plugin should be able
+        to do.  The facade exposes the tokens read-only (R-322).
+        """
+        from .ui.theme_facade import ThemeFacade
+
+        return ThemeFacade()
+
+    @staticmethod
+    def paths():
+        """Read-only host folder helpers (``received_dir()``, ``data_dir()``...)."""
+        from .paths_facade import PathsFacade
+
+        return PathsFacade()
+
+    @staticmethod
+    def widget_class(name: str):
+        """Return a host-styled widget *class* by stable name (R-322).
+
+        A plugin used to ``from omnicom.ui.widgets import Button, GlassFrame``
+        and thereby pinned itself to that module's layout: renaming or moving
+        the file broke every plugin already installed on a user's disk.  The
+        names below are the contract instead:
+
+        ``button`` themed push button · ``icon`` painted glyph button ·
+        ``combo`` drop-down with the painted chevron · ``card`` glass card ·
+        ``log`` the log/terminal text view.
+        """
+        from .ui import widgets as widget_module
+
+        kinds = {
+            "button": lambda: widget_module.Button,
+            "pushbutton": lambda: widget_module.Button,
+            "icon": lambda: widget_module.GlyphButton,
+            "glyph": lambda: widget_module.GlyphButton,
+            "combo": lambda: widget_module.Combo,
+            "dropdown": lambda: widget_module.Combo,
+            "card": lambda: widget_module.GlassFrame,
+            "frame": lambda: widget_module.GlassFrame,
+        }
+        key = str(name or "").lower()
+        factory = kinds.get(key)
+        if factory is None and key in ("log", "logview"):
+            from .ui.log_view import LogView
+
+            return LogView
+        if factory is None:
+            raise ValueError(f"unknown widget kind: {name}")
+        return factory()
+
+    @staticmethod
+    def terminal_screen():
+        """The VT100 screen model plus its colour tables (R-322).
+
+        Small, Qt-free and shared by the terminal plugin: exposing it keeps the
+        parser in one place instead of letting a plugin vendor its own copy.
+        """
+        from .ui import vt100
+
+        return vt100
+
+    @staticmethod
+    def transfer_worker():
+        """The X/Y/ZMODEM worker ``QThread`` class (R-322)."""
+        from .ui.workers import TransferWorker
+
+        return TransferWorker
 
     @staticmethod
     def combo(parent=None, editable: bool = False):
@@ -378,6 +478,7 @@ class PluginHost(QObject):
                 if info.api is not None:
                     info.api.deleteLater()
                     info.api = None
+                i18n.unregister_plugin_table(info.id)
                 info.error = f"{type(exc).__name__}: {exc}"
                 self._report(info.name(), info.error, traceback.format_exc())
         self.plugins = loaded + [item for item in self.plugins if item.error]
@@ -476,6 +577,7 @@ class PluginHost(QObject):
                     pass
             info.widget = None
             info.module = None
+            i18n.unregister_plugin_table(info.id)
             if info.api is not None:
                 info.api.deleteLater()
                 info.api = None
@@ -491,6 +593,16 @@ class PluginHost(QObject):
                     callback(ts, data)
                 except Exception as exc:
                     info._rx_listeners.remove(callback)
+                    self._report(info.name(), str(exc))
+
+    def publish_replay(self, seconds: float, payload: str) -> None:
+        """Fan one replayed log line out to every subscribed plugin (R-302)."""
+        for info in self.loaded():
+            for callback in list(info._replay_listeners):
+                try:
+                    callback(float(seconds), str(payload))
+                except Exception as exc:
+                    info._replay_listeners.remove(callback)
                     self._report(info.name(), str(exc))
 
     def apply_theme(self) -> None:

@@ -35,12 +35,51 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from omnicom import paths
-from omnicom.i18n import tr
-from omnicom.ui import theme
-from omnicom.ui.log_view import LogView
-from omnicom.ui.widgets import Button as QPushButton
-from omnicom.ui.widgets import GlassFrame
+from .text import TEXT
+
+#: Host objects, injected by :func:`create` (R-322).
+#:
+#: This plugin used to import ``omnicom.paths``, ``omnicom.ui.log_view``,
+#: ``omnicom.ui.widgets`` and ``omnicom.ui.workers``.  Those are host internals:
+#: renaming one file broke every plugin already installed on a user's disk.  The
+#: same classes now arrive through the API facade and are bound here, so the widget
+#: code below reads the same.
+theme = None
+LogView = None
+QPushButton = None
+GlassFrame = None
+TransferWorker = None
+_paths = None
+_api = None
+
+
+def tr(key: str, **kwargs) -> str:
+    """Translate one of this plugin's own keys through the host API (R-322)."""
+    if _api is not None:
+        return _api.tr(key, **kwargs)
+    entry = TEXT.get(key)
+    if entry is None:
+        return key
+    text = entry[0]
+    if kwargs:
+        try:
+            return text.format(**kwargs)
+        except (KeyError, IndexError):
+            return text
+    return text
+
+
+def _bind(api) -> None:
+    """Bind the host facades to the names the widget code already uses."""
+    global _api, _paths, theme, LogView, QPushButton, GlassFrame, TransferWorker
+    _api = api
+    _paths = api.paths()
+    theme = api.theme()
+    LogView = api.widget_class("log")
+    QPushButton = api.widget_class("button")
+    GlassFrame = api.widget_class("card")
+    TransferWorker = api.transfer_worker()
+
 
 PROTOCOLS = [
     ("x", "XMODEM", ("128B / 1KB · CRC16", "128B / 1KB · CRC16")),
@@ -51,9 +90,9 @@ PROTOCOLS = [
 
 def _l10n(pair: tuple[str, str]) -> str:
     """Choose the half of a ``(zh, en)`` pair for the current language."""
-    from omnicom.i18n import language
-
-    return pair[1] if language() == "en" else pair[0]
+    if _api is not None:
+        return pair[1] if _api.language() == "en" else pair[0]
+    return pair[0]
 
 
 def _pick(text: str) -> str:
@@ -88,6 +127,14 @@ class DropZone(QFrame):
         self.detail.setAlignment(Qt.AlignCenter)
         self.detail.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
         layout.addWidget(self.detail)
+
+    def retranslate(self) -> None:
+        """Follow a language switch (R-033/R-322).
+
+        The title used to be set once in ``__init__`` and never updated, so
+        switching to English left this one label in Chinese.
+        """
+        self.title.setText(tr("xfer.dropzone"))
 
     def _apply_style(self, active: bool) -> None:
         border = "rgba(14, 148, 132, 150)" if active else theme.LINE_STRONG
@@ -234,7 +281,7 @@ class TransferPanel(QWidget):
         meta.addWidget(self.meta_label)
         left.addLayout(meta)
 
-        self.hint = QLabel(tr("xfer.savedir", path=paths.received_dir()))
+        self.hint = QLabel(tr("xfer.savedir", path=_paths.received_dir()))
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet(f"color: {theme.DIM}; font-size: 11px;")
         left.addWidget(self.hint)
@@ -281,9 +328,13 @@ class TransferPanel(QWidget):
         self.btn_start.setText(tr("xfer.start"))
         self.btn_abort.setText(tr("xfer.abort"))
         self.btn_clear_log.setText(tr("xfer.clearlog"))
-        self.hint.setText(tr("xfer.savedir", path=paths.received_dir()))
+        self.hint.setText(tr("xfer.savedir", path=_paths.received_dir()))
         self.state_label.setText(tr("xfer.ready"))
         self.log_title.setText(tr("xfer.log").upper())
+        # The drop zone is a child widget with its own title label.
+        retranslate_drop = getattr(self.drop, "retranslate", None)
+        if callable(retranslate_drop):
+            retranslate_drop()
 
     def protocol(self) -> str:
         button = self.proto_group.checkedButton()
@@ -408,11 +459,11 @@ class TransferPlugin(QWidget):
             self.api.notify(tr("xfer.busy"), "warn")
             return
         if not self.api.is_connected():
-            self.api.notify(tr("misc.needport"), "warn")
+            self.api.notify(tr("xfer.needport"), "warn")
             return
         manager = self.api.port()
         if manager is None:
-            self.api.notify(tr("misc.needport"), "warn")
+            self.api.notify(tr("xfer.needport"), "warn")
             return
         data = b""
         name = "file.bin"
@@ -429,8 +480,6 @@ class TransferPlugin(QWidget):
         self.panel.progress.setValue(0)
         self.panel.log(f"=== {protocol.upper()}MODEM {direction} \u00b7 {name} ===")
         self.api.log(f"{protocol.upper()}MODEM {direction} \u00b7 {name}")
-
-        from omnicom.ui.workers import TransferWorker
 
         worker = TransferWorker(manager, protocol, direction, name, data, self)
         worker.log.connect(self.panel.log)
@@ -495,6 +544,8 @@ def human_bytes(count: float) -> str:
 
 def create(api):
     """Plugin entry point - see docs/PLUGINS.md."""
+    _bind(api)
+    api.register_text(TEXT)
     widget = TransferPlugin(api)
     api.provide("transfer", lambda: widget.service)
     api.on_language(lambda _lang: widget.retranslate())

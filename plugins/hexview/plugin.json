@@ -1,0 +1,17 @@
+{
+  "id": "hexview",
+  "name": {
+    "zh": "HEX 文件查看",
+    "en": "HEX Viewer"
+  },
+  "version": "1.0.0",
+  "author": "OmniCOM",
+  "description": {
+    "zh": "像 WinHex 那样打开任意文件：十六进制查看、查找、修改并保存、复制选中内容",
+    "en": "Open any file like WinHex: hex view, find, edit and save, copy the selection"
+  },
+  "entry": "plugin.py",
+  "api": 3,
+  "python": "3.13",
+  "platform": "win_amd64"
+}

@@ -22,6 +22,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BASE = "https://github.com/Fatmear/OmniCOM/releases/download/plugin-store/"
 
+#: Plugins that are part of the program itself (R-293), so they must never be
+#: sold through the store: the host gives each one a fixed tab and an update
+#: would land in the data folder and shadow the bundled copy (R-174).
+CORE_PLUGINS = ("terminal", "transfer")
+
 
 def version_key(value: str) -> tuple[int, ...]:
     """Numeric version sort key; mirrors ``omnicom.plugin_store.version_key``.
@@ -231,6 +236,12 @@ def build(output: Path, base_url: str = DEFAULT_BASE, catalog_path: Path | None 
     for source in sorted((ROOT / "plugins").iterdir()):
         manifest_path = source / "plugin.json"
         if not source.is_dir() or not manifest_path.is_file():
+            continue
+        if source.name in CORE_PLUGINS:
+            # Core plugins ship with the app (R-293) and are not store plugins
+            # (R-174).  Publishing them would offer a "newer" build of a page
+            # the host already owns, and installing it into the data folder
+            # would silently shadow the bundled copy.
             continue
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         identifier = manifest["id"]

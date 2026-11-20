@@ -109,16 +109,19 @@ class VersionPicker(QWidget):
                                        Qt.ItemDataRole.ToolTipRole)
         target = self.combo.findData(wanted) if wanted else -1
         if target < 0:
-            # Land on the build the user came for: the newest one, unless that
-            # is already installed - then the next older package is the only
-            # thing a click can do, and selecting it makes that obvious.
-            target = 0
-            installed = row["item"]["installed_version"]
-            if installed and self.combo.count() > 1 and str(self.combo.itemData(0)) == str(installed):
-                for index in range(1, self.combo.count()):
-                    if not (self.row["item"].get("versions") or [])[index].get("local"):
-                        target = index
-                        break
+            # Open on the build that is *installed* (user, 2026-11-19).
+            #
+            # It used to land on the newest version, and when that was already
+            # installed it deliberately jumped to an older one so the button had
+            # something to do.  That read as "this plugin is out of date" on a
+            # plugin that was perfectly current: the first thing a row shows
+            # must be the state the user is actually in.  A newer build is
+            # still one click away (and is tagged 最新), and an available
+            # update is what the red dot is for.
+            installed = row["item"].get("installed_version")
+            target = self.combo.findData(installed) if installed else -1
+            if target < 0:
+                target = 0
         self.combo.setCurrentIndex(target)
         self.combo.blockSignals(False)
         self.combo.setEnabled(self.combo.count() > 1)

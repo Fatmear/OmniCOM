@@ -31,6 +31,20 @@
     selected: null,
     theme: {},
     values: {},             // channel -> latest numeric value
+    /* channel -> [[t, v], ...].  The page keeps its own copy so a frame only
+     * has to carry the new tail instead of the whole window. */
+    series: {},
+    /* 曲线点数 from Python; 0 means "keep everything retained". */
+    limit: 5000,
+    /* 展示帧数: how many points a curve draws per frame (default 300).
+     * Kept apart from ``limit`` (retention) so a long session stays smooth
+     * without throwing the history away. */
+    visible: 0,
+    /* channel -> array handed to ECharts; reused instead of re-sliced. */
+    drawn: {},
+    /* Channel versions invalidate drawing slices even when history is full. */
+    revisions: {},
+    drawnRevision: {},
     dirty: false,
     bridge: null,
     nextId: 1
@@ -40,6 +54,8 @@
   var nodes = {};           // widget id -> DOM node
   var canvas = null;
   var toastTimer = null;
+  var activeBatch = null;
+  var layoutTimer = null;
 
   // ------------------------------------------------------------------ helpers
   function el(tag, cls, text) {
@@ -106,6 +122,7 @@
       filterMode: "none",
       showDetail: false,
       brushSelect: false,
+      showDataShadow: false,
       borderColor: "transparent",
       backgroundColor: "transparent",
       fillerColor: ZOOM_FILL,
@@ -159,24 +176,69 @@
     };
   }
 
-  function lineOption(widget, points) {
-    var axis = axisStyle();
+  var VISIBLE_POINTS = 300;
+
+  function visibleLimit() {
+    return state.visible > 0 ? state.visible : VISIBLE_POINTS;
+  }
+
+  function drawnBuffer(channel, rows) {
+    var revision = state.revisions[channel] || 0;
+    if (!state.drawn[channel] || state.drawnRevision[channel] !== revision) {
+      state.drawn[channel] = rows.slice(-visibleLimit());
+      state.drawnRevision[channel] = revision;
+    }
+    return state.drawn[channel];
+  }
+
+  function lineSeries(widget, points) {
     var color = cardColor(widget.kind);
-    var zoom = zoomState(widget);
     var series = [];
     var channels = widget.channels && widget.channels.length ? widget.channels : [widget.channel];
     for (var index = 0; index < channels.length; index += 1) {
-      var data = points[channels[index]] || [];
-      series.push({
-        name: channels[index] || "-",
-        type: "line",
-        showSymbol: false,
-        smooth: false,
-        animation: false,
-        lineStyle: { width: 1.4, color: index === 0 ? color : null },
-        data: data
-      });
+      var name = channels[index];
+      var rows = drawnBuffer(name, points[name] || []);
+      var entry = {};
+      entry.id = name;
+      entry.name = name || "-";
+      entry.type = "line";
+      entry.showSymbol = false;
+      entry.smooth = false;
+      entry.animation = false;
+      /* ``large`` batches thousands of segments into one path; kept on even with
+       * the 600-point window because a filled/zoomed axis can still push many
+       * segments through the renderer. */
+      entry.large = true;
+      entry.largeThreshold = 200;
+      /* LTTB down-sampling for the *drawing* only.  The user can raise 展示帧数
+       * to 5000, and at that size plain rendering cost 14.2 ms per card per
+       * frame (measured), which froze the whole dashboard when a couple of
+       * curves were on screen.  With ``sampling: 'lttb'`` the same 5000 points
+       * cost 6.7 ms and the curve keeps its shape, because the points that are
+       * dropped are the ones that carry no visual information.  The data itself
+       * is untouched - every sample is still in ``data``. */
+      entry.sampling = "lttb";
+      /* Progressive rendering splits the drawing across several animation
+       * frames instead of doing all of it inside the current one.  For a 5000
+       * point curve that turns one long block into a few short ones, so the
+       * window stays responsive even when 展示帧数 is raised.
+       *
+       * NOTE: an adaptive chunk size (``visible / 4``) was measured here and
+       * made no reproducible difference - the offscreen numbers swung between
+       * 13 ms and 84 ms for the same configuration - so the values stay fixed
+       * and R-307 keeps asserting them (R-320). */
+      entry.progressive = 800;
+      entry.progressiveThreshold = 1500;
+      entry.lineStyle = { width: 1.4, color: index === 0 ? color : null };
+      entry.data = rows;
+      series.push(entry);
     }
+    return series;
+  }
+
+  function lineOption(widget, points) {
+    var axis = axisStyle();
+    var zoom = zoomState(widget);
     return {
       animation: false,
       backgroundColor: "transparent",
@@ -216,7 +278,7 @@
         splitLine: { lineStyle: { color: theme().lineSoft || "rgba(18,26,43,0.08)" } }
       },
       dataZoom: [zoomSlider("x", zoom.x), zoomSlider("y", zoom.y)],
-      series: series
+      series: lineSeries(widget, points)
     };
   }
 
@@ -363,6 +425,84 @@
     node.style.height = widget.h + "px";
   }
 
+  /* Size the inner surface to the furthest card so ``#canvas`` can scroll it.
+   *
+   * ``#canvas`` is the scroll viewport (fixed to the page) and ``#surface`` is
+   * the content box inside it.  Absolutely positioned cards do not contribute
+   * to a scroll range, and enlarging the *viewport* just clips against the
+   * body - both measured, see the CSS note (R-313). */
+  var EXTENT_PAD = 48;
+
+  function updateExtent() {
+    if (!canvas) { return; }
+    var surface = canvas.querySelector("#surface");
+    if (!surface) { return; }
+    var maxX = 0;
+    var maxY = 0;
+    state.widgets.forEach(function (widget) {
+      maxX = Math.max(maxX, widget.x + widget.w);
+      maxY = Math.max(maxY, widget.y + widget.h);
+    });
+    surface.style.width = Math.max(canvas.clientWidth, maxX + EXTENT_PAD) + "px";
+    surface.style.height = Math.max(canvas.clientHeight, maxY + EXTENT_PAD) + "px";
+  }
+
+  /* Where a newly added card should land: the middle of what the user sees.
+   *
+   * The old behaviour tiled cards by index from the origin, so the tenth card
+   * appeared several screens further down and looked like it "flew away" (the
+   * user's words).  The visible centre is ``scrollLeft/scrollTop`` plus half the
+   * viewport, offset by half the card so it is centred rather than cornered. */
+  function centerSpot(width, height) {
+    var viewWidth = canvas ? canvas.clientWidth : window.innerWidth;
+    var viewHeight = canvas ? canvas.clientHeight : window.innerHeight;
+    var left = canvas ? canvas.scrollLeft : 0;
+    var top = canvas ? canvas.scrollTop : 0;
+    var x = snap(left + Math.max(0, (viewWidth - width) / 2));
+    var y = snap(top + Math.max(0, (viewHeight - height) / 2));
+    return { x: Math.max(0, x), y: Math.max(0, y) };
+  }
+
+  function scheduleLayout() {
+    if (layoutTimer !== null) { clearTimeout(layoutTimer); }
+    layoutTimer = setTimeout(function () {
+      layoutTimer = null;
+      if (!canvas || canvas.clientWidth <= 0 || canvas.clientHeight <= 0) { return; }
+      var placed = false;
+      state.widgets.forEach(function (widget) {
+        if (widget.autoPlaced) {
+          var spot = centerSpot(widget.w, widget.h);
+          widget.x = spot.x;
+          widget.y = spot.y;
+          widget.autoPlaced = false;
+          place(nodes[widget.id], widget);
+          placed = true;
+        }
+      });
+      updateExtent();
+      resizeAll();
+      state.widgets.forEach(function (widget) {
+        if (widget.needsPaint && inViewport(widget)) {
+          try {
+            paint(widget, state.values, state.series, null);
+            widget.needsPaint = false;
+          } catch (error) {
+            console.warn("dashboard layout paint failed:", error);
+          }
+        }
+      });
+      if (placed) { persist(); }
+    }, 40);
+  }
+
+  function inViewport(widget) {
+    if (!canvas) { return true; }
+    return widget.x + widget.w >= canvas.scrollLeft &&
+      widget.y + widget.h >= canvas.scrollTop &&
+      widget.x < canvas.scrollLeft + canvas.clientWidth &&
+      widget.y < canvas.scrollTop + canvas.clientHeight;
+  }
+
   /* Parts of a card that must keep their own meaning instead of starting a drag. */
   var NO_DRAG = ".del, .resize";
 
@@ -404,6 +544,7 @@
   }
 
   function beginDrag(event, card, widget, resizing) {
+    widget.autoPlaced = false;
     var startX = event.clientX;
     var startY = event.clientY;
     var origin = { x: widget.x, y: widget.y, w: widget.w, h: widget.h };
@@ -429,7 +570,8 @@
         widget.y = Math.max(0, snap(origin.y + dy));
       }
       place(card, widget);
-      resizeChart(widget);
+      if (resizing) { resizeChart(widget); }
+      scheduleLayout();
     }
 
     function up() {
@@ -447,7 +589,11 @@
 
   function resizeChart(widget) {
     var chart = charts[widget.id];
-    if (chart) { chart.resize(); }
+    var host = nodes[widget.id] && nodes[widget.id].querySelector(".plot");
+    if (chart && host && host.clientWidth > 0 && host.clientHeight > 0 &&
+        (chart.getWidth() !== host.clientWidth || chart.getHeight() !== host.clientHeight)) {
+      chart.resize();
+    }
   }
 
   function select(id) {
@@ -472,8 +618,13 @@
       charts[id].dispose();
       delete charts[id];
     }
+    if (activeBatch) {
+      delete activeBatch.waiting[id];
+      finishBatch();
+    }
     if (state.selected === id) { state.selected = null; }
     renderEmpty();
+    scheduleLayout();
     persist();
   }
 
@@ -493,32 +644,95 @@
     if (!host || typeof echarts === "undefined") { return null; }
     var chart = echarts.init(host, null, { renderer: "canvas" });
     charts[widget.id] = chart;
+    chart.omniRendered = 0;
+    chart.omniFinished = 0;
+    chart.on("rendered", function () {
+      chart.omniRendered += 1;
+      var batch = activeBatch;
+      if (!batch || !batch.waiting[widget.id]) { return; }
+      if (chart.omniFrame) { cancelAnimationFrame(chart.omniFrame); }
+      chart.omniFrame = requestAnimationFrame(function () {
+        chart.omniFrame = null;
+        if (activeBatch === batch) {
+          delete batch.waiting[widget.id];
+          finishBatch();
+        }
+      });
+    });
+    chart.on("finished", function () {
+      chart.omniFinished += 1;
+      if (activeBatch && activeBatch.waiting[widget.id]) {
+        delete activeBatch.waiting[widget.id];
+        finishBatch();
+      }
+    });
     /* The user's zoom choice has to be captured as it happens: reading it back
      * from the option on the next frame is too late, because ``lineOption()``
      * writes ``start``/``end`` again (R-170). */
     bindZoom(chart, widget);
+    if (widget.kind === "line") { applyLineStructure(chart, widget); }
+    else { applyGaugeStructure(chart, widget); }
     return chart;
   }
 
-  function paint(widget, values, history) {
+  /* Axes, tooltip and the two zoom sliders are structural: they only have to be
+   * sent when a card first appears, when the theme changes, or when the user
+   * drags a slider - *not* on every data frame.  This split is what took the
+   * live frame from ~21-24 ms per curve to a plain data update. */
+  function applyLineStructure(chart, widget) {
+    if (!chart) { return; }
+    chart.setOption(lineOption(widget, state.series), {
+      notMerge: false,
+      replaceMerge: ["series"],
+      lazyUpdate: false
+    });
+  }
+
+  /* A gauge's structure (angles, pointer, colours, detail format) is built
+   * once; ``paint()`` afterwards only moves the needle. */
+  function applyGaugeStructure(chart, widget) {
+    if (!chart) { return; }
+    chart.setOption(gaugeOption(widget), { notMerge: true });
+  }
+
+  function paint(widget, values, history, fresh) {
     var node = nodes[widget.id];
     if (!node) { return; }
     var current = values[widget.channel];
     if (widget.kind === "line") {
       var chart = ensureChart(widget);
       if (!chart) { return; }
-      /* Merge, never replace: a full replace on every frame tears down the
-       * tooltip's hover state, so the crosshair readout would flicker away. */
-      chart.setOption(lineOption(widget, history));
-      return;
+      /* Skip a card whose channels did not change in this batch.  A 5000-point
+       * ``setOption`` costs ~24 ms; repainting an unchanged curve 30 times a
+       * second is what made the dashboard feel like it stuttered while the log
+       * kept up (user, 2026-11-19).  A full resync (``fresh`` empty) must still
+       * repaint everything, because that is how a layout change lands. */
+      var touched = false;
+      var channels = (widget.channels && widget.channels.length)
+        ? widget.channels : [widget.channel];
+      if (fresh) {
+        for (var index = 0; index < channels.length; index += 1) {
+          if (fresh[channels[index]]) { touched = true; break; }
+        }
+      } else {
+        touched = true;
+      }
+      if (!touched) { return; }
+      var series = channels.map(function (name) {
+        return {id: name, data: drawnBuffer(name, history[name] || [])};
+      });
+      chart.setOption({ series: series }, { lazyUpdate: true });
+      return chart;
     }
     if (widget.kind === "gauge") {
       var dial = ensureChart(widget);
       if (!dial) { return; }
-      var option = gaugeOption(widget);
-      option.series[0].data[0].value = Number(current || 0);
-      dial.setOption(option);
-      return;
+      dial.setOption({
+        series: [{
+          data: [{ value: Number(current || 0) }]
+        }]
+      }, { lazyUpdate: true });
+      return dial;
     }
     if (widget.kind === "value") {
       var number = node.querySelector('[data-role="number"]');
@@ -566,6 +780,13 @@
     return number.toFixed(clamp(places, 0, 8));
   }
 
+  function finishBatch() {
+    if (!activeBatch || activeBatch.submitting || Object.keys(activeBatch.waiting).length) { return; }
+    var batch = activeBatch;
+    activeBatch = null;
+    send("acked", { epoch: batch.epoch, cost: Math.round(performance.now() - batch.started) });
+  }
+
   // ------------------------------------------------------------------- public
   var api = {
     /* Replace the whole layout (initial load and undo). */
@@ -596,17 +817,107 @@
       return state.widgets.length;
     },
 
-    /* One frame of data: {channel: value} plus the line history. */
+    /* One frame of data: {channel: value} plus the line history.
+     *
+     * ``append`` means the rows are the *new tail* since the previous batch, so
+     * the page extends its own copy instead of replacing it.  Dropping the full
+     * window on every frame was the reported lag: 30 frames a second of
+     * multi-megabyte JSON could not be consumed, so the queues grew and the
+     * picture drifted further and further behind the live data.
+     *
+     * ``epoch`` is echoed back to Python once this batch has been applied, which
+     * is what lets Python skip a frame while the renderer is still busy. */
     setValues: function (payload) {
       var data = typeof payload === "string" ? JSON.parse(payload) : payload;
       var values = (data && data.values) || {};
       var history = (data && data.history) || {};
+      var append = !!(data && data.append);
+      var previousValues = state.values;
       state.values = values;
-      var changed = 0;
-      state.widgets.forEach(function (widget) {
-        paint(widget, values, history);
-        changed += 1;
+      var series = append ? state.series : (state.series = {});
+      if (!append) {
+        /* A full resync replaces the history, so the reusable draw buffers must
+         * start over from the new rows. */
+        state.drawn = {};
+        state.drawnRevision = {};
+        state.revisions = {};
+      }
+      /* Which channels actually gained samples in this batch?  A curve card
+       * whose channels did not change does not need ``setOption`` at all -
+       * measured at 24 ms per call for 5000x2 points, two cards at 30 fps
+       * saturated the renderer and that was the reported stutter. */
+      var fresh = {};
+      Object.keys(history).forEach(function (channel) {
+        var rows = history[channel] || [];
+        state.revisions[channel] = (state.revisions[channel] || 0) + 1;
+        if (rows.length) { fresh[channel] = true; }
+        if (!append) {
+          series[channel] = rows.slice(-state.limit);
+          return;
+        }
+        var target = series[channel];
+        if (!target) { series[channel] = rows.slice(-state.limit); return; }
+        for (var index = 0; index < rows.length; index += 1) {
+          target.push(rows[index]);
+        }
+        /* Bound the page history to the same retention limit as Python. */
+        var limit = state.limit;
+        if (limit > 0 && target.length > limit) {
+          var dropped = target.length - limit;
+          target.splice(0, dropped);
+        }
       });
+      var start = Number(data && data.start) || 0;
+      if (start > 0) {
+        Object.keys(series).forEach(function (channel) {
+          var rows = series[channel];
+          var count = 0;
+          while (count < rows.length && rows[count][0] < start) { count += 1; }
+          if (count) {
+            rows.splice(0, count);
+            state.revisions[channel] = (state.revisions[channel] || 0) + 1;
+            fresh[channel] = true;
+          }
+        });
+      }
+      var started = (typeof performance !== "undefined") ? performance.now() : 0;
+      var changed = 0;
+      var epoch = Number(data && data.epoch) || 0;
+      activeBatch = epoch ? {epoch: epoch, started: started, waiting: {}, submitting: true} : null;
+      try {
+        state.widgets.forEach(function (widget) {
+          if (append && widget.kind !== "line" &&
+              previousValues[widget.channel] === values[widget.channel]) { return; }
+          if (!inViewport(widget)) { widget.needsPaint = true; return; }
+          try {
+            if (activeBatch && (widget.kind === "line" || widget.kind === "gauge")) {
+              activeBatch.waiting[widget.id] = true;
+            }
+            var chart = paint(widget, values, series, append ? fresh : null);
+            widget.needsPaint = false;
+            if (!chart && activeBatch) { delete activeBatch.waiting[widget.id]; }
+          } catch (error) {
+            if (activeBatch) { delete activeBatch.waiting[widget.id]; }
+            /* One broken card must not stop the others.  A chart with a
+             * zero-sized container (the page was hidden while a layout change
+             * landed) used to throw here, and the ack below was never sent -
+             * which froze *every* card, not just this one (L-307). */
+            if (typeof console !== "undefined" && console.warn) {
+              console.warn("dashboard paint failed:", error);
+            }
+          }
+          changed += 1;
+        });
+      } finally {
+        /* The ack carries how long the paint took, so Python can slow the timer
+         * down instead of queueing work the renderer cannot absorb.  It is sent
+         * from ``finally``: an exception in one card must never strand Python
+         * waiting for an acknowledgement that will not come. */
+        if (activeBatch) {
+          activeBatch.submitting = false;
+          finishBatch();
+        }
+      }
       return changed;
     },
 
@@ -617,8 +928,33 @@
       return true;
     },
 
+    /* 曲线点数 (R-301): cap what the page keeps per channel.  Python enforces
+     * the same number when it builds a full resync, so both sides agree. */
+    setPoints: function (payload) {
+      var data = typeof payload === "string" ? JSON.parse(payload) : payload;
+      var limit = Number((data && data.limit) || 0) || 0;
+      state.limit = limit > 0 ? clamp(limit, 100, 5000) : 5000;
+      /* 展示帧数 arrives in the same call: retention and the drawn window are
+       * different knobs and both are persisted on the Python side. */
+      var visible = Number((data && data.visible) || 0) || 0;
+      state.visible = visible > 0 ? visible : 0;
+      state.drawn = {};
+      state.drawnRevision = {};
+      if (state.limit > 0) {
+        Object.keys(state.series).forEach(function (channel) {
+          var rows = state.series[channel];
+          if (rows && rows.length > state.limit) {
+            rows.splice(0, rows.length - state.limit);
+          }
+        });
+      }
+      return JSON.stringify({limit: state.limit, visible: state.visible});
+    },
+
     addWidget: function (payload) {
       var raw = typeof payload === "string" ? JSON.parse(payload) : payload;
+      var auto = raw.x === undefined || raw.x === null || raw.y === undefined || raw.y === null;
+      var spot = auto ? centerSpot(Number(raw.w) || 360, Number(raw.h) || 220) : { x: 0, y: 0 };
       var widget = {
         /* Python owns identity: it needs the same id to persist the layout.
          * Only invent one when it sent none. */
@@ -633,16 +969,18 @@
         decimals: raw.decimals,
         onText: raw.onText || "ON",
         offText: raw.offText || "OFF",
-        x: snap(raw.x === undefined ? 32 : Number(raw.x)),
-        y: snap(raw.y === undefined ? 32 : Number(raw.y)),
+        x: auto ? spot.x : snap(raw.x),
+        y: auto ? spot.y : snap(raw.y),
         w: Math.max(MIN_W, Number(raw.w) || 360),
         h: Math.max(MIN_H, Number(raw.h) || 220)
       };
       state.nextId += 1;
       state.widgets.push(widget);
+      widget.autoPlaced = auto;
       mount(widget);
       renderEmpty();
-      persist();
+      scheduleLayout();
+      if (!auto) { persist(); }
       return widget.id;
     },
 
@@ -651,6 +989,7 @@
       var data = typeof payload === "string" ? JSON.parse(payload) : payload;
       var widget = state.widgets.filter(function (item) { return item.id === data.id; })[0];
       if (!widget) { return false; }
+      if (data.x !== undefined || data.y !== undefined) { widget.autoPlaced = false; }
       Object.keys(data).forEach(function (key) {
         if (key !== "id") { widget[key] = data[key]; }
       });
@@ -660,7 +999,12 @@
         var title = node.querySelector(".title");
         if (title) { title.textContent = widget.title || widget.channel || widget.id; }
       }
-      paint(widget, state.values, {});
+      scheduleLayout();
+      if (charts[widget.id]) {
+        if (widget.kind === "line") { applyLineStructure(charts[widget.id], widget); }
+        if (widget.kind === "gauge") { applyGaugeStructure(charts[widget.id], widget); }
+      }
+      paint(widget, state.values, state.series);
       persist();
       return true;
     },
@@ -716,11 +1060,36 @@
 
     ready: function () {
       return typeof echarts === "object" && typeof echarts.init === "function";
+    },
+
+    diagnostics: function () {
+      return JSON.stringify({
+        epoch: activeBatch ? activeBatch.epoch : 0,
+        waiting: activeBatch ? Object.keys(activeBatch.waiting) : [],
+        charts: Object.keys(charts).map(function (id) {
+          return {id: id, rendered: charts[id].omniRendered, finished: charts[id].omniFinished};
+        }),
+        retained: Object.keys(state.series).map(function (name) {
+          var rows = state.series[name];
+          return {channel: name, count: rows.length, last: rows.length ? rows[rows.length - 1] : null};
+        })
+      });
+    },
+
+    /* Re-measure every chart and repaint from the data already here.
+     *
+     * Called by Python when the dashboard tab becomes visible again.  The page
+     * keeps its DOM across a tab switch, but Chromium suspends layout while it
+     * is hidden, so ECharts can still hold the box size from before the switch
+     * and draw a frozen-looking curve into a stale canvas (R-318). */
+    reflow: function () {
+      scheduleLayout();
+      return state.widgets.length;
     }
   };
 
   function rebuild() {
-    var canvasNode = document.getElementById("canvas");
+    var canvasNode = document.getElementById("surface");
     if (!canvasNode) { return; }
     Object.keys(charts).forEach(function (key) {
       try { charts[key].dispose(); } catch (error) { /* already gone */ }
@@ -732,19 +1101,30 @@
     nodes = {};
     state.widgets.forEach(mount);
     renderEmpty();
-    resizeAll();
+    scheduleLayout();
   }
-
   function mount(widget) {
     var card = buildCard(widget);
-    document.getElementById("canvas").appendChild(card);
+    document.getElementById("surface").appendChild(card);
     nodes[widget.id] = card;
-    paint(widget, state.values, {});
+    widget.needsPaint = !inViewport(widget);
+    if (!widget.needsPaint) { paint(widget, state.values, state.series, null); }
   }
 
   function resizeAll() {
-    Object.keys(charts).forEach(function (key) {
-      if (charts[key]) { charts[key].resize(); }
+    state.widgets.forEach(resizeChart);
+  }
+
+  function watchSize() {
+    if (typeof ResizeObserver === "function" && canvas) {
+      try {
+        new ResizeObserver(scheduleLayout).observe(canvas);
+      } catch (error) {
+        /* An old engine without observer support keeps the window listener. */
+      }
+    }
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) { scheduleLayout(); }
     });
   }
 
@@ -775,10 +1155,12 @@
   }
 
   window.omniDashboard = api;
-  window.addEventListener("resize", resizeAll);
+  window.addEventListener("resize", scheduleLayout);
   document.addEventListener("DOMContentLoaded", function () {
     canvas = document.getElementById("canvas");
+    if (canvas) { canvas.addEventListener("scroll", scheduleLayout); }
     connect();
     renderEmpty();
+    watchSize();
   });
 }());

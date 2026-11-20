@@ -37,7 +37,23 @@ html, body {
   position: relative;
   width: 100%;
   height: 100%;
-  overflow: hidden;
+  /* Small screens must still reach every card (R-313): the surface used to be
+   * ``overflow: hidden``, so a board laid out wider/taller than the window was
+   * simply unreachable - the cards existed but could not be seen or dragged.
+   *
+   * ``#canvas`` is the scroll *viewport* and never grows; ``#surface`` inside it
+   * is sized by JavaScript to the furthest card.  Absolutely positioned cards
+   * do not contribute to a scroll range on their own, and growing the viewport
+   * itself would just clip against ``body { overflow: hidden }`` (measured:
+   * clientWidth == scrollWidth). */
+  overflow: auto;
+  border-radius: 4px;
+}
+
+#surface {
+  position: relative;
+  width: 100%;
+  height: 100%;
   /* The 16 px grid is always painted (R-173): it shows the snap step that drags
    * and resizes already use, so there is nothing to "turn on" first. */
   background-image:
@@ -221,6 +237,20 @@ html, body {
 }
 
 /* ------------------------------------------------------------------- overlays */
+/* Scroll gutters: with ``overflow: auto`` a small window gets real scrollbars
+ * (R-313).  Styling them keeps them thin and light instead of the chunky
+ * platform default on a light canvas. */
+#canvas::-webkit-scrollbar { width: 12px; height: 12px; }
+#canvas::-webkit-scrollbar-track { background: transparent; }
+#canvas::-webkit-scrollbar-thumb {
+  background: rgba(18, 26, 43, 0.20);
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+}
+#canvas::-webkit-scrollbar-thumb:hover { background: rgba(18, 26, 43, 0.34); background-clip: content-box; }
+#canvas::-webkit-scrollbar-corner { background: transparent; }
+
 #empty {
   position: absolute;
   inset: 0;

@@ -1762,11 +1762,6 @@ class CommandsPanel(QWidget):
             return
         viewport = self.scroll.viewport()
         top = bar.value()
-        # The pinned slot covers the top of the viewport, so a header is only
-        # *visible* once it has scrolled below that band.  Comparing against
-        # ``top`` alone would pin a header that is still half covered, and the
-        # two copies would fight each other on every scroll step (R-195).
-        covered = sticky.height() if self._sticky_group_id else 0
         current = None
         for group_id, header in self._group_headers.items():
             # A borrowed header now lives in the pinned slot, so its own
@@ -1776,7 +1771,7 @@ class CommandsPanel(QWidget):
                       if group_id == self._sticky_group_id
                       and self._sticky_placeholder is not None else header)
             mapped = widget.mapTo(self.list_host, QPoint(0, 0))
-            if mapped.y() + widget.height() <= top + covered:
+            if mapped.y() < top:
                 current = group_id
             else:
                 break

@@ -39,12 +39,55 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from omnicom.i18n import tr
-from omnicom.ui import theme
-from omnicom.ui.vt100 import ANSI_COLORS, DEFAULT_FG, Screen
-from omnicom.ui.widgets import Combo, GlyphButton
+from .text import TEXT
+
+#: Host objects, injected by :func:`create` (R-322).
+#:
+#: This plugin used to ``from omnicom.ui import theme``,
+#: ``from omnicom.ui.vt100 import Screen`` and ``from omnicom.ui.widgets import
+#: Combo, GlyphButton``.  That pinned an installed plugin to the host's *module
+#: layout*: moving or renaming one of those files broke every plugin already on
+#: a user's disk.  The same objects now arrive through the API facade and are
+#: bound to these module names in :func:`create`, so the widget code below is
+#: unchanged and the ``plugin_selftest`` decoupling gate stays honest.
+theme = None
+Screen = None
+ANSI_COLORS: dict = {}
+DEFAULT_FG = "#D6E2F0"
+Combo = None
+GlyphButton = None
+_api = None
 
 SELECTION_BG = "#1F4E5A"
+
+
+def tr(key: str, **kwargs) -> str:
+    """Translate one of this plugin's own keys through the host API (R-322)."""
+    if _api is not None:
+        return _api.tr(key, **kwargs)
+    entry = TEXT.get(key)
+    if entry is None:
+        return key
+    text = entry[0]
+    if kwargs:
+        try:
+            return text.format(**kwargs)
+        except (KeyError, IndexError):
+            return text
+    return text
+
+
+def _bind(api) -> None:
+    """Bind the host facades to the names the widget code already uses."""
+    global _api, theme, Screen, ANSI_COLORS, DEFAULT_FG, Combo, GlyphButton
+    _api = api
+    theme = api.theme()
+    screen_module = api.terminal_screen()
+    Screen = screen_module.Screen
+    ANSI_COLORS = dict(screen_module.ANSI_COLORS)
+    DEFAULT_FG = screen_module.DEFAULT_FG
+    Combo = api.widget_class("combo")
+    GlyphButton = api.widget_class("icon")
 
 
 class TerminalView(QWidget):
@@ -1341,7 +1384,7 @@ class TerminalPlugin(QWidget):
         if not data:
             return
         if not self._api.send(data):
-            self._api.notify(tr("console.needport"), "warn")
+            self._api.notify(tr("term.needport"), "warn")
 
     # -- pass-through used by the host -----------------------------------
     def absorb(self, data: bytes) -> None:
@@ -1395,6 +1438,8 @@ class TerminalPlugin(QWidget):
 
 def create(api):
     """Plugin entry point - see docs/PLUGINS.md."""
+    _bind(api)
+    api.register_text(TEXT)
     widget = TerminalPlugin(api)
     api.provide("terminal", lambda: widget.service)
     api.on_language(lambda _lang: widget.retranslate())

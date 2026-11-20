@@ -12,7 +12,7 @@
   },
   "entry": "plugin.py",
   "icon": "icon.png",
-  "api": 2,
+  "api": 3,
   "services": {
     "terminal": "VT100 屏幕服务（CLI screen/keys 用）"
   }

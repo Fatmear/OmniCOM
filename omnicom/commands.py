@@ -396,6 +396,38 @@ class CommandStore(QObject):
         self._order_dirty = False
         self._removed.clear()
 
+    def reload_if_changed(self) -> bool:
+        """Adopt a write made by another window; ``True`` when something changed.
+
+        Two windows must show the **same** library (R-308): the store already
+        merged changes on save, but a running window never noticed a change
+        another window made until it saved, so one window showed stale commands
+        for as long as the other kept editing.  A cheap ``(mtime, size)`` check
+        decides, and only an actual difference causes a re-read.
+
+        In-flight local state is respected: an unsaved re-order (``_order_dirty``
+        / tombstones) is merged rather than overwritten, exactly like ``save()``
+        does, so this cannot undo what the user is doing in *this* window.
+        """
+        signature = _signature(self.path)
+        if signature is None or signature == self._seen:
+            return False
+        if self._order_dirty or self._removed:
+            # Local intent is newer than the file: merge the neighbour in
+            # instead of dropping what this window just did.
+            self._merge_with_disk()
+            self._seen = _signature(self.path)
+            self.changed.emit()
+            return True
+        items, groups, error = _read_library(self.path)
+        if error or items is None:
+            return False
+        self.items = items
+        self.groups = groups
+        self._seen = signature
+        self.changed.emit()
+        return True
+
     def _merge_with_disk(self) -> None:
         """Fold changes another instance made into our snapshot before writing."""
         disk_items, disk_groups, error = _read_library(self.path)

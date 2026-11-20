@@ -19,6 +19,10 @@ from collections.abc import Callable
 LANGS = ("zh", "en")
 LANG_NAMES = {"zh": "中文", "en": "English"}
 
+#: ``plugin id -> {key: (zh, en)}``.  A plugin ships its own copy instead of
+#: pushing it into ``_TABLE``; see :func:`register_plugin_table` (R-322).
+_PLUGIN_TABLES: dict[str, dict[str, tuple[str, str]]] = {}
+
 _TABLE: dict[str, tuple[str, str]] = {
     "store.title": ("插件商店", "Plugin Store"),
     "pref.plugin_sources": ("插件仓库（每行一个地址）", "Plugin catalogs (one URL per line)"),
@@ -174,6 +178,7 @@ _TABLE: dict[str, tuple[str, str]] = {
     "log.saved": ("已保存 {n} 行到 {name}", "Saved {n} lines to {name}"),
     "log.savefail": ("保存失败：{err}", "Save failed: {err}"),
     "log.savedialog": ("保存当前视图", "Save the current view"),
+    "log.filter.all": ("所有文件 (*)", "All files (*)"),
     "log.filter.text": ("日志文件 (*.log);;文本文件 (*.txt);;所有文件 (*)",
                         "Log files (*.log);;Text files (*.txt);;All files (*)"),
     # --------------------------------------------------------------- console
@@ -195,7 +200,6 @@ _TABLE: dict[str, tuple[str, str]] = {
         "These pages are plugins now. Enable terminal / transfer in the plugin list, "
         "then reopen the window."),
     "plugin.disabled.transfer": ("文件传输插件未启用", "The file-transfer plugin is disabled"),
-    "xfer.busy": ("上一次传输还没结束", "A transfer is still running"),
     # ------------------------------------------------------------ status bar
     "status.ready": ("就绪", "Ready"),
     "status.connected": ("已连接 {port} · {baud} bps", "Connected {port} · {baud} bps"),
@@ -205,6 +209,7 @@ _TABLE: dict[str, tuple[str, str]] = {
     "status.chip.retry": ("正在重新连接…", "Reconnecting…"),
     "status.chip.error": ("连接失败", "Connection failed"),
     "status.chip.idle": ("未连接", "Not connected"),
+    "status.chip.logmode": ("查看日志", "Viewing log"),
     "status.datadir": ("记录目录 {path}", "Records {path}"),
     # ---------------------------------------------------------------- search
     "search.title": ("关键字搜索", "Search"),
@@ -342,7 +347,28 @@ _TABLE: dict[str, tuple[str, str]] = {
     "plugin.folder": ("插件目录", "Plugin folder"),
     # ------------------------------------------------------------ preferences
     "menu.file": ("文件", "File"),
-    "menu.help": ("帮助", "Help"),
+    "menu.openlog": ("打开日志…", "Open log…"),
+    "menu.openlog.failed": ("打不开日志：{err}", "Could not open the log: {err}"),
+    "menu.openlog.empty": ("这个日志里没有 [OmniCOM-chart] 数据",
+                          "This log contains no [OmniCOM-chart] data"),
+    "menu.openlog.plain": ("已打开 {name}（没有 [OmniCOM-chart] 数据，仅查看日志）",
+                          "Opened {name}; it has no [OmniCOM-chart] data, so it is view-only"),
+    "menu.openlog.loaded": ("已打开 {name}（{enc}，{n} 行）",
+                           "Opened {name} ({enc}, {n} lines)"),
+    "menu.openlog.locked": ("日志模式：串口已禁用，关闭日志后才能再打开串口",
+                            "Log mode: the serial port is disabled until the log is closed"),
+    "menu.openlog.lockedshort": ("日志模式 · 串口已禁用",
+                                 "Log mode · serial disabled"),
+    "menu.openlog.lockedtab": ("日志模式下不可用，关闭日志后再试",
+                               "Unavailable while reading a log; close it first"),
+    "menu.closelog": ("关闭日志", "Close log"),
+    "menu.closelog.done": ("已关闭日志，串口恢复可用",
+                           "Log closed; the serial port is available again"),
+    "menu.openlog.done": ("已重放 {lines} 行、{seconds:.1f} 秒的看板数据",
+                          "Replayed {lines} lines ({seconds:.1f} s) of dashboard data"),
+    "menu.openlog.noplugin": ("数据看板插件未启用，无法重放",
+                             "The dashboard plugin is disabled, so nothing can replay it"),
+    # ---- hex viewer plugin (R-303)
     "menu.settings": ("设置", "Settings"),
     "menu.preferences": ("首选项…", "Preferences…"),
     # -- software update (R-107)
@@ -542,42 +568,6 @@ _TABLE: dict[str, tuple[str, str]] = {
                       "{name} · {percent}%  ({sent}/{total})"),
     "send.filedone": ("文件发送完成：{name}（{size}）",
                       "File sent: {name} ({size})"),
-    # ---- terminal page
-    "term.title": ("终端模式", "Terminal"),
-    "term.menu.copy": ("复制", "Copy"),
-    "term.menu.paste": ("粘贴到串口", "Paste to port"),
-    "term.menu.selectall": ("全选", "Select all"),
-    "term.menu.clear": ("清屏", "Clear screen"),
-    "term.enter": ("回车发送", "Enter sends"),
-    "term.size": ("终端尺寸", "Terminal size"),
-    "term.size.auto": ("自动尺寸", "Automatic size"),
-    "term.clear": ("清屏", "Clear screen"),
-    "term.reset": ("清屏并重置终端状态", "Clear screen and reset terminal state"),
-    "term.fullscreen": ("终端全屏", "Full-screen terminal"),
-    "term.exitfull": ("退出全屏", "Exit full screen"),
-    "term.hint": (
-        "点击终端区域后直接用键盘输入：Enter 发送回车，Ctrl+C 发送 0x03，方向键发送 ANSI 序列。"
-        "复制用 Ctrl+Shift+C。",
-        "Click the terminal and type: Enter sends CR, Ctrl+C sends 0x03, arrow keys send ANSI "
-        "sequences. Copy with Ctrl+Shift+C."),
-    # ---- transfer page
-    "xfer.protocol": ("协议", "Protocol"),
-    "xfer.direction": ("方向", "Direction"),
-    "xfer.send": ("发送到设备", "Send to device"),
-    "xfer.recv": ("从设备接收", "Receive from device"),
-    "xfer.start": ("开始传输", "Start transfer"),
-    "xfer.abort": ("中止", "Abort"),
-    "xfer.ready": ("就绪", "Ready"),
-    "xfer.waiting": ("等待设备发起传输…", "Waiting for the device to start…"),
-    "xfer.done": ("完成", "Done"),
-    "xfer.failed": ("失败", "Failed"),
-    "xfer.log": ("传输日志", "Transfer log"),
-    "xfer.clearlog": ("清空", "Clear"),
-    "xfer.pickfile": ("请先选择要发送的文件", "Choose a file to send first"),
-    "xfer.savedir": ("接收到的文件保存到 {path}", "Received files are saved to {path}"),
-    "xfer.saved": ("已保存：{path}", "Saved: {path}"),
-    "xfer.dropzone": ("点击选择文件，或把文件拖到这里",
-                      "Click to choose a file, or drop it here"),
 }
 
 
@@ -593,8 +583,18 @@ _BINDINGS: list[tuple[Callable[[str], None], str, dict]] = []
 
 
 def tr(key: str, **kwargs) -> str:
-    """Translate ``key``; formatting placeholders are ``{name}`` style."""
+    """Translate ``key``; formatting placeholders are ``{name}`` style.
+
+    The host table is consulted first, then any table a plugin registered
+    through ``api.register_text()`` (R-322).  An unknown key falls back to the
+    key itself, so a missing entry is loud but never crashes.
+    """
     entry = _TABLE.get(key)
+    if entry is None:
+        for table in _PLUGIN_TABLES.values():
+            entry = table.get(key)
+            if entry is not None:
+                break
     if entry is None:
         text = key
     elif _state["lang"] == "zh":
@@ -607,6 +607,23 @@ def tr(key: str, **kwargs) -> str:
         except (KeyError, IndexError):
             return text
     return text
+
+
+def register_plugin_table(plugin_id: str, table: dict[str, tuple[str, str]]) -> None:
+    """Register (or replace) a plugin's own ``key -> (zh, en)`` table."""
+    if not plugin_id or not table:
+        return
+    _PLUGIN_TABLES[str(plugin_id)] = dict(table)
+
+
+def unregister_plugin_table(plugin_id: str) -> None:
+    """Drop a plugin's table so a disabled plugin leaves no strings behind."""
+    _PLUGIN_TABLES.pop(str(plugin_id), None)
+
+
+def plugin_text_keys(plugin_id: str) -> list[str]:
+    """Keys owned by one plugin (used by the decoupling self-test)."""
+    return sorted(_PLUGIN_TABLES.get(str(plugin_id), {}))
 
 
 def bind(setter: Callable[[str], None], key: str, **kwargs) -> Callable[[str], None]:

@@ -101,6 +101,56 @@ backups are therefore retained rather than forcibly deleted. Python plugin code
 is reloaded immediately; changes to already-imported native dependencies take
 effect after an application restart, without replacing the application package.
 
+### The plugin API is the only host surface (R-322)
+
+A plugin folder is copied to a user's disk and stays there, so it must not be
+pinned to the host's *file layout*. `import omnicom.ui.widgets` inside a plugin
+means renaming or moving that one file breaks every plugin already installed -
+and nobody notices until the user opens that tab. Everything a plugin needs is
+therefore reached through the `api` object:
+
+| Need | Use | Instead of |
+|---|---|---|
+| Colours and metrics | `api.theme().CARD`, `api.theme().log_px()` | `from omnicom.ui import theme` |
+| Controls | `api.widget_class("button" \| "icon" \| "combo" \| "card" \| "log")` | `from omnicom.ui.widgets import ...` |
+| Popup menu | `api.menu(parent)` | `QMenu()` (also loses the light theme, L-193) |
+| Host folders | `api.paths().received_dir()`, `.data_dir()` | `from omnicom import paths` |
+| VT100 screen model | `api.terminal_screen()` | `from omnicom.ui.vt100 import Screen` |
+| X/Y/ZMODEM worker | `api.transfer_worker()` | `from omnicom.ui.workers import TransferWorker` |
+| Own strings | `api.register_text(TEXT)`, then `api.tr("my.key")` | adding keys to `omnicom/i18n.py` |
+
+`api.theme()` and `api.paths()` are **read-only facades**: assigning a token or
+calling a setter raises, so an installed plugin cannot repaint every window or
+redirect where the application writes captures.
+
+Plugin copy ships inside the plugin. Put the `(zh, en)` pairs in the plugin's own
+module and register them in `create(api)`:
+
+```python
+from .text import TEXT          # this folder's copy, not the host's
+
+
+def tr(key, **kwargs):
+    return _api.tr(key, **kwargs)   # _api is set in create()
+
+
+def create(api):
+    global _api
+    _api = api
+    api.register_text(TEXT)
+    ...
+```
+
+Use a **relative** import (`from .text import TEXT`). Every plugin folder is
+importable for its own helpers, so two plugins that both name a file `text.py`
+would otherwise shadow each other depending on load order.
+
+`python tools/plugin_selftest.py` enforces all of this statically - it parses
+every shipped plugin, fails on any `omnicom.*` import, and checks that the host
+`i18n` table contains no plugin copy. `plugin.json` must declare `"api": 3`;
+a plugin demanding a newer API than the host supports is refused with
+`store.err.api` rather than failing later.
+
 ## Chart Protocol
 
 Send ASCII, terminated by LF or CRLF:

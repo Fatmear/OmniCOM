@@ -640,6 +640,20 @@ class LogView(QPlainTextEdit):
         document.setUndoRedoEnabled(False)
         return document
 
+    def set_plain_text(self, text: str) -> None:
+        """Show an existing log file verbatim (``File > 打开日志``, R-302).
+
+        The file already contains the ``[HH:mm:ss.mmm]收←◇`` prefixes, so nothing
+        is re-composed here: the text goes in as-is.  Inserting it in one block
+        (rather than a line at a time) keeps a 100 MB file's open time in the
+        "read the file" range instead of turning it into a thousand relayouts.
+        """
+        cursor = QTextCursor(self.document())
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertText(text, self._make_format(theme.INK))
+        self._dirty = True
+        self._tail_follow.follow()
+
     def _reset_view_state(self) -> None:
         """Forget everything that belonged to the document being replaced.
 

@@ -1498,10 +1498,14 @@ def main() -> int:
         view = window.console.view
         check("R-091 终端视图有右键菜单",
               isinstance(view, TerminalView) and hasattr(view, "contextMenuEvent"))
+        # The terminal strings moved into the plugin (R-322), so a bare ``tr(key)``
+        # would return the key itself and make this pass vacuously.  Assert the
+        # copy actually resolves - i.e. the plugin registered its own table.
+        menu_keys = ("term.menu.copy", "term.menu.paste",
+                     "term.menu.selectall", "term.menu.clear")
         check("R-091 菜单文案齐全（复制 / 粘贴 / 全选 / 清屏）",
-              all(tr(key) for key in ("term.menu.copy", "term.menu.paste",
-                                      "term.menu.selectall", "term.menu.clear")),
-              tr("term.menu.paste"))
+              all(tr(key) not in ("", key) for key in menu_keys),
+              [tr(key) for key in menu_keys])
 
         sent: list[bytes] = []
 
@@ -7513,6 +7517,161 @@ def main() -> int:
         app.processEvents()
         next_()
 
+    def step_log_mode_serial_lock(next_):
+        """R-304: opening a log disables **only** the serial controls.
+
+        The user clarified the contract on 2026-11-19: reading a file must leave
+        the rest of the window exactly as usable as a not-yet-connected session -
+        commands, search, dashboard, tabs.  What goes dead is the port: the
+        drop-down, the refresh button and the open/close button, and that one
+        button becomes 关闭日志 so there is a way back.
+        """
+        window.resize(1440, 900)
+        window.reset_layout()
+        app.processEvents()
+
+        log_path = os.path.join(os.environ["OMNICOM_DATA_DIR"], "view.capture")
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write("[10:00:00.000]收←◇boot ok\n"
+                         "[10:00:00.500]收←◇[OmniCOM-chart] A=1\n")
+        from omnicom.i18n import tr
+
+        with patch("omnicom.ui.main_window.QFileDialog.getOpenFileName", return_value=(log_path, "")) as picker:
+            window.open_log_for_replay()
+        app.processEvents()
+        check("R-309 打开日志默认显示所有文件", picker.call_args.args[3] == tr("log.filter.all"))
+        check("R-309 加载日志后批量更新与跟随锁均释放", window.log._batching == 0 and window.log._tail_follow._updating == 0)
+
+        check("R-304 日志模式下端口下拉被禁用",
+              not window.port_combo.isEnabled())
+        check("R-304 日志模式下刷新端口被禁用",
+              not window.btn_refresh.isEnabled())
+        check("R-304 打开串口按钮变为「关闭日志」且可点",
+              window.btn_connect.text() == tr("menu.closelog")
+              and window.btn_connect.isEnabled(), window.btn_connect.text())
+        check("R-304 日志模式下其余界面仍可用（终端/传输标签）",
+              window.titlebar.tab_buttons["terminal"].isEnabled()
+              and window.titlebar.tab_buttons["transfer"].isEnabled())
+        check("R-304 日志模式下扩展命令与搜索面板仍可用",
+              window.commands_panel.isEnabled()
+              and window.search_panel.isEnabled())
+        check("R-304 打开日志后自动停在日志页并显示文件内容",
+              window.current_page() == "terminal"
+              and window.log.isVisibleTo(window.stack.currentWidget())
+              and "boot ok" in window.log.toPlainText(),
+              window.current_page())
+
+        # A status event (the close we just asked for) must not repaint the
+        # button back to 打开串口 while the log is still open.
+        window._on_status({"connected": False, "port": ""})
+        app.processEvents()
+        check("R-304 状态刷新不会把按钮改回「打开串口」",
+              window.btn_connect.text() == tr("menu.closelog"),
+              window.btn_connect.text())
+
+        # Other features really work while the log is open.
+        before = len(window.command_store.items)
+        window.command_store.add(["AT+LOGMODE"])
+        app.processEvents()
+        check("R-304 日志模式下仍能新增扩展命令",
+              len(window.command_store.items) == before + 1,
+              f"{before} -> {len(window.command_store.items)}")
+
+        window.close_log_mode()
+        app.processEvents()
+        check("R-304 关闭日志后串口控件恢复",
+              window.log_mode_path() == ""
+              and window.port_combo.isEnabled()
+              and window.btn_refresh.isEnabled(), window.log_mode_path())
+        check("R-304 关闭日志后按钮回到「打开串口」",
+              window.btn_connect.text() == tr("rail.open"),
+              window.btn_connect.text())
+
+        window.log.autoscroll = False
+        window._sync_port_combo("DEMO")
+        with patch.object(window.bridge, "open") as opened:
+            window.toggle_connection()
+            check("R-309 再开串口前先清屏并恢复跟随", opened.call_count == 1 and not window.log.toPlainText() and window.log.autoscroll and window.row_scroll.isChecked())
+        for batch in range(3):
+            window.log.begin_batch()
+            for index in range(100):
+                window.log.append_line(time.time() * 1000, "rx", f"live-{batch}-{index}")
+            window.log.end_batch()
+            app.processEvents()
+        check("R-309 重开串口后新日志持续跟随到底", window.log._at_bottom() and window.log.autoscroll and window.log._tail_follow._updating == 0)
+
+        next_()
+
+    def step_command_sync(next_):
+        """R-308: every command operation reaches the other windows.
+
+        Two windows share ``commands.json``.  ``save()`` already merged on write,
+        but a window only noticed another window's change when it saved itself,
+        so a second window showed a stale library.  This drives two stores and
+        checks add / update / delete / group / reorder all propagate.
+        """
+        scratch = os.path.join(os.environ["OMNICOM_DATA_DIR"], "sync",
+                               "commands.json")
+        os.makedirs(os.path.dirname(scratch), exist_ok=True)
+        with contextlib.suppress(OSError):
+            os.unlink(scratch)
+
+        from omnicom.commands import CommandStore
+
+        first = CommandStore(scratch)
+        second = CommandStore(scratch)
+        first.clear()
+        second.clear()
+        app.processEvents()
+
+        first.add(["AT+SYNC_A"])
+        app.processEvents()
+        check("R-308 另一个窗口新增命令会同步过来",
+              second.reload_if_changed() is True
+              and [item["text"] for item in second.items] == ["AT+SYNC_A"],
+              [item["text"] for item in second.items])
+        check("R-308 文件没变化时不重复刷新",
+              second.reload_if_changed() is False)
+
+        item_id = second.items[0]["id"]
+        first.update(item_id, {"text": "AT+SYNC_B"})
+        app.processEvents()
+        check("R-308 修改命令会同步",
+              second.reload_if_changed() is True
+              and second.items[0]["text"] == "AT+SYNC_B",
+              second.items[0]["text"] if second.items else None)
+
+        first.add_group("同步分组")
+        app.processEvents()
+        check("R-308 新增分组会同步",
+              second.reload_if_changed() is True
+              and [group["name"] for group in second.groups] == ["同步分组"],
+              [group["name"] for group in second.groups])
+
+        first.add(["B1", "B2"])
+        app.processEvents()
+        second.reload_if_changed()
+        ids = [entry["id"] for entry in first.items]
+        if len(ids) >= 2:
+            first.reorder(ids, "", 0)
+            app.processEvents()
+            second.reload_if_changed()
+            check("R-308 排序会同步",
+                  [entry["text"] for entry in second.items]
+                  == [entry["text"] for entry in first.items],
+                  [entry["text"] for entry in second.items])
+
+        first.remove(item_id)
+        app.processEvents()
+        check("R-308 删除会同步且不会被对方复活",
+              second.reload_if_changed() is True
+              and all(entry["id"] != item_id for entry in second.items),
+              [entry["text"] for entry in second.items])
+
+        first.clear()
+        second.clear()
+        next_()
+
     def step_terminal_fixed_grid(next_):
         """R-300: the character grid must not follow the window's pixel width.
 
@@ -8084,7 +8243,8 @@ def main() -> int:
               and page.btn_reset.glyph != page.btn_full.glyph,
               f"{page.btn_reset.glyph} / {page.btn_full.glyph}")
         check("R-188 全屏按钮的提示说的是全屏，不是重置",
-              page.btn_full.toolTip() == tr("term.fullscreen"),
+              tr("term.fullscreen") not in ("", "term.fullscreen")
+              and page.btn_full.toolTip() == tr("term.fullscreen"),
               page.btn_full.toolTip())
 
         window.switch_page("console")
@@ -8231,6 +8391,40 @@ def main() -> int:
         app.processEvents()
         check("R-190 重新展开恢复用户拖出来的比例",
               split.sizes() == after, f"{split.sizes()} vs {after}")
+
+        # ---- R-319: both folded -> two header strips, in either order.
+        # The window used to read the panels' ``_collapsed`` flags, which can
+        # disagree with the body's real visibility (a search panel restored
+        # from full screen, or a fold done while the other card was open).  The
+        # "both expanded" branch then put 扩展命令 back at a full half even
+        # though both headers were folded.
+        def fold(panel, collapsed):
+            panel._collapsed = collapsed
+            panel.body.setVisible(not collapsed)
+
+        bands = []
+        for order in (("commands", "search"), ("search", "commands")):
+            fold(window.commands_panel, False)
+            fold(window.search_panel, False)
+            window.relayout_sidebar()
+            app.processEvents()
+            for target in order:
+                (window.commands_panel if target == "commands"
+                 else window.search_panel).toggle_collapsed()
+                app.processEvents()
+            cmd_h = window.commands_panel.header.sizeHint().height() + 6
+            search_h = window.search_panel.header.sizeHint().height() + 6
+            bands.append((order, list(window.sidebar_split.sizes()),
+                          window.cmd_block.height(),
+                          window.search_block.height(), cmd_h, search_h))
+        check("R-319 两个都折叠时命令栏只剩标题条（两种顺序都一样）",
+              all(abs(band[2] - band[4]) <= 6 and abs(band[3] - band[5]) <= 6
+                  for band in bands), str(bands))
+
+        fold(window.commands_panel, False)
+        fold(window.search_panel, False)
+        window.relayout_sidebar()
+        app.processEvents()
         next_()
 
     def step_sticky_group_header(next_):
@@ -8262,6 +8456,9 @@ def main() -> int:
                   type(header.parentWidget()).__name__)
 
             top = header.mapTo(panel.list_host, header.rect().topLeft()).y()
+            bar.setValue(top + 1)
+            app.processEvents()
+            check("R-195 组头刚开始被裁切即吸顶，短列表不再只剩背景", panel.sticky_header.occupant is header and header.label.visibleRegion().boundingRect().height() == header.label.height())
             bar.setValue(top + header.height() + 50)
             for _ in range(3):
                 app.processEvents()
@@ -8331,6 +8528,24 @@ def main() -> int:
                   not sticky.isVisible() and sticky.occupant is None
                   and header.parentWidget() is panel.list_host,
                   f"{sticky.isVisible()} / {type(header.parentWidget()).__name__}")
+            failures = []
+            for cycle in range(8):
+                header = panel._group_headers[first["id"]]
+                top = header.mapTo(panel.list_host, QPoint(0, 0)).y()
+                bar.setValue(top + header.height() + 50)
+                app.processEvents()
+                peer = type(store)(store.path)
+                peer.remove(next(entry["id"] for entry in peer.items if entry.get("group") == second["id"]))
+                store.reload_if_changed()
+                app.processEvents()
+                borrowed = sticky.occupant
+                if sticky.isVisible() and (borrowed is None or borrowed.parentWidget() is not sticky or borrowed.label.visibleRegion().isEmpty()):
+                    failures.append((cycle, "blank sticky", type(borrowed).__name__))
+                bar.setValue(0)
+                app.processEvents()
+                if sticky.isVisible() or sticky.occupant is not None:
+                    failures.append((cycle, "sticky at top", sticky.isVisible()))
+            check("R-195 反复上下滚动后组名仍可见且无空白吸顶层遮挡", not failures, str(failures))
         finally:
             store.remove_group(first["id"], drop_commands=True)
             store.remove_group(second["id"], drop_commands=True)
@@ -9164,6 +9379,8 @@ def main() -> int:
     runner.add("R-214 terminal_narrow_reflow", step_terminal_narrow_reflow)
     runner.add("R-294 terminal_keystroke_snaps", step_terminal_keystroke_snaps)
     runner.add("R-300 terminal_fixed_grid", step_terminal_fixed_grid)
+    runner.add("R-304 log_mode_serial_lock", step_log_mode_serial_lock)
+    runner.add("R-308 command_sync", step_command_sync)
     runner.add("R-215 terminal_scrollbar", step_terminal_scrollbar)
     runner.add("R-217 control_endpoint_async", step_control_endpoint_async)
     runner.add("R-292 terminal_single_send", step_terminal_single_send)

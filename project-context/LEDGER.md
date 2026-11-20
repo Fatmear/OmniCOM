@@ -1,5 +1,5 @@
 # Handled-items ledger
-Updated: 2026-11-04
+Updated: 2026-11-20
 
 One line per item. Append-only by ID; never delete `RULED-OUT` or `REVERTED` lines.
 Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
@@ -629,4 +629,83 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - 根因：`_plugin_send` 判 `self._status.get("connected")`。`_status` 只在排队的 `status` 信号送达时更新，紧接在成功 open 之后仍是「未连接」，于是 `api.send` 返回 False，一个字节都没写；而 `bridge.state()` 直读 manager，答 `True`。**串口是开的，按键却丢**，属于真产品缺陷，不是测试假阳。
 - 修法：守卫改用 `self.bridge.state() or self._status`（manager 是权威答案，且只是一次字典读）。
 - 判据：污染顺序（R-215→R-217→R-292）下必须 `tx>0`；只放宽断言不算修复（对照 L-269/L-274 的假阳教训）。
+
+## L-304 打开日志后跟随失效、停在终端页（FIXED-verified）
+- `_show_log_text` 在 begin_batch 后 clear_all，后者将批量计数归零，end_batch 无法释放 TailFollow 更新锁，后续 follow 全部短路。清屏前移到 begin_batch 之前；真实日志页面是 terminal，不是 console。
+- R-309：文件选择器仅所有文件；文件加载标记在关闭文件后保留，下一次 toggle_connection 在 bridge.open 前 clear_log 并开启自动跟随。关闭日志不立刻清屏。
+- 验证：`python tools/ui_selftest.py --only log_mode_serial_lock` 14/14，包括 .capture 文件、实际页面可见、更新锁归零、重新连接清屏与三批新日志跟随。
+
+## L-312 看板刷新卡顿（后备：懒更新）（OPEN）
+- 2026-11-20 更正：用户否定此轮结果，原“渲染帧率不降、卡顿已修复”结论无效。下列42.4/34.3→2.9/1.4ms只测 setOption 提交，不是绘制完成；30轮合并为一次不能证明持续刷新。实际完成背压和负载证据见 L-316。
+- 同时把仪表改成“结构只建一次、每帧只挪指针”：实测仪表本身只要 1.4 ms，所以这部分收益很小，已如实记录，不当成主因。
+- 两个被实测否掉的方案（不得重试）：
+  - `appendData()`：ECharts 不把追加的点反映到 `getOption()`，我们的状态检查与重同步读到旧序列，曲线直接冻住（探针复现：尾部停留 2.99 不再前进）。
+  - 把 `progressive` 改成随展示帧数自适应：同一配置在离屏环境下中位在 **13 ms 与 84 ms** 之间摆动，无可复现收益，且 R-307 明确断言 `progressive == 800`，已回退。
+- 测量陷阱：最初的“5 s 超时”是因为探针里 `acked.disconnect()` 无法断开 lambda，导致监听器泄漏、测量失真；改用具名槽后恢复正常。任何测确认等待的探针都要用可断开的槽。
+- 证据：`.artifacts/probe_chart_ab_baseline.py`；`plugin_selftest` R-320（观察器断言 `lazyUpdate` 全为真）、222 checks、exit 0。
+- 历史居中回归曾弱化为“在视口内/最后一张接近中心”并依赖额外 settle，不能代表用户要求；L-315 已撤销此弱化并移除重复 settle 链。
+
+## L-311 曲线窗口跑满后不再刷新（切标签页才被注意到）（FIXED-verified）
+- 2026-11-20 后续：旧 drawnCount 增量合并仍有数组别名和裁头边界；现实现已由 L-313/L-314 的版本切片与绝对序号替代，以下为历史修法，不得照搬恢复。
+- 真因不在切页：页面 `drawnBuffer()` 用**长度差**（`wanted.length - buffer.length`）推算“这一帧新增了多少行”。一旦源数组与绘图缓冲都到了「展示帧数」上限，差值恒为 0，新样本永不追入——所以曲线在攒够数据的那一刻就停了，用户只是切到 HEX 再回来才看见。
+- 修法：新增 `state.drawnCount` 记录已合并的**源行数**，按 `rows.length - seen` 取新增；重同步清空、`setValues` 裁头时同步衰减。
+- 排查中发现的第二个真缺陷：`_sent` 在**构造** delta 时提前推到总长度，页面未确认就当成已送达。切页期间渲染器被挂起、批次没到，`has_fresh_data()` 从此恒为 False，永远不会补发。改为发送时记录本批覆盖的样本数（`_last_sent`），`_on_acked` 里才推进 `_sent`。
+- 证据：`.artifacts/probe_chart_real_tab.py`（真实主窗口往返，修复前数据尾部停在 4.19，修复后 4.19→5.59）；`plugin_selftest` R-318 `[7.59, 359] -> [8.59, 459]`、219 checks exit 0。
+
+## L-310 搜索与扩展命令都折叠时，扩展命令被拉大（FIXED-verified）
+- `relayout_sidebar()` 读的是两个面板的 `_collapsed` 标志，而界面实际高度取决于 `body` 的可见性。二者在「搜索面板从全屏恢复」「一边展开时另一边折叠」后会不一致，于是走到“两边都展开”分支，把 `_sidebar_sizes` 恢复成 230/540。
+- 修法：判据改为 `body.isHidden()`，并给折叠的那一栏 `setStretchFactor(0/1, 0)`，不让分隔条把剩余空间分给它。
+- 探针需注意：必须先显式把两边重置为展开再折叠，否则 `toggle_collapsed()` 会把状态反过来（首轮探针就是这么误报“仍有 230”的）。
+- 证据：`.artifacts/probe_sidebar_both_folded.py` 两种顺序都 `[44, 44]`；`ui_selftest` R-319 两种顺序全过，R-190 折叠/恢复比例仍绿。
+
+## L-309 顶栏冒出 5000 输入框 / 新卡片飞到最底下 / 仪表带曲线坐标轴（FIXED-verified）
+- 三个独立缺陷：
+  - 三个数字设置以面板为 `parent`，`QWidget` 只要**有父对象就会被 Qt 绘制**，即使不在任何布局里，所以 5000 那个框直接出现在暂停按钮后面（L-309 主机教训：`not in layout` ≠ 不可见）。现在建好即 `hide()`，菜单里改用**新建**的 spin box，避免 `QWidgetAction.setDefaultWidget()` 接管所有权、关菜单时把数据载体一并销毁。
+  - 新卡片位置曾由 Python 按序号平铺（`16 + (index%3)*(w+16)`），第 10 张就已经在几屏之外。现在 Python 不再预置 `x/y`，页面用 `scrollLeft/Top + 视口一半 - 卡片一半` 在**可视区正中**放置。
+  - `mount()` 曾对 `line || gauge` 都调 `applyLineStructure()`，于是仪表先被套上曲线的 xAxis/yAxis/dataZoom 结构。改为只给 `line`。
+- 居中两个实测坑：① 首次 `addWidget` 时 web view 可能只有宽没有高，一次 `setTimeout` 重试仍落在 0 高，卡片得到 x=64/y=0；② 用 `x===0 && y===0` 当作“未放置”判据会把这个半成品状态误判为已完成。最终用显式 `autoPlaced` 标记 + `requestAnimationFrame` 持续重试直到画布两个尺寸都 > 0。
+- 证据：`.artifacts/probe_chart_layout_fix.py` 全部 PASS（首卡 x=304/y=144 对 1076x529 视口、仪表 `xAxis=0/yAxis=0/dataZoom=0`、曲线仍 `1/1/2`）；`plugin_selftest` 217 checks、exit 0。
+
+## L-308 看板大数据/多控件时添加控件很慢或加不上、小屏看不全、顶栏塞满按钮（FIXED-verified）
+- 三个独立原因：① `add_widget()` 无条件 `request_resync()`，把整个保留历史重新序列化（10 通道 × 5000 点 = 83 KB），页面还要为**每张**已有曲线重绘一遍；② `#canvas` 是 `overflow: hidden`，绝对定位卡片不产生滚动范围，内容超屏就彻底不可达；③ 顶栏堆了 7 个按钮 + 3 个数字框。
+- 修法：① 只有绑定**尚未推送**的通道才请求全量，页面侧 `mount()` 用 `fresh=null` 复用 `state.drawn` 立即出图（并把 gauge 也纳入结构绘制）；② 拆成 `#canvas`（滚动视口）+ `#surface`（内容层，`updateExtent()` 按最远卡片定尺寸），网格移到内容层才能跟着卡片滚；③ 顶栏只留 暂停/清空控件/菜单，其余（含三个数字框）进 `build_menu()`，拆出菜单构建方法便于测试而不阻塞在 `QMenu.exec()`。
+- 两个方案错误被实测否掉：把 `#canvas` 自身 `min-width` 撑大会被 `body{overflow:hidden}` 裁掉（`clientWidth == scrollWidth == 1536`）；给视口加 `padding` 也不能产生稳定滚动。必须用双层结构。
+- 证据：`.artifacts/probe_chart_add_cost.py`（添加 0.02 ms、单次 83 KB 重发）、`.artifacts/probe_chart_add_fast.py`（`['addWidget']`、`resyncs+0`、0.2 ms、`paintedPixels=9737`；小屏 `1240x2496` vs `664x257`）、`.artifacts/probe_chart_toolbar.py`；`plugin_selftest` 213 checks、exit 0。
+
+## L-307 看完 HEX 文件后整个看板停止刷新（FIXED-verified）
+- 两个缺陷叠加：① 页面把 `acked` 发在绘制之后，一张卡的 `paint`/`setOption` 抛错（隐藏标签页里容器尺寸为 0 时会发生）就永远不确认；② Python 端把 `_pending_ack` 当无条件锁，没有超时，于是**所有卡片一起停刷**，不只是出事的那张。
+- 修法：页面把 ack 放进 `finally`，并给每张卡单独 `try/catch`；Python 端加 `ACK_TIMEOUT_S = 1.5`，超时转为全量重同步并计数 `ack_timeouts`；另记录可见性跳变，从其它标签页切回时主动重发完整窗口。
+- 排查坑：`flush()` 发全量帧时也必须记 `_ack_started`，否则超时判断把它当成早就过期的等待（被既有 R-301 背压断言捕获）。
+- 证据：`.artifacts/probe_chart_ack_recovery.py` 6/6；`.artifacts/probe_chart_page_ack.py` 在真实 QtWebEngine 里让一张卡抛错，ack 仍回传；`plugin_selftest` 203 checks、exit 0。
+
+## L-306 HEX 双击编辑框看不清内容、数字被裁掉（FIXED-verified）
+- 编辑框只按 `horizontalAdvance("00") + 14` 定宽，而全局样式表给 `QLineEdit` 的 `padding: 0 10px` **不体现在 `contentsMargins()`**：实测 40 px 的框里能画的只有 ~20 px，两字符要 26 px，首字符被裁；末列定位还可能把框推到视口外。
+- 修法：编辑框带自己的紧凑样式（`padding: 0 2px`、`min-height: 0`、同款等宽字体）、尺寸由 `inline_editor_size()` 按字体度量算，位置按视口夹紧。
+- 证据：`.artifacts/probe_hex_editor_fit.py` 修前 `usable - text = -6`，修后首/末列/页末三处 `ink_x=3..26 / width=32`、高 17、均 `in_viewport=True`；`plugin_selftest` R-310 通过，199 checks、exit 0。
+
+## L-305 对端删除扩展命令后上下翻动，组头文字消失只剩色条（FIXED-verified）
+- 短列表剩余滚动范围 23px，小于组头 26px；旧吸顶条件要求整个组头卷走，文字已被裁切而吸顶永远不触发。改为组头顶部一旦越过视口即借用原组头；不改颜色、不建简化标题。
+- 原生 Qt 合成图对照：对端删除后滚到底，修前组名墨色像素 0、可见高度 2px；修后墨色像素 222、可见高度 20px，多次往返均保持。探针 `.artifacts/probe_command_pixels.py`；正式 R-195 补部分裁切和对端删除期间滚动检查。
+
+## L-313 看板失去响应 / 自追加数组 / RangeError（FIXED-verified）
+- 原 drawnBuffer 在历史未满时直接持有 rows；下一帧向 buffer push 的同时以 rows.length 为循环上界，同一个数组无限自增长。Node 执行实际 dashboard.js 可复现 RangeError；修为按通道版本缓存独立尾部切片，多卡共享绘图切片但不与历史数组别名。
+- 证据：`node tools/chart_runtime_selftest.js` 3/3，含6200点跨5000上限、共享通道、窗口切换；两端 points=0 上限统一5000。
+
+## L-314 满缓冲漏尾样本 / 旧确认解锁 / 纯读数停刷（FIXED-verified）
+- 绝对接收序号不随deque淘汰衰减，确认仅提交发送快照；批次号单调且重同步不复用。新鲜度用样本版本而非仅曲线绑定，纯 value/gauge/bar/lamp 均可刷新。
+- 证据：`plugin_selftest` R-321，发送后等待期间溢出10点，下一批必须包含100..109；旧ack不能释放新批/重同步批，四类纯读数确认后才空闲。
+
+## L-315 居中错位 / 布局递归 / 多余resize（FIXED-verified）
+- 单一40ms合并布局任务处理新卡居中、内容范围和必要resize；显式用户移动取消autoPlaced。删除settle链和不可达重复添加逻辑；视口外卡懒创建、滚入追上数据。
+- 证据：R-316恢复每张24px严格约束，三卡带scroll(0,0)/(200,120)/(400,240)均居中，不手动settle；既有拖动/缩放/轴缩放/滚动回归通过。测试桩恢复真实DOM前必须push_layout，不能拿桩中的id操作旧页面。
+
+## L-316 实际绘制背压 / finished不回 / 效率低 / GUI长尾（OPEN）
+- 已修机制：实时仅传曲线id/data、仪表data；关闭滑块数据阴影。实际rendered后用可被后续绘制重置的rAF屏障确认，finished也可解除等待；仅finished曾真实出现rendered=9/finished=1而锁住。单卡异常/删除不锁全板；保留超时和返回页重同步。确认驱动下批，只补齐从发送起算的目标节拍，最多一个在途批次。
+- 证据：最终`python tools/plugin_selftest.py --benchmark` 257/257；四组5秒预填5000点、每通道约200点/秒，全部到尾且各组新增确认超时0。4/300、6/300、6/5000、24/5000分别完成39/36/39/27批，完成P95=148.92/197.65/153.91/248.51ms，交互探针P95=27.53/34.34/25.44/55.78ms。
+- 未闭环：最重仅约5批/秒，不是30fps；此前GUI最大262.58ms长尾未归因，后续更快不能证明环境原因。当前采样仅落在app.processEvents；未证明写盘是根因。5秒斜线直接feed、部分卡在视口外；探针是JS往返/滚动/添加/菜单构建，不是负载下真鼠标交互，也不等同长期实机。rendered+rAF不是合成器呈现时间。R-320保持开放，下一步固定用户实际布局与数据定位长尾。
+- 报告：`.artifacts/chart-sustained.json`、`chart-benchmark.json`；截图`chart-load-*-*.png`。L-312的appendData/自适应progressive回退仍有效，不因本轮重构重试。
+
+## L-317 看板配置丢多通道 / 精度 / 非法范围（FIXED-verified）
+- 清洗器保留channels去重列表、decimals与状态文字，拒绝NaN/无限范围和重复widget id，导入失败不得改当前布局。
+- 证据：R-311实际临时文件导出与重导入完全往返，8类非法输入拒绝且布局不变；包含最终257项插件回归。
 
