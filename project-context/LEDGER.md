@@ -709,3 +709,25 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - 清洗器保留channels去重列表、decimals与状态文字，拒绝NaN/无限范围和重复widget id，导入失败不得改当前布局。
 - 证据：R-311实际临时文件导出与重导入完全往返，8类非法输入拒绝且布局不变；包含最终257项插件回归。
 
+## L-318 插件并未解耦：有门面却直接 import 宿主内部模块（FIXED-verified）
+- 用户质疑「插件没有解耦？」属实。terminal / transfer / hexview 源码里直接
+  `from omnicom.ui import theme`、`from omnicom.ui.vt100 import Screen`、
+  `from omnicom.i18n import tr`、`from omnicom.ui.workers import TransferWorker`。
+  PluginApi 早就有 theme()/combo()/glyph()/menu() 门面，但 1.1.6 把那两个页面搬成
+  插件时是整块复制代码，原 import 原样留下；hexview 是照抄同一写法。
+- 后果不是当前 bug，而是架构债：插件目录会被复制到用户磁盘长期驻留，宿主重命名
+  一个文件，已安装插件就坏，且要等用户打开那个标签页才暴露。
+- 修法：`api.theme()` / `api.paths()` 用只读门面（赋值或调用 setter 抛异常）、
+  `api.widget_class(name)` 返回控件类、`api.terminal_screen()`、`api.transfer_worker()`；
+  插件文案各自 `text.py` + `api.register_text()`，宿主表删 58 条（459→406），
+  卸载时注销；`API_VERSION` 2→3，插件清单声明 `"api": 3`。
+- 两个实测坑：① 插件必须用相对导入 `from .text import TEXT`——所有插件目录都会
+  进 sys.path，三个都叫 text.py 会按加载顺序互相遮蔽；② 测试自己加载插件时也要
+  以包形式注册（`submodule_search_locations` + `sys.modules`）再执行，与
+  `_instantiate` 一致，否则相对导入直接 ImportError。
+- 另一个空真隐患：文案迁出后 `all(tr(key) for key in ...)` 仍成立（未命中返回键名，
+  非空）。GUI 断言改为 `tr(key) not in ("", key)`，否则测试会在文案丢失时继续通过。
+- 证据：`plugin_selftest` R-322 五项（静态扫描、文本表存在、宿主表无插件键、
+  注册后可解析、卸载后回退）；完整 245 项 / `--benchmark` 262 项均 0 失败；
+  真实 `PluginHost` 加载 5 插件零错误；便携包内自带运行时验证通过。
+- 顺带修掉既有缺陷：传输页拖放区标题从未跟随语言切换，英文界面残留中文。
