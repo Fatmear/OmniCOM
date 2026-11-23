@@ -1,20 +1,24 @@
 # Current handoff
 
-Updated: 2026-11-20
+Updated: 2026-11-23
 
 ## Shipped
 
-- **v1.1.7 已提交并发布**：commit `bd3bb94`（40 文件），推送 `main`；Release #452554311，
-  asset `OmniCOM-1.1.7-win64.zip`（182 MB，SHA-256 `ac4dbe98…eb1f`），`releases/latest` = v1.1.7。
+- **v1.1.7 已修复并同版重发**：修复 commit `4a5db45` 已推送 `main`；复用 Release #452554311，
+  替换 `OmniCOM-1.1.7-win64.zip`（190862126 字节）。本地 SHA-256：
+  `d225b9a9d7bb1a67c2d8a9d2a834b04b1a7250dcf9f67f1aa5c88f196957642e`。
+  上传成功、公开下载 HTTP 200 / 大小正确；2026-11-23 核对 GitHub 资产 digest 与本地 SHA-256 一致，latest=v1.1.7。
+- 远端 `main=4a5db45`；既有 `v1.1.7` 标签仍为 `aeee113`，未强改。重发修复源码在 main，不能把标签源码当成新包源码。
 - 插件商店已更新：`chart-1.1.3`、`hexview-1.0.0` 上传，`catalog.json` 刷新；
   chart 1.1.0/1.1.2 与 launcher 1.0.0 保留。线上三个资产 HEAD 均 200。
 - 发布脚本下载探测曾报 `206 4 B`，是 CDN 分段响应噪点，实际 `HEAD`/`GET` 为 200 且字节数正确。
+- 本次重新构建三个商店插件成功，哈希与已发布包相同，线上 raw main 目录与本地 JSON 相同，因此没有重复上传；terminal/transfer 仍是随包核心插件，不在远程商店目录。
 
 ## Active Goal
 
 - 用户否定此前看板优化：「简直不能用，代码混乱、效率很低」。R-321 的集中整理已随 v1.1.7 发布，但**不得把测试通过说成所有实际场景已流畅**。
 - 保留 Python + QtWebEngine + 离线 ECharts；保留五种控件、双轴独立缩放、拖动缩放、滚动、居中添加、配置导入导出。
-- 工作区与 `main` 已同步到 `bd3bb94`；v1.1.7 已发布，插件商店已刷新。等用户实机复测反馈。
+- 产品源码与远端 `main` 已同步到 `4a5db45`；重发后的帮助菜单与核心插件恢复入口待用户复测。
 - 不构建自制 exe（R-019）；真实用户设置和数据不得被测试改写。
 
 ## Implemented
@@ -22,8 +26,10 @@ Updated: 2026-11-20
 - **插件真正解耦（R-322）**：`hexview` / `terminal` / `transfer` 不再 `import omnicom.*`，
   改走 `api.theme()` / `api.paths()` / `api.widget_class()` / `api.terminal_screen()` /
   `api.transfer_worker()`；两个门面只读，赋值或调用 setter 会抛异常。插件文案各自
-  `text.py` + `api.register_text()`，宿主表删 58 条（459→406），卸载时注销。
+  `text.py` + `api.register_text()`，宿主表不再保留三个插件前缀的文案，卸载时注销。
   `API_VERSION` 升 3，`plugin_selftest` 新增静态门禁（解析语法树，任何 `omnicom.*` 导入即失败）。
+- **帮助菜单（R-324）**：补齐 `menu.help` 和扫描发现的 `misc.control.open`，新增字面翻译键解析门禁；帮助/文档/关于中英均不回退键名。
+- **停用插件恢复（R-323）**：本地清单保留停用插件，商店显示「已停用」和「启用」；启用只清除标记并热重载，不重新下载、不改插件数据。
 - 修复已独立复现的致命错误：`drawnBuffer` 曾与历史数组别名，追加时一边遍历一边向同一数组 push，导致无限增长 / `RangeError`。现在按通道版本缓存独立绘图切片。
 - Python 用绝对接收序号、确认后提交游标、永不复用批次编号；满 deque 时继续收数不会吞掉尚未发送的尾部，迟到 ack 不能释放新批次。纯 value/gauge/bar/lamp 看板也能持续刷新。
 - 两端 `points=0` 都严格最多保留5000点；绘图窗口独立，默认300。增量提取不再先复制整个 deque。
@@ -35,12 +41,16 @@ Updated: 2026-11-20
 
 ## Verified
 
+- 重发修复：全仓 Ruff 通过；`python tools/plugin_selftest.py` 253 项通过；`ui_selftest.py --only "R-218 plugin_disabled_rx"` 6 项通过。
+- 隔离真实商店对话框：terminal/transfer 停用行可见；点击 terminal 的「启用」后只清除它的标记，transfer 仍停用，宿主重载一次。
+- 新 ZIP CRC 检查通过，692 条目；内层 pyz 含修复。包内运行时验证两核心插件停用后仍可见、启用后只剩 transfer 停用，退出 0、无加载错误。
+- 以下性能与解耦结果来自此前轮次，不是本次重新执行的全量验收。
 - 发布前：`ruff check .` 通过；`plugin_selftest` 245 项；`--benchmark` 262 项；均 0 失败。
 - 真实 `PluginHost` 加载 5 插件零错误；文案注册后 `tr()` 返回中文，卸载后回退键名。
 - GUI：R-091 终端菜单 5 项、R-188 终端按钮 8 项通过；英文界面经 `host.apply_language()`
   后三个插件页面无中文残留（期间修掉拖放区标题从未重译的既有缺陷）。
 - 便携包内自带运行时启动：版本 1.1.7、terminal/transfer 加载零错误、文案键 14/18、
-  卸载后 `term.title` 回退为键名。ZIP `testzip()` 正常，695 条目。
+  卸载后 `term.title` 回退为键名。首次发布 ZIP 为695条目，已被上述692条目新包取代。
 - `python tools/plugin_selftest.py --benchmark`：最终257项通过、0失败，包含商店与其它插件回归。
 - `node tools/chart_runtime_selftest.js`：3项通过，直接执行实际页面脚本，覆盖数组不别名、6200点持续推进、上限切换。
 - `python -m ruff check .`、页面 `node --check` 通过。编辑器 JS 诊断无新增错误。
@@ -65,6 +75,7 @@ Updated: 2026-11-20
 - rendered+rAF 屏障确认了实际绘制事件，不是浏览器合成器/显示器呈现时间；隐藏页 rAF 暂停靠超时和返回页面重同步恢复。
 - 停顿采样仅落在 `app.processEvents()`，未定位 Qt 内部具体工作；未证明写盘是根因，不引入猜测性的异步存储层。
 - 本轮**未**重跑全工程 GUI / 总验收，只跑了插件自测、R-091/R-188 与英文界面探针；旧记录仍有 R-055/R-001 失败及 R-306 未覆盖，不能声称全工程全绿。
+- R-322/R-323/R-324 的检查在插件自测中；总验收脚本尚无这三个需求的映射。帮助菜单已核对实际构建路径和双语解析，未做真实弹出菜单像素验证。
 - `chart` 插件 `plugin.json` 声明 `icon.png` 但文件缺失（HEAD 即如此），宿主优雅降级；本次未补。
 - 三个插件已解耦，但 `launcher` 仍直接调用 `api.t()` 内联文案（不依赖宿主表，可接受），`chart` 同样用 `api.t()`；两者未拆 `text.py`。
 - 历史日志回放仍受live5000点容量限制；旧版看板需求定义/验收注册仍有缺口，命令并发合并、文件模式CLI旁路、HEX大文件内存/撤销等旧边界未在本轮处理。
@@ -76,6 +87,7 @@ Updated: 2026-11-20
 
 ## Next Check
 
+- 已装旧1.1.7的用户需重新下载新包，或使用「从升级包更新」同版重装；版本号没变，不承诺自动更新会提示。
 - 用户重启源码程序复测实际常用卡数/波形、拖动和 HEX 往返；不擅自关闭其窗口或覆盖已安装插件。
 - 若仍卡顿，固定该实际布局、输入和采样率采集渲染完成/主线程长尾，定位后只改控制路径；不要再用提交时间或参数标志替代体验验收。
 - 可重复命令：`python tools/plugin_selftest.py --chart-only --benchmark`；最窄缓存回归：`node tools/chart_runtime_selftest.js`。

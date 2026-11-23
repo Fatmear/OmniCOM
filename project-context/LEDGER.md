@@ -719,7 +719,7 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
   一个文件，已安装插件就坏，且要等用户打开那个标签页才暴露。
 - 修法：`api.theme()` / `api.paths()` 用只读门面（赋值或调用 setter 抛异常）、
   `api.widget_class(name)` 返回控件类、`api.terminal_screen()`、`api.transfer_worker()`；
-  插件文案各自 `text.py` + `api.register_text()`，宿主表删 58 条（459→406），
+  插件文案各自 `text.py` + `api.register_text()`，宿主表移除三个插件前缀文案，
   卸载时注销；`API_VERSION` 2→3，插件清单声明 `"api": 3`。
 - 两个实测坑：① 插件必须用相对导入 `from .text import TEXT`——所有插件目录都会
   进 sys.path，三个都叫 text.py 会按加载顺序互相遮蔽；② 测试自己加载插件时也要
@@ -731,3 +731,20 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
   注册后可解析、卸载后回退）；完整 245 项 / `--benchmark` 262 项均 0 失败；
   真实 `PluginHost` 加载 5 插件零错误；便携包内自带运行时验证通过。
 - 顺带修掉既有缺陷：传输页拖放区标题从未跟随语言切换，英文界面残留中文。
+
+## L-319 帮助菜单显示 menu.help / 翻译缺键（FIXED-verified）
+- 根因：标题栏使用 `tr("menu.help")`，宿主表没有该键，回退策略直接显示键名；扫描还发现 `misc.control.open` 缺失。已补齐两键，不更改回退策略。
+- R-324 新增字面翻译键静态门禁，扫描419个调用键；帮助/文档/关于中英均可解析。实际菜单构建路径已核对，未完成真实弹出菜单像素验证。
+- 证据：修复提交 `4a5db45`；完整插件自测253项、Ruff通过；新包内pyz含两键。旧「58条（459→406）」是统计口径混用，不再作为精确迁移数量。
+
+## L-320 终端与文件传输停用后商店消失 / 无法启用（FIXED-verified）
+- 根因：商店行取本地安装与远程目录并集，但 `installed()` 排除了停用插件；terminal/transfer 是随包核心插件，不在远程目录，因此从两边都消失。
+- 修复：本地清单保留停用状态和已安装版本；商店显示「已停用」和「启用」。`set_disabled()` 只调整标记，复用异步任务与宿主重载，不下载、不覆盖用户数据。
+- 证据：插件自测R-323四项及完整253项通过；GUI R-218停用接收6项通过；隔离真实对话框点击启用terminal后，仅transfer保持停用、重载一次；包内运行时复验通过。
+
+## L-321 修复后同版重发 v1.1.7 / 插件商店是否重传（FIXED-verified）
+- `4a5db45` 已推送main；复用Release #452554311并替换同名便携ZIP，发布脚本退出0、latest=v1.1.7。既有标签仍为 `aeee113`，不强制移动；修复源码在main。
+- 新包190862126字节、692条目、CRC正常；本地SHA-256 `d225b9a9d7bb1a67c2d8a9d2a834b04b1a7250dcf9f67f1aa5c88f196957642e`。此前公开GET仅验证HTTP200和大小，不能据此声称远端哈希一致。
+- 2026-11-23补核：GitHub资产metadata的 `digest` 与上述本地SHA-256完全相同，Release公开且含修复说明，API latest仍为v1.1.7；线上raw main插件目录与重建后本地JSON一致。
+- 重新构建chart1.1.3、hexview1.0.0、launcher1.0.0成功，哈希与已发布包相同，无需再次上传；核心插件仍通过主程序便携包交付。
+- R-320性能边界不变；本次未重跑全工程GUI/总验收，不将插件自测通过宣称为全工程全绿。
