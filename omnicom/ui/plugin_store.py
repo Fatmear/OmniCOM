@@ -140,8 +140,14 @@ class VersionPicker(QWidget):
         version = str(entry.get("version") or "")
         installed = row["item"]["installed_version"]
         api_ok = int(entry.get("api", 1)) <= API_VERSION
+        # A bundled build has no download URL but is still installable: a real
+        # uninstall moved it to the backup area, and 安装 copies it back
+        # (R-327).  Only an *installed* build that no catalog carries is a
+        # local-only record that cannot be selected.
+        bundled = bool(row["item"].get("bundled") or row["item"].get("removed")
+                       or entry.get("recoverable"))
         download = bool(row["item"].get("versions") and version
-                        and not entry.get("local"))
+                        and (not entry.get("local") or bundled))
         if not version:
             state, caption = "none", tr("store.install")
         elif version == installed:
@@ -269,6 +275,10 @@ class PluginStoreDialog(QDialog):
             if item["installed_version"]:
                 installed_tag.show_text(tr("store.tag.installed_of",
                                            version=item["installed_version"]))
+            elif item.get("removed"):
+                # A real uninstall leaves no copy behind, so the row says so
+                # instead of looking installed (R-327).
+                installed_tag.show_text(tr("store.tag.removed"))
             header.addWidget(installed_tag, 0, Qt.AlignmentFlag.AlignTop)
             # A disabled plugin still has its folder; saying so is what makes
             # 启用 make sense next to it (R-323).
@@ -302,6 +312,8 @@ class PluginStoreDialog(QDialog):
                 # "禁用" is a state of an installed copy, so the ordinary
                 # 已安装/最新 line would be misleading: it would look loaded.
                 version_text = tr("store.disabled_row", version=item["installed_version"])
+            elif item.get("removed"):
+                version_text = tr("store.removed_row", latest=latest)
             elif item["installed_version"]:
                 version_text = tr("store.installed", current=item["installed_version"],
                                   latest=latest)
@@ -323,7 +335,7 @@ class PluginStoreDialog(QDialog):
                 enable.clicked.connect(lambda _checked=False, key=item["id"]:
                                        self.set_enabled(key, True))
                 actions.addWidget(enable)
-            if item["installed_version"]:
+            if item["installed_version"] and not item.get("disabled"):
                 remove = QPushButton(tr("store.uninstall"))
                 remove.setObjectName("Danger")
                 remove.clicked.connect(lambda _checked=False, data=item: self.confirm_remove(data))
@@ -429,12 +441,7 @@ class PluginStoreDialog(QDialog):
         self.start(lambda _cancel, _progress: self.store.uninstall(identifier), mutating=True)
 
     def set_enabled(self, identifier: str, enabled: bool) -> None:
-        """Switch a disabled plugin back on (or off) without reinstalling (R-323).
-
-        A bundled plugin is part of the program, so "uninstall" only records a
-        flag; until now that flag also hid the row, and the core plugins are not
-        in the remote catalog, so nothing could ever clear it from the UI.
-        """
+        """Switch an installed plugin on or off without reinstalling (R-323)."""
         def work(_cancel, _progress) -> None:
             self.store.set_disabled(identifier, not enabled)
 

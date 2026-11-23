@@ -68,6 +68,294 @@ def package(root, version="1.0.0", extra=None):
     return {**manifest, "url": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
+def update_core_checks() -> None:
+    from omnicom.update_worker import apply_files
+
+    with tempfile.TemporaryDirectory() as temporary:
+      root = Path(temporary)
+      source, target = root / "source", root / "target"
+      target.mkdir()
+      for identifier in ("terminal", "transfer"):
+        shutil.copytree(ROOT / "plugins" / identifier,
+                    source / "plugins" / identifier,
+                    ignore=shutil.ignore_patterns("__pycache__"))
+      optional = source / "plugins" / "launcher"
+      optional.mkdir()
+      (optional / "plugin.json").write_text("{}", encoding="utf-8")
+      saved = target / "omnicom-data" / "plugin-data" / "terminal" / "settings.ini"
+      saved.parent.mkdir(parents=True)
+      saved.write_bytes(b"user settings")
+      written = apply_files(source, target)
+      for identifier in ("terminal", "transfer"):
+        expected = source / "plugins" / identifier
+        actual = target / "plugins" / identifier
+        check(f"R-293 upgrade installs missing core plugin {identifier}",
+            all((actual / path.relative_to(expected)).read_bytes() == path.read_bytes()
+                for path in expected.rglob("*") if path.is_file()))
+      check("R-174 upgrade does not install optional store plugins",
+          not (target / "plugins" / "launcher").exists())
+      check("R-108 core plugin upgrade preserves user settings",
+          saved.read_bytes() == b"user settings" and bool(written))
+      existing = target / "plugins" / "terminal"
+      (existing / "plugin.py").write_bytes(b"custom plugin")
+      (existing / "text.py").unlink()
+      second = apply_files(source, target)
+      check("R-293 existing core plugin directory is preserved as a whole",
+          not second and (existing / "plugin.py").read_bytes() == b"custom plugin"
+          and not (existing / "text.py").exists())
+
+
+def uninstall_cycle_checks(app, mode="dual") -> None:
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QMessageBox, QPushButton, QWidget
+
+    from omnicom.plugins import PluginHost
+    from omnicom.ui.plugin_store import PluginStoreDialog
+
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        store = PluginStore(root / "data", root / "bundle")
+        store.root.mkdir(parents=True)
+        store.bundled.mkdir(parents=True)
+        directories = (store.root, store.bundled) if mode == "dual" else (
+            store.root if mode == "user" else store.bundled,)
+        for directory in directories:
+            folder = directory / "demo"
+            folder.mkdir(parents=True)
+            atomic_json(folder / "plugin.json", {
+                "id": "demo", "version": "1.0.0", "api": API_VERSION,
+                "entry": "plugin.py", "name": "Demo",
+            })
+            (folder / "plugin.py").write_text(
+                "from PySide6.QtWidgets import QWidget\n"
+                "def create(api): return QWidget()\n", encoding="utf-8")
+        saved = store.data / "plugin-data" / "demo" / "settings.ini"
+        saved.parent.mkdir(parents=True)
+        saved.write_bytes(b"preserve")
+
+        class Window(QWidget):
+            def __init__(self):
+                super().__init__()
+                self.plugins = PluginHost()
+                self.plugins.search_paths = lambda: [str(store.root), str(store.bundled)]
+                self.plugins.load()
+
+            def suspend_plugins(self):
+                self.plugins.unload()
+
+            def reload_plugins(self):
+                self.plugins.load()
+
+        window = Window()
+        dialog = PluginStoreDialog(window, store)
+        dialog.show()
+
+        def settle():
+            deadline = time.perf_counter() + 10
+            while dialog.busy() and time.perf_counter() < deadline:
+                app.processEvents()
+            app.processEvents()
+            check("R-327 cycle task completes", not dialog.busy(), dialog.status.text())
+
+        try:
+            for cycle in range(6):
+                app.processEvents()
+                entry = dialog.rows["demo"]
+                remove = next(button for button in entry["widget"].findChildren(QPushButton)
+                              if button.text() == "卸载")
+                with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+                    QTest.mouseClick(remove, Qt.MouseButton.LeftButton)
+                settle()
+                entry = dialog.rows["demo"]
+                labels = [button.text() for button in entry["widget"].findChildren(QPushButton)]
+                check(f"R-327 cycle {cycle} removes every active copy",
+                      not (store.root / "demo").exists()
+                      and not (store.bundled / "demo").exists(), str(store.installed()))
+                check(f"R-327 cycle {cycle} is removed not disabled or installed",
+                      entry["item"]["removed"] and not entry["item"]["installed_version"]
+                      and "demo" not in store.disabled() and labels == ["安装"], str(labels))
+                check(f"R-327 cycle {cycle} host unloads plugin",
+                      not window.plugins.loaded())
+                before = store._sources()
+                store.uninstall("demo")
+                check(f"R-327 cycle {cycle} repeated uninstall retains recovery", store._sources() == before)
+                dialog.store = PluginStore(store.data, store.bundled)
+                dialog.rebuild()
+                QTest.mouseClick(dialog.rows["demo"]["install"], Qt.MouseButton.LeftButton)
+                settle()
+                check(f"R-327 cycle {cycle} reinstall restores host and clears records",
+                      "demo" in store.installed() and not store.removed()
+                      and len(window.plugins.loaded()) == 1)
+                check(f"R-327 cycle {cycle} retains user data", saved.read_bytes() == b"preserve")
+        finally:
+            window.plugins.unload()
+            dialog.close()
+            window.close()
+            app.processEvents()
+
+
+def uninstall_rollback_checks() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        store = PluginStore(root / "data", root / "bundle")
+        for directory in (store.root, store.bundled):
+            atomic_json(directory / "demo" / "plugin.json",
+                        {"id": "demo", "version": "1.0.0"})
+        store.set_disabled("demo", True)
+        original_move = shutil.move
+        calls = []
+
+        def fail_second(source, destination):
+            calls.append(source)
+            if len(calls) == 2:
+                raise OSError("injected second-copy failure")
+            return original_move(source, destination)
+
+        with patch("omnicom.plugin_store.shutil.move", side_effect=fail_second):
+            try:
+                store.uninstall("demo")
+            except OSError:
+                pass
+            else:
+                raise AssertionError("R-327 injected uninstall failure was ignored")
+        check("R-327 failed dual-copy uninstall restores both folders and state",
+              all((directory / "demo" / "plugin.json").exists()
+                  for directory in (store.root, store.bundled))
+              and store.disabled() == {"demo"} and not store.removed())
+        import errno
+
+        with patch("shutil.os.rename", side_effect=OSError(errno.EXDEV, "cross-drive")):
+            store.uninstall("demo")
+        check("R-327 uninstall handles cross-drive rename fallback",
+              not store.installed() and store.removed() == {"demo"}
+              and not store.disabled())
+        previous_sources = store._sources()
+        downloaded = package(root)
+        downloaded["url"] = (root / downloaded["url"]).as_uri()
+        fail_once = [True]
+
+        def fail_record(path, value):
+            if path == store.sources_path and fail_once[0]:
+                fail_once[0] = False
+                raise OSError("injected record failure")
+            atomic_json(path, value)
+
+        with patch("omnicom.plugin_store.atomic_json", side_effect=fail_record):
+            try:
+                store.install(downloaded)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("R-327 injected install failure was ignored")
+        check("R-327 failed reinstall preserves removed state and recovery",
+              not store.installed() and store._sources() == previous_sources
+              and not store.disabled())
+        store.install(downloaded)
+        check("R-327 downloaded reinstall clears removal and disable records",
+              "demo" in store.installed() and not store.removed() and not store.disabled())
+
+
+def chart_capacity_checks() -> None:
+    from plugins.chart.plugin import DashboardPanel
+
+    class Panel:
+        _number = staticmethod(lambda key, default: {"points": 100, "visible": 5000}.get(key, default))
+        _visible_points = DashboardPanel._visible_points
+
+    panel = Panel()
+    check("R-301 explicit points stay the retention cap regardless of drawn setting",
+          DashboardPanel._capacity(panel) == 100, DashboardPanel._capacity(panel))
+    check("R-164 drawn setting cannot raise retention above the explicit points",
+          DashboardPanel._capacity(panel) <= panel._visible_points())
+
+
+def source_dialog_checks(app) -> None:
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QColor, QPalette, QWheelEvent
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QDialog
+
+    from omnicom.ui import theme
+    from plugins.chart.plugin import SourcesDialog
+
+    class Api:
+        @staticmethod
+        def t(zh, en):
+            return zh
+
+        @staticmethod
+        def theme():
+            return theme
+
+    dialog = SourcesDialog(Api(), ["AA", "BB", "CC"] +
+                           [f"channel_{index}" for index in range(40)], ["AA"])
+    palette = dialog.channels.palette()
+    palette.setColor(QPalette.ColorRole.Highlight, QColor("#000000"))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#000000"))
+    dialog.channels.setPalette(palette)
+    dialog.show()
+    app.processEvents()
+    try:
+        for index, name in enumerate(("AA", "BB", "CC")):
+            item = dialog.channels.item(index)
+            rect = dialog.channels.visualItemRect(item)
+            check("R-325 source row has readable height", rect.height() >= 32, str(rect.height()))
+            before = name in dialog.sources()
+            QTest.mouseClick(dialog.channels.viewport(), Qt.MouseButton.LeftButton,
+                             pos=QPoint(rect.left() + 60, rect.center().y()))
+            check("R-325 clicking row text toggles source", (name in dialog.sources()) != before)
+            QTest.mouseClick(dialog.channels.viewport(), Qt.MouseButton.LeftButton,
+                             pos=QPoint(rect.left() + 16, rect.center().y()))
+            check("R-325 clicking checkbox toggles exactly once", (name in dialog.sources()) == before)
+        dialog.channels.setCurrentRow(1)
+        QTest.keyClick(dialog.channels, Qt.Key.Key_Space)
+        check("R-325 keyboard space selects source", "BB" in dialog.sources())
+        QTest.keyClick(dialog.channels, Qt.Key.Key_Space)
+        check("R-325 keyboard space deselects source", "BB" not in dialog.sources())
+        dialog.names.setText("BB, FUTURE")
+        rect = dialog.channels.visualItemRect(dialog.channels.item(1))
+        for repeat in range(6):
+            QTest.mouseClick(dialog.channels.viewport(), Qt.MouseButton.LeftButton, pos=rect.center())
+            check("R-325 repeated selection does not bounce",
+                  ("BB" in dialog.sources()) == bool(repeat % 2)
+                  and "FUTURE" in dialog.sources())
+        dialog.names.clear()
+        check("R-325 empty sources cannot confirm", not dialog.confirm.isEnabled())
+        dialog.names.setText("AA, CC")
+        image = dialog.channels.viewport().grab().toImage()
+        rect = dialog.channels.visualItemRect(dialog.channels.item(1))
+        ink = sum(image.pixelColor(x, y).lightness() < 100
+              for x in range(rect.left() + 44, rect.left() + 90)
+              for y in range(rect.top(), rect.bottom()))
+        check("R-325 selected row text remains dark on its light background", ink > 5)
+        before = dialog.sources()
+        cursor = QPoint(80, 80)
+        viewport = dialog.channels.viewport()
+        QTest.mouseMove(viewport, cursor)
+        for delta in (-120, -120, 120):
+            wheel = QWheelEvent(QPointF(cursor), QPointF(viewport.mapToGlobal(cursor)),
+                                QPoint(), QPoint(0, delta), Qt.MouseButton.NoButton,
+                                Qt.KeyboardModifier.NoModifier,
+                                Qt.ScrollPhase.NoScrollPhase, False)
+            app.sendEvent(viewport, wheel)
+            app.processEvents()
+            item = dialog.channels.itemAt(cursor)
+            dialog.channels.setCurrentItem(item)
+            image = viewport.grab().toImage()
+            rect = dialog.channels.visualItemRect(item)
+            check("R-325 hovered row stays light after scrolling with black OS highlight",
+                  image.pixelColor(rect.right() - 15, rect.center().y()).lightness() > 170)
+        check("R-325 scrolling does not change checked sources", dialog.sources() == before)
+        dialog.grab().save(str(ROOT / ".artifacts" / "sources-dialog-fixed.png"))
+        dialog.reject()
+        check("R-325 cancel rejects source edits", dialog.result() == QDialog.DialogCode.Rejected)
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+        app.processEvents()
+
+
 def store_checks() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -1357,9 +1645,453 @@ def catalog_build_checks() -> None:
         check("R-149 builder defaults JSON to repository plugins directory", build.call_args.args[2] == ROOT / "plugins" / "catalog.json")
 
 
+def curve_sources_checks(app, chart, kinds) -> None:
+    """R-325: one curve card, several named sources, editable afterwards."""
+    import json as json_module
+
+    chart.clear_widgets()
+    for _ in range(20):
+        app.processEvents()
+    chart.kind_combo.setCurrentIndex(chart.kind_combo.findData("line"))
+    for name, base in (("AA", 1), ("BB", 2)):
+        for step in range(6):
+            chart.replay_line(step + (0.5 if name == "BB" else 0.0),
+                              f"[OmniCOM-chart] {name}={base + step}")
+    chart.channel_combo.setEditText("AA, BB")
+    identifier = chart.add_widget_from_palette()
+    check("R-325 a curve card accepts several comma-separated sources",
+          identifier is not None, str(chart.layout_data["widgets"][-1:]))
+    chart.flush_live()
+    for _ in range(20):
+        app.processEvents()
+    described = next((w for w in _describe(app, chart)["widgets"]
+                      if w["id"] == identifier), {})
+    check("R-325 both sources are stored on the card",
+          described.get("channels") == ["AA", "BB"],
+          str(described.get("channels")))
+    plot = ("echarts.getInstanceByDom(document.querySelector("
+            "'.card[data-kind=line] .plot'))")
+    names = _js(app, chart, f"JSON.stringify({plot}.getOption().series.map(s => s.name))")
+    check("R-325 the plot really carries one series per source",
+          sorted(json_module.loads(names or "[]")) == ["AA", "BB"], str(names))
+    lengths = _js(app, chart, f"JSON.stringify({plot}.getOption().series.map(s => s.data.length))")
+    check("R-325 each series has its own samples",
+          all(int(n) > 0 for n in json_module.loads(lengths or "[]")), str(lengths))
+    legend = _js(app, chart, f"JSON.stringify({plot}.getOption().legend || [])")
+    legend = json_module.loads(legend or "[]")
+    check("R-325 a multi-source curve shows its legend",
+          bool(legend) and legend[0].get("show") is True, str(legend))
+    geometry = _geometry_of(app, chart, identifier)
+
+    # The gear button must reach the host through the page -> Python bridge.
+    # Opening the real dialog would block (it is modal), so the signal is
+    # observed instead; the click itself is driven with a real DOM event.
+    seen: list = []
+    chart.bridge.sourcesRequested.disconnect(chart.edit_widget_sources)
+    chart.bridge.sourcesRequested.connect(seen.append)
+    try:
+        clicked = _js(app, chart, "(function () {"
+                      "var button = document.querySelector("
+                      "'.card[data-kind=line] .sources');"
+                      "if (!button) { return 'missing'; }"
+                      "button.click(); return 'ok'; })()")
+        for _ in range(20):
+            app.processEvents()
+    finally:
+        chart.bridge.sourcesRequested.disconnect(seen.append)
+        chart.bridge.sourcesRequested.connect(chart.edit_widget_sources)
+    check("R-325 the card gear reaches the host bridge",
+          clicked == "ok" and seen == [identifier], f"{clicked} / {seen}")
+
+    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QDialog
+
+    def edit_sources(accept):
+        errors = []
+
+        def interact():
+            try:
+                dialog = app.activeModalWidget()
+                if not isinstance(dialog, sys.modules[type(chart).__module__].SourcesDialog):
+                    raise AssertionError("source editor did not open")
+                check("R-325 reopening the editor retains checked sources",
+                      dialog.sources() == ["AA", "BB"])
+                for name in ("AA", "CC"):
+                    item = next(dialog.channels.item(index) for index in range(dialog.channels.count())
+                                if dialog.channels.item(index).text() == name)
+                    rect = dialog.channels.visualItemRect(item)
+                    QTest.mouseClick(dialog.channels.viewport(), Qt.MouseButton.LeftButton,
+                                     pos=rect.center())
+                if accept:
+                    QTest.mouseClick(dialog.confirm, Qt.MouseButton.LeftButton)
+                else:
+                    dialog.reject()
+            except BaseException as exc:
+                errors.append(exc)
+                modal = app.activeModalWidget()
+                if isinstance(modal, QDialog):
+                    modal.reject()
+
+        QTimer.singleShot(0, interact)
+        chart.edit_widget_sources(identifier)
+        if errors:
+            raise errors[0]
+
+    chart.replay_line(20.0, "[OmniCOM-chart] CC=9")
+    before_edit = chart.config_payload()
+    edit_sources(False)
+    check("R-325 cancelling the real editor leaves card configuration unchanged",
+          chart.config_payload() == before_edit)
+    edit_sources(True)
+    check("R-325 editing a card replaces its sources",
+          next(item for item in chart.layout_data["widgets"] if item["id"] == identifier)
+          ["channels"] == ["BB", "CC"])
+    chart.flush_live()
+    for _ in range(20):
+        app.processEvents()
+    described = next((w for w in _describe(app, chart)["widgets"]
+                      if w["id"] == identifier), {})
+    check("R-325 the edited sources are stored",
+          described.get("channels") == ["BB", "CC"],
+          str(described.get("channels")))
+    check("R-325 editing keeps the card geometry",
+          _geometry_of(app, chart, identifier) == geometry,
+          f"{geometry} vs {_geometry_of(app, chart, identifier)}")
+    names = _js(app, chart, f"JSON.stringify({plot}.getOption().series.map(s => s.name))")
+    check("R-325 the plot drops the old source and keeps the new ones",
+          sorted(json_module.loads(names or "[]")) == ["BB", "CC"], str(names))
+    check("R-325 an empty source list is refused",
+          chart.update_widget_sources(identifier, ["  ", ""]) is False)
+
+    payload = chart.config_payload()
+    restored = next((raw for raw in payload["widgets"] if raw["id"] == identifier), {})
+    check("R-325 the sources travel with the exported layout",
+          restored.get("channels") == ["BB", "CC"], str(restored.get("channels")))
+    chart.clear_widgets()
+    for _ in range(10):
+        app.processEvents()
+
+
+def chart_display_controls_checks(app, chart) -> None:
+    from PySide6.QtCore import QTimer
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QColorDialog, QDialog
+
+    module = sys.modules[type(chart).__module__]
+
+    def pick(swatch, color, accept=True):
+        errors = []
+
+        def interact():
+            try:
+                dialog = app.activeModalWidget()
+                check("R-328 swatch opens a real palette dialog", isinstance(dialog, QColorDialog))
+                check("R-328 palette provides standard and custom colors",
+                      dialog.standardColor(0).isValid() and dialog.customCount() > 0)
+                dialog.setCurrentColor(QColor(color))
+                dialog.grab().save(str(ROOT / ".artifacts" / "lamp-palette.png"))
+                if accept:
+                    dialog.accept()
+                else:
+                    dialog.reject()
+            except BaseException as exc:
+                errors.append(exc)
+                modal = app.activeModalWidget()
+                if isinstance(modal, QDialog):
+                    modal.reject()
+
+        QTimer.singleShot(0, interact)
+        swatch.click()
+        if errors:
+            raise errors[0]
+
+    chart.clear_widgets()
+    for kind in KINDS:
+        chart.kind_combo.setCurrentIndex(chart.kind_combo.findData(kind))
+        app.processEvents()
+        check(f"R-325 {kind} exposes only appropriate source and color controls",
+              chart.sources_button.isHidden() == (kind != "line")
+              and chart.lamp_on_color.isHidden() == (kind != "lamp"))
+    chart.channel_combo.setEditText("AA, BB")
+    identifier = chart.add_widget_from_palette()
+    check("R-325 multiple typed names never change a non-line kind",
+          chart.kind_combo.currentData() == "lamp"
+          and chart.layout_data["widgets"][-1]["kind"] == "lamp"
+          and chart.layout_data["widgets"][-1]["channel"] == "AA")
+    chart.clear_widgets()
+    chart.channel_combo.setEditText("LAMP")
+    pick(chart.lamp_on_color, "#d81b60")
+    previous = chart.lamp_on_color.color_name
+    pick(chart.lamp_on_color, "#123456", False)
+    check("R-328 canceling palette keeps the previous color",
+          chart.lamp_on_color.color_name == previous)
+    pick(chart.lamp_off_color, "#1976d2")
+    identifier = chart.add_widget({"kind": "lamp", "channel": "LAMP",
+                                   "onColor": chart.lamp_on_color.color_name,
+                                   "offColor": chart.lamp_off_color.color_name})
+    chart.replay_line(1, "[OmniCOM-chart] LAMP=1")
+    chart.flush_live()
+    color_query = "getComputedStyle(document.querySelector('.lamp-dot')).backgroundColor"
+
+    def rendered_color(expected):
+        deadline = time.perf_counter() + 3
+        actual = _js(app, chart, color_query)
+        while actual != expected and time.perf_counter() < deadline:
+            actual = _js(app, chart, color_query)
+        return actual
+
+    check("R-328 lamp really renders its selected on color",
+          rendered_color("rgb(216, 27, 96)") == "rgb(216, 27, 96)",
+          str(_js(app, chart, color_query)))
+    chart.replay_line(2, "[OmniCOM-chart] LAMP=0")
+    chart.flush_live()
+    check("R-328 lamp really renders its selected off color",
+            rendered_color("rgb(25, 118, 210)") == "rgb(25, 118, 210)",
+            str(_js(app, chart, color_query)))
+    errors = []
+
+    def edit_lamp():
+        try:
+            dialog = app.activeModalWidget()
+            check("R-328 existing lamp opens its color editor",
+                  isinstance(dialog, module.LampColorsDialog))
+            pick(dialog.swatches["onColor"], "#00aa44")
+            dialog.confirm.click()
+        except BaseException as exc:
+            errors.append(exc)
+            modal = app.activeModalWidget()
+            if isinstance(modal, QDialog):
+                modal.reject()
+
+    QTimer.singleShot(0, edit_lamp)
+    chart.edit_widget_sources(identifier)
+    if errors:
+        raise errors[0]
+    _describe(app, chart)
+    before = chart.config_payload()
+
+    def cancel_lamp():
+        dialog = app.activeModalWidget()
+        dialog.swatches["offColor"].set_color("#ff0000")
+        dialog.reject()
+
+    QTimer.singleShot(0, cancel_lamp)
+    chart.edit_widget_sources(identifier)
+    check("R-328 canceling lamp editor preserves configuration",
+          chart.config_payload() == before)
+    exported = chart.config_payload()
+    chart.clear_widgets()
+    chart.apply_config(exported)
+    described = _describe(app, chart)["widgets"][0]
+    check("R-328 lamp color edits survive configuration round trip",
+            described["onColor"] == "#00aa44" and described["offColor"] == "#1976d2", str(described))
+    check("R-328 invalid lamp colors are rejected",
+          chart._sanitize_widget({"kind": "lamp", "channel": "A", "onColor": "bad-color"}) is None)
+    check("R-328 older lamps without colors remain valid",
+          chart._sanitize_widget({"kind": "lamp", "channel": "A", "onColor": None}) is not None)
+    chart.clear_widgets()
+
+    def edit_rules(action, palette=False):
+        failures = []
+
+        def interact():
+            try:
+                dialog = app.activeModalWidget()
+                check("R-329 rule settings use the same lamp dialog",
+                      isinstance(dialog, module.LampColorsDialog))
+                action(dialog)
+            except BaseException as exc:
+                failures.append(exc)
+                modal = app.activeModalWidget()
+                if isinstance(modal, QDialog):
+                    modal.reject()
+
+        QTimer.singleShot(0, interact)
+        if palette:
+            chart.lamp_rules_button.click()
+        else:
+            chart.edit_widget_sources(identifier)
+        if failures:
+            raise failures[0]
+
+    def configure_three_colors(dialog):
+        check("R-329 new lamp starts with numeric matching", dialog.match_values.isChecked())
+        dialog.rule_rows[0][1].setText("0")
+        pick(dialog.rule_rows[0][2], "#ff0000")
+        dialog.add_rule_button.click()
+        pick(dialog.rule_rows[1][2], "#ffffff")
+        dialog.add_rule_button.click()
+        pick(dialog.rule_rows[2][2], "#ffff00")
+        dialog.fallback_none.setChecked(True)
+        dialog.rule_rows[2][1].setText("1")
+        check("R-329 duplicate value prevents confirmation", not dialog.confirm.isEnabled())
+        dialog.rule_rows[2][1].setText("nan")
+        check("R-329 non-finite value prevents confirmation", not dialog.confirm.isEnabled())
+        dialog.rule_rows[2][1].setText("2")
+        check("R-329 valid unique values enable confirmation", dialog.confirm.isEnabled())
+        dialog.add_rule_button.click()
+        holder = dialog.rule_rows[-1][0]
+        remove = next(button for button in holder.findChildren(module.QPushButton)
+                      if button.toolTip() == chart.api.t("删除数值", "Remove value"))
+        remove.click()
+        check("R-329 remove button deletes only its rule", len(dialog.rule_rows) == 3)
+        dialog.grab().save(str(ROOT / ".artifacts" / "lamp-rules.png"))
+        dialog.confirm.click()
+
+    chart.kind_combo.setCurrentIndex(chart.kind_combo.findData("lamp"))
+    chart.channel_combo.setEditText("RULE_LAMP")
+    edit_rules(configure_three_colors, palette=True)
+    identifier = chart.add_widget_from_palette()
+    described = _describe(app, chart)["widgets"][0]
+    expected_rules = [{"value": 0.0, "color": "#ff0000"},
+                      {"value": 1.0, "color": "#ffffff"},
+                      {"value": 2.0, "color": "#ffff00"}]
+    check("R-329 created lamp carries all numeric rules",
+          described["colorRules"] == expected_rules and described["fallbackColor"] is None)
+    color_cases = [(0, "rgb(255, 0, 0)"), (1, "rgb(255, 255, 255)"),
+                   (2, "rgb(255, 255, 0)"), (3, "rgba(0, 0, 0, 0)")]
+    for value, expected_color in color_cases:
+        chart.replay_line(3 + value, f"[OmniCOM-chart] RULE_LAMP={value}")
+        chart.flush_live()
+        actual = rendered_color(expected_color)
+        displayed = _js(app, chart, "document.querySelector('[data-role=lampText]').textContent")
+        check(f"R-329 value {value} renders its mapped color", actual == expected_color, str(actual))
+        check("R-329 numeric lamp displays received value", float(displayed) == value, str(displayed))
+
+    before = chart.config_payload()
+
+    def cancel_rules(dialog):
+        dialog.rule_rows[0][1].setText("100")
+        dialog.reject()
+
+    edit_rules(cancel_rules)
+    check("R-329 canceling rule edits keeps all configuration", chart.config_payload() == before)
+
+    def configure_fallback(dialog):
+        dialog.fallback_none.setChecked(False)
+        pick(dialog.fallback_swatch, "#1976d2")
+        dialog.confirm.click()
+
+    edit_rules(configure_fallback)
+    _describe(app, chart)
+    chart.replay_line(7, "[OmniCOM-chart] RULE_LAMP=99")
+    chart.flush_live()
+    check("R-329 unmatched value can render a custom color",
+          rendered_color("rgb(25, 118, 210)") == "rgb(25, 118, 210)")
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "lamp.json"
+        chart.export_config(str(path))
+        exported_rules = json.loads(path.read_text(encoding="utf-8"))
+        chart.clear_widgets()
+        chart.apply_config(exported_rules)
+    restored = _describe(app, chart)["widgets"][0]
+    check("R-329 file round trip retains rules and fallback",
+          restored["colorRules"] == expected_rules and restored["fallbackColor"] == "#1976d2")
+    saved_layout = json.loads(str(chart.api.settings.value("layout")))
+    check("R-329 settings persist numeric rules", saved_layout["widgets"][0]["colorRules"] == expected_rules)
+
+    def configure_single(dialog):
+        for holder, _, _, _ in list(dialog.rule_rows):
+            dialog.remove_rule(holder)
+        dialog.add_rule_button.click()
+        dialog.rule_rows[0][1].setText("-3.5")
+        pick(dialog.rule_rows[0][2], "#ff0000")
+        dialog.fallback_none.setChecked(True)
+        dialog.confirm.click()
+
+    edit_rules(configure_single)
+    _describe(app, chart)
+    for value, expected_color in ((-3.5, "rgb(255, 0, 0)"), (0, "rgba(0, 0, 0, 0)")):
+        chart.replay_line(8, f"[OmniCOM-chart] RULE_LAMP={value}")
+        chart.flush_live()
+        check("R-329 single rule supports arbitrary trigger value",
+              rendered_color(expected_color) == expected_color)
+    single = _describe(app, chart)["widgets"][0]
+    check("R-329 single and multicolor lamps share one kind", single["kind"] == "lamp" and len(single["colorRules"]) == 1)
+
+    def configure_colorless_rule(dialog):
+        dialog.rule_rows[0][3].setChecked(True)
+        check("R-329 no-color rule disables its swatch", not dialog.rule_rows[0][2].isEnabled())
+        dialog.fallback_none.setChecked(False)
+        pick(dialog.fallback_swatch, "#1976d2")
+        dialog.confirm.click()
+
+    edit_rules(configure_colorless_rule)
+    _describe(app, chart)
+    chart.replay_line(9, "[OmniCOM-chart] RULE_LAMP=-3.5")
+    chart.flush_live()
+    check("R-329 explicit no-color rule overrides colored fallback", rendered_color("rgba(0, 0, 0, 0)") == "rgba(0, 0, 0, 0)")
+    chart.replay_line(10, "[OmniCOM-chart] RULE_LAMP=17")
+    chart.flush_live()
+    check("R-329 other values still use the colored fallback", rendered_color("rgb(25, 118, 210)") == "rgb(25, 118, 210)")
+    chart.clear_data()
+    chart.flush()
+    check("R-329 missing data is colorless, not a matching zero",
+          rendered_color("rgba(0, 0, 0, 0)") == "rgba(0, 0, 0, 0)"
+          and _js(app, chart, "document.querySelector('[data-role=lampText]').textContent") == "--")
+    for invalid in ([{"value": 0, "color": "red"}, {"value": "0", "color": "white"}],
+                    [{"value": float("inf"), "color": "red"}],
+                    [{"value": True, "color": "red"}], [{"color": "red"}],
+                    [{"value": 1, "color": "bad-color"}]):
+        check("R-329 malformed rules are rejected on import",
+              chart._sanitize_widget({"kind": "lamp", "channel": "A", "colorRules": invalid}) is None)
+    chart.lamp_rule_config = None
+    chart._on_kind_changed()
+    chart.clear_widgets()
+
+
+def chart_window_checks(app, chart) -> None:
+    saved = chart.config_payload()
+    try:
+        for retention in (100, 5000):
+            chart.clear_widgets()
+            chart.clear_data()
+            chart.seconds.setValue(0)
+            chart.drawn.setValue(5000)
+            chart.points.setValue(retention)
+            chart.kind_combo.setCurrentIndex(chart.kind_combo.findData("line"))
+            chart.channel_combo.setEditText("HISTORY_A, HISTORY_B")
+            chart.add_widget_from_palette()
+            previous = 0
+            for total in (128, 1000, 3200, 4999, 5000, 5101, 6200):
+                for index in range(previous, total):
+                    chart.replay_line(index / 100, f"[OmniCOM-chart] HISTORY_A={index} HISTORY_B={-index}")
+                chart.flush_live()
+                deadline = time.perf_counter() + 5
+                while chart._pending_ack and time.perf_counter() < deadline:
+                    app.processEvents()
+                check("R-164 history batch is acknowledged", not chart._pending_ack)
+                summary = json.loads(_js(app, chart,
+                    "JSON.stringify(echarts.getInstanceByDom(document.querySelector('.card[data-kind=line] .plot'))"
+                    ".getOption().series.map(s=>({name:s.name,count:s.data.length,first:s.data[0],last:s.data[s.data.length-1]})))"))
+                expected = min(total, retention)
+                drawn = min(expected, 5000)
+                buffers_complete = all(
+                    len(chart.samples[name]) == expected
+                    and chart.samples[name][0][0] == (total - expected) / 100
+                    and chart.samples[name][-1][0] == (total - 1) / 100
+                    for name in ("HISTORY_A", "HISTORY_B")
+                )
+                check("R-164 Python buffers retain the same complete window", buffers_complete)
+                page_complete = len(summary) == 2 and all(
+                    item["count"] == drawn
+                    and item["first"][0] == round((total - drawn) / 100, 4)
+                    and item["last"][0] == round((total - 1) / 100, 4)
+                    for item in summary
+                )
+                check(f"R-164 retention={retention} total={total} keeps the retained window and draws its tail", page_complete, str(summary))
+                check("R-164 eviction only after the explicit retention is full", total <= retention or chart.evicted >= total - retention)
+                previous = total
+    finally:
+        chart.clear_widgets()
+        chart.clear_data()
+        chart.apply_config(saved)
+
+
 def store_ui_checks(app) -> None:
     from PySide6.QtCore import QSettings
-    from PySide6.QtWidgets import QLineEdit, QWidget
+    from PySide6.QtWidgets import QLineEdit, QPushButton, QWidget
 
     from omnicom.plugin_store import CATALOG_URL, configured_catalogs
     from omnicom.ui.dialogs import PreferencesDialog
@@ -1445,6 +2177,174 @@ def store_ui_checks(app) -> None:
             app.processEvents()
         check("R-149 store reports partial failures without hiding successful catalog", not dialog.busy() and len(dialog.store.failures) == 1 and "1 个失败" in dialog.status.text() and "extra" in dialog.rows)
         dialog.close()
+
+        # ------------------------------------- R-323 disabled row actions
+        # A disabled bundled plugin is not gone: it must offer 启用 and it must
+        # NOT offer 卸载 - an uninstall button next to an already-disabled
+        # plugin is a second, contradictory answer to the same question
+        # (2026-11-23: "卸载之后，插件商店会显示 启用和卸载两个按钮").
+        core_root = root / "core-ui"
+        core_bundle = core_root / "bundle"
+        for name in ("terminal", "transfer"):
+            folder = core_bundle / name
+            folder.mkdir(parents=True)
+            atomic_json(folder / "plugin.json",
+                        {"id": name, "name": name, "version": "1.0.0",
+                         "api": API_VERSION, "entry": "plugin.py"})
+            (folder / "plugin.py").write_text(
+                "from PySide6.QtWidgets import QWidget\n\n\n"
+                "def create(api):\n    return QWidget()\n", encoding="utf-8")
+        core_store = PluginStore(core_root / "data", core_bundle, catalog_urls=[])
+        core_store.set_disabled("terminal", True)
+        core_dialog = PluginStoreDialog(window, core_store)
+        core_dialog.show()
+        app.processEvents()
+        row = core_dialog.rows["terminal"]
+        labels = [button.text() for button in row["widget"].findChildren(QPushButton)]
+        check("R-323 a disabled plugin only offers 启用, never 卸载",
+              "启用" in labels and "卸载" not in labels, str(labels))
+        check("R-323 the disabled row still reports its version",
+              row["item"]["installed_version"] == "1.0.0"
+              and row["item"]["disabled"] is True, str(row["item"]))
+        enabled = [button for button in row["widget"].findChildren(QPushButton)
+                   if button.text() == "启用"]
+        check("R-323 there is exactly one 启用 button", len(enabled) == 1, str(labels))
+        enabled[0].click()
+        deadline = time.perf_counter() + 10
+        while core_dialog.busy() and time.perf_counter() < deadline:
+            app.processEvents()
+        app.processEvents()
+        check("R-323 clicking 启用 clears the disabled flag",
+              core_store.disabled() == set(), str(core_store.disabled()))
+        restored = core_dialog.rows["terminal"]
+        labels = [button.text() for button in restored["widget"].findChildren(QPushButton)]
+        check("R-323 an enabled plugin gets its 卸载 action back",
+              "卸载" in labels and "启用" not in labels, str(labels))
+        core_dialog.close()
+        core_dialog.deleteLater()
+        app.processEvents()
+
+        # ------------------------------------- R-327 a real uninstall
+        # "Uninstall" must remove the plugin, not just mark it: the folder
+        # leaves the program, the store stops reporting it as installed, the
+        # row offers 安装, and installing again brings it back with the user's
+        # own data untouched.
+        uninstall_root = root / "uninstall-ui"
+        uninstall_bundle = uninstall_root / "bundle"
+        for name in ("terminal", "transfer"):
+            folder = uninstall_bundle / name
+            folder.mkdir(parents=True)
+            atomic_json(folder / "plugin.json",
+                        {"id": name, "name": name, "version": "1.0.0",
+                         "api": API_VERSION, "entry": "plugin.py"})
+            (folder / "plugin.py").write_text(
+                "from PySide6.QtWidgets import QWidget\n\n\n"
+                "def create(api):\n    return QWidget()\n", encoding="utf-8")
+        user_data = uninstall_root / "data" / "plugin-data" / "terminal" / "settings.ini"
+        user_data.parent.mkdir(parents=True)
+        user_data.write_bytes(b"keep me")
+        uninstall_store = PluginStore(uninstall_root / "data", uninstall_bundle,
+                                      catalog_urls=[])
+        placed = sorted(uninstall_store.installed())
+        check("R-327 the core plugins start out installed",
+              placed == ["terminal", "transfer"], str(placed))
+
+        uninstall_store.uninstall("terminal")
+        check("R-327 uninstall really removes the plugin folder",
+              not (uninstall_bundle / "terminal").is_dir(),
+              str(uninstall_bundle / "terminal"))
+        check("R-327 a removed plugin is no longer reported as installed",
+              sorted(uninstall_store.installed()) == ["transfer"],
+              str(sorted(uninstall_store.installed())))
+        check("R-327 uninstall keeps the user's plugin data",
+              user_data.read_bytes() == b"keep me")
+
+        removed_rows = {row["id"]: row for row in
+                        uninstall_store.rows(uninstall_store.cached_catalog())}
+        removed = removed_rows["terminal"]
+        check("R-327 a removed row claims neither installed nor disabled",
+              removed["installed_version"] is None
+              and removed["removed"] is True
+              and removed["disabled"] is False, str(removed))
+
+        removed_dialog = PluginStoreDialog(window, uninstall_store)
+        removed_dialog.show()
+        app.processEvents()
+        removed_row = removed_dialog.rows["terminal"]
+        labels = [button.text() for button in
+                  removed_row["widget"].findChildren(QPushButton)]
+        check("R-327 a removed row offers 安装 and nothing else",
+              "安装" in labels and "卸载" not in labels
+              and "启用" not in labels, str(labels))
+        check("R-327 a removed row installs instead of showing 已安装",
+              removed_row["install"].isEnabled()
+              and removed_row["install"].text() == "安装",
+              f"{removed_row['install'].text()} enabled={removed_row['install'].isEnabled()}")
+        removed_row["install"].click()
+        deadline = time.perf_counter() + 10
+        while removed_dialog.busy() and time.perf_counter() < deadline:
+            app.processEvents()
+        app.processEvents()
+        check("R-327 installing a removed plugin puts its folder back",
+              (uninstall_bundle / "terminal" / "plugin.json").is_file())
+        check("R-327 the reinstall clears the removed record",
+              uninstall_store.removed() == set(),
+              str(uninstall_store.removed()))
+        reinstalled = sorted(uninstall_store.installed())
+        check("R-327 the reinstalled plugin is installed again",
+              reinstalled == ["terminal", "transfer"], str(reinstalled))
+        check("R-327 reinstalling never touches the user's data",
+              user_data.read_bytes() == b"keep me")
+        removed_dialog.close()
+        removed_dialog.deleteLater()
+        app.processEvents()
+
+        # The host must obey the removal immediately: after a real uninstall its
+        # plugin is no longer loaded and its page is gone from the window, while
+        # the other plugin keeps working (R-327).
+        #
+        # The whole check runs against a throwaway data folder *and* a
+        # throwaway plugin folder.  A real uninstall moves files, so pointing it
+        # at the repository's own ``plugins/`` deleted the shipped terminal
+        # plugin while this suite ran (recovered with git).
+        from omnicom.plugins import PluginHost
+
+        host_data = root / "host-data"
+        host_plugins = root / "host-plugins"
+        for name in ("terminal", "transfer"):
+            folder = host_plugins / name
+            folder.mkdir(parents=True)
+            atomic_json(folder / "plugin.json",
+                        {"id": name, "name": name, "version": "1.0.0",
+                         "api": API_VERSION, "entry": "plugin.py",
+                         "page": "console" if name == "terminal" else "transfer"})
+            (folder / "plugin.py").write_text(
+                "from PySide6.QtWidgets import QWidget\n\n\n"
+                "def create(api):\n    return QWidget()\n", encoding="utf-8")
+        host = PluginHost()
+        original_paths = host.search_paths
+        host.search_paths = lambda: [str(host_plugins)]
+        try:
+            host.load()
+            before_ids = sorted(info.id for info in host.loaded())
+            check("R-327 the host loads both plugins from its own folder",
+                  before_ids == ["terminal", "transfer"], str(before_ids))
+            host_store = PluginStore(host_data, host_plugins, catalog_urls=[])
+            host_store.uninstall("terminal")
+            host.unload()
+            host.load()
+            after_ids = sorted(info.id for info in host.loaded())
+            check("R-327 the host stops loading a removed plugin",
+                  "terminal" not in after_ids, str(after_ids))
+            check("R-327 the other plugin is unaffected",
+                  "transfer" in after_ids
+                  and (host_plugins / "transfer" / "plugin.json").is_file(),
+                  str(after_ids))
+            check("R-327 the removed folder is really gone from disk",
+                  not (host_plugins / "terminal").exists())
+        finally:
+            host.search_paths = original_paths
+            host.unload()
 
         # ------------------------------------------------------- R-178 picker
         history_root = root / "versions"
@@ -2523,6 +3423,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark", action="store_true")
     parser.add_argument("--chart-only", action="store_true")
+    parser.add_argument("--interaction-only", action="store_true")
     args = parser.parse_args()
     data = Path(os.environ["OMNICOM_DATA_DIR"])
     if data.exists():
@@ -2545,16 +3446,26 @@ def main() -> int:
         QFontDatabase.addApplicationFont("C:/Windows/Fonts/" + font)
     app.setStyle("Fusion")
     app.setStyleSheet(theme.app_stylesheet())
+    chart_capacity_checks()
+    source_dialog_checks(app)
     if not args.chart_only:
-        store_checks()
-        multi_source_checks()
-        catalog_build_checks()
-        decoupling_checks()
+        for mode in ("dual", "user", "bundled"):
+            uninstall_cycle_checks(app, mode)
+        uninstall_rollback_checks()
+        if not args.interaction_only:
+            store_checks()
+            multi_source_checks()
+            catalog_build_checks()
+            decoupling_checks()
     host, chart, parser_class = chart_checks(app, KINDS)
     chart_transport_checks(chart)
     chart_readout_checks(app, chart)
-    chart_stream_checks(app, chart)
-    if not args.chart_only:
+    curve_sources_checks(app, chart, KINDS)
+    chart_display_controls_checks(app, chart)
+    chart_window_checks(app, chart)
+    if not args.interaction_only:
+        chart_stream_checks(app, chart)
+    if not args.chart_only and not args.interaction_only:
         launcher_checks(app)
         search_checks(app)
         store_ui_checks(app)

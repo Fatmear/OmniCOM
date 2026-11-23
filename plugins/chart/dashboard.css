@@ -133,6 +133,21 @@ html, body {
 .card:hover .del { display: block; }
 .card .del:hover { background: rgba(197, 52, 52, 0.10); }
 
+.card .sources {
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: var(--radius-ctrl);
+  padding: 0;
+  background: transparent;
+  color: var(--ink2);
+  font-size: 15px;
+  line-height: 20px;
+  cursor: pointer;
+}
+.card .sources:hover { background: var(--teal-soft); color: var(--teal); }
+
 .card .body { position: relative; flex: 1 1 auto; min-height: 0; }
 .card .plot { position: absolute; inset: 0; }
 

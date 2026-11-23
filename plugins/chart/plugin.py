@@ -28,19 +28,39 @@ import contextlib
 import csv
 import json
 import math
+import re
 import time
 from collections import deque
 from itertools import islice
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import (
+    QEvent,
+    QObject,
+    QPointF,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    Signal,
+    Slot,
+)
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QColorDialog,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QStackedWidget,
+    QStyle,
+    QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
@@ -100,6 +120,431 @@ _STROKE = "rgba(18, 26, 43, 0.10)"
 _STROKE_SOFT = "rgba(18, 26, 43, 0.07)"
 
 
+def source_names(text: str) -> list[str]:
+    return list(dict.fromkeys(
+        name.strip() for name in re.split(r"[,;\s]+", text) if name.strip()
+    ))
+
+
+class SourceDelegate(QStyledItemDelegate):
+    def __init__(self, theme, parent) -> None:
+        super().__init__(parent)
+        self.theme = theme
+
+    def paint(self, painter, option, index) -> None:
+        painter.save()
+        try:
+            theme = self.theme
+            selected = bool(option.state & QStyle.StateFlag.State_Selected)
+            hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+            background = (theme.TEAL_SOFT if selected else
+                          theme.WASH_HOVER if hovered else theme.CARD)
+            painter.fillRect(option.rect, QColor(background))
+            text_rect = option.rect.adjusted(theme.CHECK_SIZE + 20, 0, -8, 0)
+            painter.setFont(option.font)
+            painter.setPen(QColor(theme.INK))
+            text = option.fontMetrics.elidedText(
+                str(index.data(Qt.ItemDataRole.DisplayRole)),
+                Qt.TextElideMode.ElideRight, text_rect.width(),
+            )
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft
+                             | Qt.AlignmentFlag.AlignVCenter, text)
+            size = theme.CHECK_SIZE
+            box = QRectF(option.rect.left() + 8,
+                         option.rect.center().y() - size / 2, size, size)
+            checked = (index.data(Qt.ItemDataRole.CheckStateRole)
+                       == Qt.CheckState.Checked.value)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            border = theme.TEAL if checked else theme.LINE_STRONG
+            painter.setPen(QPen(QColor(border), 1))
+            painter.setBrush(QColor(theme.TEAL if checked else theme.CARD))
+            radius = theme.CHECK_RADIUS
+            painter.drawRoundedRect(box, radius, radius)
+            if checked:
+                painter.setPen(QPen(
+                    QColor(theme.CARD), 1.8, Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin,
+                ))
+                start = QPointF(box.left() + size * 0.23,
+                                box.top() + size * 0.51)
+                corner = QPointF(box.left() + size * 0.43,
+                                 box.top() + size * 0.71)
+                end = QPointF(box.left() + size * 0.78,
+                              box.top() + size * 0.29)
+                painter.drawLine(start, corner)
+                painter.drawLine(corner, end)
+        finally:
+            painter.restore()
+
+
+class SourceList(QListWidget):
+    def mousePressEvent(self, event) -> None:
+        self._pressed_item = None
+        if event.button() == Qt.MouseButton.LeftButton:
+            item = self.itemAt(event.position().toPoint())
+            if item is not None:
+                self._pressed_item = item
+                self.setCurrentItem(item)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            item = self.itemAt(event.position().toPoint())
+            if item is not None and item is getattr(
+                    self, "_pressed_item", None):
+                checked = item.checkState() == Qt.CheckState.Checked
+                item.setCheckState(Qt.CheckState.Unchecked if checked
+                                   else Qt.CheckState.Checked)
+            self._pressed_item = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class SourcesDialog(QDialog):
+    def __init__(self, api, available, selected, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(api.t("曲线数据来源", "Curve data sources"))
+        self.resize(400, 360)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(api.t("通道", "Channels")))
+        self.channels = SourceList(self)
+        self.channels.setMouseTracking(True)
+        self.channels.setUniformItemSizes(True)
+        self.channels.setSpacing(2)
+        theme = api.theme()
+        self.channels.setItemDelegate(SourceDelegate(theme, self.channels))
+        for name in dict.fromkeys([*available, *selected]):
+            item = QListWidgetItem(name, self.channels)
+            height = max(theme.CTRL_H, self.fontMetrics().height() + 14)
+            item.setSizeHint(QSize(0, height))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if name in selected
+                               else Qt.CheckState.Unchecked)
+        layout.addWidget(self.channels, 1)
+        layout.addWidget(QLabel(api.t("数据来源", "Data sources")))
+        self.names = QLineEdit(", ".join(selected), self)
+        self.names.setPlaceholderText("AA, BB, CC")
+        layout.addWidget(self.names)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel = QPushButton(api.t("取消", "Cancel"), self)
+        cancel.clicked.connect(self.reject)
+        actions.addWidget(cancel)
+        self.confirm = QPushButton(api.t("确定", "OK"), self)
+        self.confirm.setObjectName("Primary")
+        self.confirm.clicked.connect(self.accept)
+        actions.addWidget(self.confirm)
+        layout.addLayout(actions)
+        self.channels.itemChanged.connect(self._selection_changed)
+        self.names.textChanged.connect(self._text_changed)
+        self._text_changed()
+
+    def sources(self) -> list[str]:
+        return source_names(self.names.text())
+
+    def _selection_changed(self, _item) -> None:
+        items = [self.channels.item(index) for index in range(self.channels.count())]
+        known = {item.text() for item in items}
+        selected = [item.text() for item in items
+                    if item.checkState() == Qt.CheckState.Checked]
+        selected.extend(name for name in self.sources() if name not in known)
+        self.names.setText(", ".join(selected))
+
+    def _text_changed(self, *_args) -> None:
+        selected = self.sources()
+        self.confirm.setEnabled(bool(selected))
+        self.channels.blockSignals(True)
+        try:
+            for index in range(self.channels.count()):
+                item = self.channels.item(index)
+                item.setCheckState(Qt.CheckState.Checked if item.text() in selected
+                                   else Qt.CheckState.Unchecked)
+        finally:
+            self.channels.blockSignals(False)
+
+
+class ColorSwatch(QPushButton):
+    def __init__(self, api, color, title, parent=None) -> None:
+        super().__init__(parent)
+        self.api = api
+        self.title = title
+        self.setObjectName("LampColorSwatch")
+        self.setToolTip(title)
+        self.setMinimumSize(api.theme().CTRL_H, api.theme().CTRL_H)
+        self.clicked.connect(self.pick)
+        self.set_color(color)
+
+    def set_color(self, color) -> None:
+        value = QColor(color)
+        if not value.isValid():
+            raise ValueError("invalid lamp color")
+        self.color_name = value.name()
+        theme = self.api.theme()
+        self.setStyleSheet(
+            f"QPushButton#LampColorSwatch {{ background: {self.color_name}; "
+            f"border: 1px solid {theme.LINE_STRONG}; "
+            f"border-radius: {theme.RADIUS_CTRL}px; padding: 0; }}"
+            f"QPushButton#LampColorSwatch:hover {{ border: 2px solid {theme.INK}; }}"
+        )
+
+    def pick(self) -> None:
+        dialog = QColorDialog(QColor(self.color_name), self)
+        dialog.setWindowTitle(self.title)
+        dialog.setOption(QColorDialog.ColorDialogOption.DontUseNativeDialog)
+        labels = {
+            "Basic colors": "基本颜色", "Custom colors": "自定义颜色",
+            "Hue": "色相", "Sat": "饱和度", "Val": "亮度",
+            "Red": "红", "Green": "绿", "Blue": "蓝",
+            "Alpha channel": "透明度", "HTML": "颜色代码",
+            "Pick Screen Color": "拾取屏幕颜色",
+            "Add to Custom Colors": "加入自定义颜色",
+            "OK": "确定", "Cancel": "取消",
+        }
+        for child in dialog.findChildren(QLabel) + dialog.findChildren(QPushButton):
+            text = child.text().replace("&", "")
+            key = text.removesuffix(":")
+            if key in labels:
+                child.setText(self.api.t(labels[key], key) + (":" if text.endswith(":") else ""))
+        try:
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.set_color(dialog.selectedColor())
+        finally:
+            dialog.deleteLater()
+
+
+def normalize_lamp_rules(raw: dict) -> dict:
+    if raw.get("colorRules") is None:
+        return {}
+    rules = raw["colorRules"]
+    if not isinstance(rules, list) or len(rules) > 128:
+        raise ValueError("invalid lamp rules")
+
+    def color_name(value):
+        if value is None:
+            return None
+        if not isinstance(value, str) or not QColor(value).isValid():
+            raise ValueError("invalid lamp color")
+        return QColor(value).name()
+
+    normalized = []
+    seen = set()
+    for rule in rules:
+        if not isinstance(rule, dict) or isinstance(rule.get("value"), bool):
+            raise ValueError("invalid lamp value")
+        try:
+            value = float(rule["value"])
+            color = color_name(rule["color"])
+        except (KeyError, TypeError, OverflowError) as exc:
+            raise ValueError("invalid lamp rule") from exc
+        if not math.isfinite(value) or value in seen:
+            raise ValueError("invalid or duplicate lamp value")
+        seen.add(value)
+        normalized.append({"value": value, "color": color})
+    return {
+        "colorRules": normalized,
+        "fallbackColor": color_name(raw.get("fallbackColor")),
+    }
+
+
+class LampColorsDialog(QDialog):
+    def __init__(self, api, widget, parent=None) -> None:
+        super().__init__(parent)
+        self.api = api
+        self.setWindowTitle(api.t("灯数值与颜色", "Lamp values and colors"))
+        self.resize(460, 380)
+        layout = QVBoxLayout(self)
+        self.match_values = QCheckBox(
+            api.t("按数值匹配", "Match values"), self
+        )
+        self.match_values.setChecked(
+            isinstance(widget.get("colorRules"), list)
+        )
+        layout.addWidget(self.match_values)
+        self.legacy_panel = QWidget(self)
+        legacy = QVBoxLayout(self.legacy_panel)
+        legacy.setContentsMargins(0, 0, 0, 0)
+        self.swatches = {}
+        for key, label, default in (
+            ("onColor", api.t("亮", "On"), api.theme().TEAL),
+            ("offColor", api.t("灭", "Off"), "#C8D0DC"),
+        ):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label))
+            swatch = ColorSwatch(api, widget.get(key) or default, label, self)
+            self.swatches[key] = swatch
+            row.addWidget(swatch)
+            row.addStretch(1)
+            legacy.addLayout(row)
+        layout.addWidget(self.legacy_panel)
+        self.rule_panel = QWidget(self)
+        rule_layout = QVBoxLayout(self.rule_panel)
+        rule_layout.setContentsMargins(0, 0, 0, 0)
+        headings = QHBoxLayout()
+        headings.addWidget(QLabel(api.t("数值", "Value")))
+        headings.addWidget(QLabel(api.t("颜色", "Color")))
+        rule_layout.addLayout(headings)
+        scroll = QScrollArea(self.rule_panel)
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumHeight(140)
+        self.rule_host = QWidget(scroll)
+        self.rule_layout = QVBoxLayout(self.rule_host)
+        self.rule_layout.setContentsMargins(0, 0, 0, 0)
+        self.rule_layout.addStretch(1)
+        scroll.setWidget(self.rule_host)
+        rule_layout.addWidget(scroll)
+        self.rule_rows = []
+        self.add_rule_button = QPushButton(
+            api.t("添加数值", "Add value"), self
+        )
+        self.add_rule_button.clicked.connect(self.add_rule)
+        rule_layout.addWidget(self.add_rule_button)
+        fallback = QHBoxLayout()
+        fallback.addWidget(QLabel(api.t("其它值", "Other values")))
+        fallback_color = (
+            widget.get("fallbackColor")
+            if self.match_values.isChecked()
+            else widget.get("offColor", "#C8D0DC")
+        )
+        self.fallback_swatch = ColorSwatch(
+            api,
+            fallback_color or "#C8D0DC",
+            api.t("其它值颜色", "Other values color"),
+            self,
+        )
+        self.fallback_none = QCheckBox(api.t("无色", "No color"), self)
+        self.fallback_none.setChecked(fallback_color is None)
+        self.fallback_none.toggled.connect(self._validate)
+        fallback.addWidget(self.fallback_swatch)
+        fallback.addWidget(self.fallback_none)
+        fallback.addStretch(1)
+        rule_layout.addLayout(fallback)
+        layout.addWidget(self.rule_panel)
+        self.error = QLabel(
+            api.t("数值必须有效且不能重复", "Values must be valid and unique"),
+            self,
+        )
+        layout.addWidget(self.error)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel = QPushButton(api.t("取消", "Cancel"), self)
+        cancel.clicked.connect(self.reject)
+        actions.addWidget(cancel)
+        self.confirm = QPushButton(api.t("确定", "OK"), self)
+        self.confirm.clicked.connect(self.accept)
+        actions.addWidget(self.confirm)
+        layout.addLayout(actions)
+        self.match_values.toggled.connect(self._validate)
+        rules = widget.get("colorRules")
+        if not isinstance(rules, list):
+            rules = [
+                {
+                    "value": 1,
+                    "color": widget.get("onColor") or api.theme().TEAL,
+                }
+            ]
+        for rule in rules:
+            self._append_rule(rule["value"], rule["color"])
+        self._validate()
+
+    def _append_rule(self, value, color) -> None:
+        holder = QWidget(self.rule_host)
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        editor = QLineEdit(repr(float(value)), holder)
+        editor.setMinimumWidth(80)
+        editor.setAccessibleName(self.api.t("数值", "Value"))
+        swatch = ColorSwatch(
+            self.api,
+            color or self.api.theme().TEAL,
+            self.api.t("匹配颜色", "Matched color"),
+            holder,
+        )
+        no_color = QCheckBox(self.api.t("无色", "No color"), holder)
+        no_color.setChecked(color is None)
+        remove = self.api.glyph("close")(parent=holder)
+        remove.setToolTip(self.api.t("删除数值", "Remove value"))
+        remove.clicked.connect(lambda: self.remove_rule(holder))
+        row.addWidget(editor, 1)
+        row.addWidget(swatch)
+        row.addWidget(no_color)
+        row.addWidget(remove)
+        self.rule_rows.append((holder, editor, swatch, no_color))
+        self.rule_layout.insertWidget(self.rule_layout.count() - 1, holder)
+        editor.textChanged.connect(self._validate)
+        no_color.toggled.connect(self._validate)
+        self._validate()
+
+    def add_rule(self) -> None:
+        if len(self.rule_rows) >= 128:
+            return
+        used = set()
+        for _, editor, _, _ in self.rule_rows:
+            with contextlib.suppress(ValueError):
+                used.add(float(editor.text()))
+        value = 0
+        while value in used:
+            value += 1
+        self._append_rule(value, self.api.theme().TEAL)
+
+    def remove_rule(self, holder) -> None:
+        self.rule_rows = [
+            row for row in self.rule_rows if row[0] is not holder
+        ]
+        self.rule_layout.removeWidget(holder)
+        holder.hide()
+        holder.deleteLater()
+        self._validate()
+
+    def _rules_payload(self) -> dict:
+        return normalize_lamp_rules(
+            {
+                "colorRules": [
+                    {
+                        "value": editor.text(),
+                        "color": None
+                        if no_color.isChecked()
+                        else swatch.color_name,
+                    }
+                    for _, editor, swatch, no_color in self.rule_rows
+                ],
+                "fallbackColor": None
+                if self.fallback_none.isChecked()
+                else self.fallback_swatch.color_name,
+            }
+        )
+
+    def _validate(self, *_args) -> None:
+        matching = self.match_values.isChecked()
+        self.legacy_panel.setVisible(not matching)
+        self.rule_panel.setVisible(matching)
+        self.fallback_swatch.setEnabled(not self.fallback_none.isChecked())
+        for _, _, swatch, no_color in self.rule_rows:
+            swatch.setEnabled(not no_color.isChecked())
+        valid = True
+        if matching:
+            try:
+                self._rules_payload()
+            except (ValueError, TypeError, OverflowError):
+                valid = False
+        self.error.setVisible(not valid)
+        self.confirm.setEnabled(valid)
+        self.add_rule_button.setEnabled(len(self.rule_rows) < 128)
+
+    def colors(self) -> dict:
+        if self.match_values.isChecked():
+            return self._rules_payload()
+        return {
+            "colorRules": None,
+            "fallbackColor": None,
+            **{
+                key: swatch.color_name for key, swatch in self.swatches.items()
+            },
+        }
+
+
 class WheelZoomGuard(QObject):
     """Swallow Ctrl+wheel before Chromium turns it into a **page** zoom (R-170).
 
@@ -140,6 +585,7 @@ class DashboardBridge(QObject):
     acked = Signal(int)
     #: The paint cost the page reported for that batch, in milliseconds.
     painted = Signal(float)
+    sourcesRequested = Signal(str)
 
     @Slot(str, str)
     def action(self, name: str, payload: str) -> None:
@@ -159,6 +605,8 @@ class DashboardBridge(QObject):
             self.layoutChanged.emit(json.dumps(data, ensure_ascii=False))
         elif name == "hello":
             self.greeted.emit(str(data.get("tag") or ""))
+        elif name == "sources":
+            self.sourcesRequested.emit(str(data.get("id") or ""))
         elif name == "acked":
             # The page finished the batch we handed it.  Acking is what turns
             # "send everything again" into "send only what is new": without it
@@ -417,6 +865,22 @@ class DashboardPanel(QWidget):
         self.channel_combo = self.api.combo(editable=True)
         self.channel_combo.setMinimumWidth(110)
         bar.addWidget(self.channel_combo)
+        self.sources_button = self.api.glyph("edit")(parent=self)
+        self.sources_button.clicked.connect(self.choose_palette_sources)
+        bar.addWidget(self.sources_button)
+        self.lamp_on_color = ColorSwatch(
+            self.api, self.api.theme().TEAL,
+            self.api.t("亮灯颜色", "Lamp on color"), self,
+        )
+        self.lamp_off_color = ColorSwatch(
+            self.api, "#C8D0DC", self.api.t("灭灯颜色", "Lamp off color"), self,
+        )
+        bar.addWidget(self.lamp_on_color)
+        bar.addWidget(self.lamp_off_color)
+        self.lamp_rule_config = None
+        self.lamp_rules_button = self.api.glyph("edit")(parent=self)
+        self.lamp_rules_button.clicked.connect(self.choose_palette_lamp_colors)
+        bar.addWidget(self.lamp_rules_button)
         self.title_edit = QLineEdit()
         self.title_edit.setMinimumWidth(110)
         bar.addWidget(self.title_edit)
@@ -501,6 +965,7 @@ class DashboardPanel(QWidget):
         self.surface_error = None
         self.bridge = DashboardBridge(self)
         self.bridge.layoutChanged.connect(self._on_layout_from_page)
+        self.bridge.sourcesRequested.connect(self.edit_widget_sources)
         self.bridge.greeted.connect(lambda *_: self._after_greeting())
         self.bridge.acked.connect(self._on_acked)
         self.bridge.painted.connect(self._on_paint_cost)
@@ -606,6 +1071,7 @@ class DashboardPanel(QWidget):
                 # ``deque.maxlen`` is read-only, so re-cap by rebuilding: keep
                 # the newest ``limit`` samples instead of mutating internals.
                 kept = list(samples)[-limit:]
+                self.evicted += len(samples) - len(kept)
                 self.samples[name] = deque(kept, maxlen=limit)
         self._push_points()
         self.request_resync()
@@ -694,7 +1160,7 @@ class DashboardPanel(QWidget):
 
     def _push_points(self) -> None:
         """Tell the page the retention cap and the drawn window (R-301)."""
-        self._call_js("setPoints", {"limit": self._number("points", 0),
+        self._call_js("setPoints", {"limit": self._capacity(),
                                     "visible": self._visible_points()})
 
     def _call_js(self, name: str, payload) -> None:
@@ -754,7 +1220,7 @@ class DashboardPanel(QWidget):
         limit = self._number("points", 0)
         if limit <= 0:
             return MAX_POINTS
-        return max(100, min(MAX_POINTS, limit))
+        return min(MAX_POINTS, max(100, limit))
 
     def _visible_points(self) -> int:
         """How many points one curve hands to ECharts per frame.
@@ -832,7 +1298,7 @@ class DashboardPanel(QWidget):
         *live* dashboard knob; replay of a log file uses its own window.
         """
         left = self._window_start()
-        limit = self._number("points", 0)
+        limit = self._capacity()
         trimmed: dict[str, list[list[float]]] = {}
         for name in self._visible_channels():
             samples = self.samples.get(name)
@@ -1000,19 +1466,98 @@ class DashboardPanel(QWidget):
 
     # ---------------------------------------------------------------- widgets
     def add_widget_from_palette(self) -> str | None:
-        kind = str(self.kind_combo.currentData() or "line")
         channel = self.channel_combo.currentText().strip()
-        if not channel:
+        sources = source_names(channel)
+        kind = str(self.kind_combo.currentData() or "line")
+        channels = sources if kind == "line" else sources[:1]
+        if not channel or not sources:
             self.api.notify(self.api.t("先选择一个通道", "Pick a channel first"), "warn")
             return None
         return self.add_widget({
             "kind": kind,
-            "channel": channel,
+            "channel": channels[0],
+            **({"channels": channels} if kind == "line" else {}),
+            **(self._palette_lamp_colors() if kind == "lamp" else {}),
             "title": self.title_edit.text().strip() or channel,
             "unit": self.unit_edit.text().strip(),
             "min": self._float_or(self.min_edit.text(), 0.0),
             "max": self._float_or(self.max_edit.text(), 100.0),
         })
+
+    def _pick_sources(self, selected: list[str]) -> list[str] | None:
+        dialog = SourcesDialog(self.api, self.order, selected, self)
+        try:
+            return dialog.sources() if dialog.exec() == QDialog.DialogCode.Accepted else None
+        finally:
+            dialog.deleteLater()
+
+    def choose_palette_sources(self) -> None:
+        if self.kind_combo.currentData() != "line":
+            return
+        sources = self._pick_sources(source_names(self.channel_combo.currentText()))
+        if sources:
+            self.channel_combo.setEditText(", ".join(sources))
+            self.kind_combo.setCurrentIndex(self.kind_combo.findData("line"))
+
+    def choose_palette_lamp_colors(self) -> None:
+        if self.kind_combo.currentData() != "lamp":
+            return
+        dialog = LampColorsDialog(self.api, self._palette_lamp_colors(), self)
+        try:
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.lamp_rule_config = dialog.colors()
+                self._on_kind_changed()
+        finally:
+            dialog.deleteLater()
+
+    def _palette_lamp_colors(self) -> dict:
+        if self.lamp_rule_config is not None:
+            return dict(self.lamp_rule_config)
+        return {"colorRules": [{"value": 1, "color": self.lamp_on_color.color_name}],
+                "fallbackColor": self.lamp_off_color.color_name}
+
+    def edit_widget_sources(self, identifier: str) -> None:
+        lamp = next((item for item in self.layout_data.get("widgets", [])
+                     if item.get("id") == identifier
+                     and item.get("kind") == "lamp"), None)
+        if lamp is not None:
+            dialog = LampColorsDialog(self.api, lamp, self)
+            try:
+                if dialog.exec() == QDialog.DialogCode.Accepted:
+                    lamp = next((item for item in self.layout_data.get("widgets", [])
+                                 if item.get("id") == identifier
+                                 and item.get("kind") == "lamp"), None)
+                    if lamp is None:
+                        return
+                    lamp.update(dialog.colors())
+                    self._save_layout()
+                    self._call_js("updateWidget", {"id": identifier,
+                                                   **dialog.colors()})
+            finally:
+                dialog.deleteLater()
+            return
+        widget = next((item for item in self.layout_data.get("widgets", [])
+                       if item.get("id") == identifier and item.get("kind") == "line"), None)
+        if widget is None:
+            return
+        sources = self._pick_sources(widget.get("channels") or [widget["channel"]])
+        if sources:
+            self.update_widget_sources(identifier, sources)
+
+    def update_widget_sources(self, identifier: str, sources: list[str]) -> bool:
+        sources = list(dict.fromkeys(name.strip() for name in sources if name.strip()))
+        widget = next((item for item in self.layout_data.get("widgets", [])
+                       if item.get("id") == identifier and item.get("kind") == "line"), None)
+        if widget is None or not sources:
+            return False
+        widget.update(channel=sources[0], channels=sources)
+        self._save_layout()
+        self.request_resync()
+        if self.page_ready:
+            self._call_js("updateWidget", {
+                "id": identifier, "channel": sources[0], "channels": sources,
+            })
+        return True
 
     def add_widget(self, payload: dict) -> str | None:
         """Add one widget; the page chooses where it lands.
@@ -1115,6 +1660,17 @@ class DashboardPanel(QWidget):
         for key in ("onText", "offText"):
             if key in raw:
                 widget[key] = str(raw[key])
+        if kind == "lamp":
+            try:
+                widget.update(normalize_lamp_rules(raw))
+            except (ValueError, TypeError, OverflowError):
+                return None
+            for key in ("onColor", "offColor"):
+                if raw.get(key) is not None:
+                    color = QColor(str(raw[key]))
+                    if not color.isValid():
+                        return None
+                    widget[key] = color.name()
         for key, default in (("min", 0.0), ("max", 100.0)):
             value = raw.get(key, default)
             try:
@@ -1258,6 +1814,17 @@ class DashboardPanel(QWidget):
 
     def _on_kind_changed(self, *_args) -> None:
         kind = str(self.kind_combo.currentData() or "line")
+        self.sources_button.setVisible(kind == "line")
+        self.lamp_on_color.setVisible(kind == "lamp")
+        self.lamp_off_color.setVisible(kind == "lamp")
+        self.lamp_rules_button.setVisible(kind == "lamp")
+        if self.lamp_rule_config is not None:
+            self.lamp_on_color.hide()
+            self.lamp_off_color.hide()
+        if kind != "line":
+            sources = source_names(self.channel_combo.currentText())
+            if len(sources) > 1:
+                self.channel_combo.setEditText(sources[0])
         # A progress bar is meaningless without the range it fills between, so
         # bar and gauge both own 范围; the unit makes the number readable.
         for widget in (self.range_label, self.min_edit, self.max_edit):
@@ -1384,6 +1951,8 @@ class DashboardPanel(QWidget):
             "ok": theme.OK,
             "line": _STROKE,
             "lineSoft": _STROKE_SOFT,
+            "sourceLabel": self.api.t("曲线数据来源", "Curve data sources"),
+            "lampColorLabel": self.api.t("灯数值与颜色", "Lamp values and colors"),
         }
         self._call_js("setTheme", payload)
 
@@ -1444,6 +2013,12 @@ class DashboardPanel(QWidget):
         self.clear_button.setToolTip(self.api.t("清空接收数据", "Clear received data"))
         self.kind_label.setText(self.api.t("控件", "Widget"))
         self.channel_label.setText(self.api.t("通道", "Channel"))
+        self.sources_button.setToolTip(self.api.t("曲线数据来源", "Curve data sources"))
+        self.lamp_rules_button.setToolTip(self.api.t("灯数值与颜色", "Lamp values and colors"))
+        for swatch, zh, en in ((self.lamp_on_color, "数值1颜色", "Value 1 color"),
+                      (self.lamp_off_color, "其它值颜色", "Other values color")):
+            swatch.title = self.api.t(zh, en)
+            swatch.setToolTip(swatch.title)
         self.title_edit.setPlaceholderText(self.api.t("标题（可空）", "Title (optional)"))
         self.unit_label.setText(self.api.t("单位", "Unit"))
         self.range_label.setText(self.api.t("范围", "Range"))
@@ -1458,6 +2033,9 @@ class DashboardPanel(QWidget):
         if self.surface_error is not None:
             self.fallback_label.setText(self._fallback_text())
         self.refresh_status()
+
+        if self.page_ready:
+            self.apply_theme()
 
 
 def create(api) -> QWidget:

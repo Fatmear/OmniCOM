@@ -38,6 +38,35 @@ shutil.rmtree(_DATA_DIR, ignore_errors=True)
 os.environ["OMNICOM_DATA_DIR"] = _DATA_DIR
 os.makedirs(_DATA_DIR, exist_ok=True)
 
+
+def _read_source(*parts: str) -> str:
+    with open(os.path.join(ROOT, *parts), encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _host_rx_source() -> str:
+    """``OmniWindow._on_rx`` with its comments stripped (R-326).
+
+    A prose comment explaining that the host no longer calls ``absorb`` must
+    not be mistaken for an actual call, so comment-only lines are dropped
+    before the check runs.
+    """
+    source = _read_source("omnicom", "ui", "main_window.py")
+    start = source.find("def _on_rx(")
+    if start < 0:
+        return ""
+    body = source[start:start + 2000]
+    return "\n".join(line for line in body.splitlines()
+                     if not line.strip().startswith("#"))
+
+
+def _terminal_source() -> str:
+    """Entry point of the terminal plugin (R-326)."""
+    source = _read_source("plugins", "terminal", "plugin.py")
+    start = source.find("def create(api)")
+    return source[start:] if start >= 0 else ""
+
+
 from PySide6.QtCore import (  # noqa: E402
     QEvent,
     QObject,
@@ -1495,7 +1524,7 @@ def main() -> int:
         from omnicom.i18n import tr
         from omnicom.ui.terminal import TerminalView
 
-        view = window.console.view
+        view = window.plugin_page("console").view
         check("R-091 终端视图有右键菜单",
               isinstance(view, TerminalView) and hasattr(view, "contextMenuEvent"))
         # The terminal strings moved into the plugin (R-322), so a bare ``tr(key)``
@@ -2219,12 +2248,12 @@ def main() -> int:
         window.switch_page("console")
         app.processEvents()
         check("R-026 存在独立的终端模式页",
-              "console" in window._page_keys and window.console.isVisible())
+              "console" in window._page_keys and window.plugin_page("console").isVisible())
         state["tx_term"] = window.bridge.manager.tx_bytes
-        window.console.feed(b"login: ")
-        window.console.feed(b"root\r\n")
-        window.console.feed(b"\x1b[32mOK\x1b[0m\r\n")
-        text = window.console.view.toPlainText()
+        window.plugin_page("console").feed(b"login: ")
+        window.plugin_page("console").feed(b"root\r\n")
+        window.plugin_page("console").feed(b"\x1b[32mOK\x1b[0m\r\n")
+        text = window.plugin_page("console").view.toPlainText()
         check("R-026 终端解释 CR 与 ANSI 颜色序列",
               "login: root" in text and "OK" in text and "\x1b" not in text,
               text.replace("\n", "|")[:60])
@@ -2234,14 +2263,14 @@ def main() -> int:
                 app.processEvents()
                 if window.bridge.state().get("connected"):
                     break
-        window.console.view.keyBytes.emit(b"AT\r")
+        window.plugin_page("console").view.keyBytes.emit(b"AT\r")
         app.processEvents()
         grew = window.bridge.manager.tx_bytes - state["tx_term"]
         # Exactly 3: one byte per keystroke.  A value of 6 is the R-292 double
         # send ("ls" arriving as "llss"), which is why this is `==` and not `>=`.
         check("R-026 键盘输入直达串口，且每个字节只发一次", grew == 3,
               f"+{grew} B")
-        window.console.view.reset()
+        window.plugin_page("console").view.reset()
         window.switch_page("terminal")
         app.processEvents()
         next_()
@@ -2422,26 +2451,30 @@ def main() -> int:
 
         # ---- R-218: 终端 / 文件传输 are plugins, not host-built pages --------
         loaded_ids = {item.id: item for item in window.plugins.loaded()}
-        check("R-218 终端与文件传输都以插件形式加载",
+        check("R-326 终端与文件传输都以普通插件加载",
               "terminal" in loaded_ids and "transfer" in loaded_ids,
               str(sorted(loaded_ids)))
-        check("R-218 window.console 就是 terminal 插件控件（宿主不自建）",
-              loaded_ids.get("terminal") is not None
-              and window.console is loaded_ids["terminal"].widget,
-              type(window.console).__name__)
-        check("R-218 window.transfer 就是 transfer 插件控件",
-              loaded_ids.get("transfer") is not None
-              and window.transfer is loaded_ids["transfer"].widget,
-              type(window.transfer).__name__)
-        check("R-218 插件通过 service 暴露能力",
+        check("R-326 宿主按清单页键挂载插件页，不再硬编码插件 id",
+              window.plugin_page("console") is loaded_ids["terminal"].widget
+              and window.plugin_page("transfer") is loaded_ids["transfer"].widget,
+              f"console={type(window.plugin_page('console')).__name__}")
+        check("R-326 宿主不再暴露 console / transfer 属性",
+              not hasattr(window, "console") and not hasattr(window, "transfer"),
+              f"console={hasattr(window, 'console')} transfer={hasattr(window, 'transfer')}")
+        check("R-326 插件通过 service 暴露能力",
               window.plugins.service("terminal") is not None
               and window.plugins.service("transfer") is not None,
               f"terminal={window.plugins.service('terminal') is not None} "
               f"transfer={window.plugins.service('transfer') is not None}")
-        check("R-218 内置插件页不会重复出现 plugin:<id> 标签",
-              "plugin:terminal" not in window._page_keys
-              and "plugin:transfer" not in window._page_keys,
+        check("R-326 每个插件页只有一个标签页",
+              window._page_keys.count("console") == 1
+              and window._page_keys.count("transfer") == 1
+              and "plugin:terminal" not in window._page_keys,
               str(window._page_keys))
+        check("R-326 宿主不再持有终端专用接收通道",
+              "absorb" not in _host_rx_source()
+              and "on_rx" in _terminal_source(),
+              "host still calls absorb / plugin does not subscribe")
         state = window._control_screen({"scrollback": 0}, {})
         check("R-218 CLI 的 screen 走插件服务（不是宿主属性）",
               state.get("ok") is True
@@ -6685,7 +6718,7 @@ def main() -> int:
         # (measured, L-256).
         window.switch_page("console")
         app.processEvents()
-        view = window.console.view
+        view = window.plugin_page("console").view
         view.setFocus()
         view.feed(b"login: root\r\n# ")
         app.processEvents()
@@ -6768,11 +6801,11 @@ def main() -> int:
         console that swallowed every CSI cursor movement, so a device echoing
         ``ESC[D`` left the local column behind and the next character landed on
         an occupied cell (and ``deleteChar()`` ate it).  Driving the real
-        ``window.console.view`` is the only way to prove the swap happened.
+        ``window.plugin_page("console").view`` is the only way to prove the swap happened.
         """
         window.switch_page("console")
         app.processEvents()
-        view = window.console.view
+        view = window.plugin_page("console").view
         view.reset()
         view.setFocus()
         view.feed(b"login: root\r\n")
@@ -6988,16 +7021,16 @@ def main() -> int:
         window.switch_page("terminal")          # anything but the terminal page
         app.processEvents()
         check("R-211 终端页此时不可见（正是要覆盖的场景）",
-              not window.console.view.isVisible())
+              not window.plugin_page("console").view.isVisible())
 
-        # ``window.console`` is the plugin widget now (R-218); the screen state
+        # ``window.plugin_page("console")`` is the plugin widget now (R-218); the screen state
         # lives on the wrapped ``TerminalPage``, so reset it there.
-        page = window.console.page
+        page = window.plugin_page("console").page
         from omnicom.ui.terminal import Screen
 
         page.mirror = Screen(rows=24, cols=80, scrollback=200)
         page.view.attach_screen(page.mirror)
-        window.console.feed(b"line one\r\nsecond line\r\n$ ")
+        window.plugin_page("console").feed(b"line one\r\nsecond line\r\n$ ")
         page.mirror.feed(b"prompt> ")                # what `_on_rx` does
 
         state = window._control_screen({"scrollback": 0}, {})
@@ -7062,7 +7095,7 @@ def main() -> int:
               and "enter" in cli_module.KEY_SEQUENCES,
               str(len(cli_module.KEY_SEQUENCES)))
 
-        window.console.reset()
+        window.plugin_page("console").reset()
         if opened_here:
             window.bridge.close()
             for _wait in range(40):
@@ -7089,7 +7122,7 @@ def main() -> int:
         """
         window.switch_page("console")
         app.processEvents()
-        page = window.console
+        page = window.plugin_page("console")
         view = page.view
 
         def send(data: bytes) -> None:
@@ -7181,7 +7214,7 @@ def main() -> int:
         """
         window.switch_page("console")
         app.processEvents()
-        page = window.console
+        page = window.plugin_page("console")
         view = page.view
 
         def send(data: bytes) -> None:
@@ -7270,7 +7303,7 @@ def main() -> int:
         app.processEvents()
         window.switch_page("console")
         app.processEvents()
-        page = window.console
+        page = window.plugin_page("console")
         view = page.view
 
         def send(data: bytes) -> None:
@@ -7369,7 +7402,7 @@ def main() -> int:
         app.processEvents()
         window.switch_page("console")
         app.processEvents()
-        page = window.console
+        page = window.plugin_page("console")
         view = page.view
 
         def screen():
@@ -7691,7 +7724,7 @@ def main() -> int:
         app.processEvents()
         window.switch_page("console")
         app.processEvents()
-        page = window.console
+        page = window.plugin_page("console")
         view = page.view
 
         def send(data: bytes) -> None:
@@ -7796,7 +7829,7 @@ def main() -> int:
         app.processEvents()
         window.switch_page("console")
         app.processEvents()
-        page = window.console
+        page = window.plugin_page("console")
         view = page.view
 
         page.reset()
@@ -8074,7 +8107,7 @@ def main() -> int:
         """
         window.switch_page("console")
         app.processEvents()
-        view = window.console.view
+        view = window.plugin_page("console").view
         view.reset()
         app.processEvents()
 
@@ -8157,12 +8190,11 @@ def main() -> int:
         next_()
 
     def step_plugin_disabled_rx(next_):
-        """R-218: the window must keep working with the terminal plugin **off**.
+        """R-326: the window must keep working with the terminal plugin **off**.
 
-        The packaged self-test caught this: with ``terminal`` disabled,
-        ``self.console`` is a plain placeholder ``QWidget``, and ``_on_rx`` called
-        ``.absorb()`` on it - an ``AttributeError`` on **every** received packet,
-        i.e. a serial session that could not log anything.
+        With ``terminal`` disabled there is simply no terminal tab any more, and
+        ``_on_rx`` still logs every received packet because it no longer reaches
+        into a terminal widget whose class it cannot know (R-326).
 
         Proven on a throwaway window with ``plugins-disabled.json`` written first,
         so the real window keeps its plugins for the rest of the suite.
@@ -8184,9 +8216,10 @@ def main() -> int:
             ids = [info.id for info in victim.plugins.loaded()]
             check("R-218 禁用后 terminal / transfer 确实未加载",
                   "terminal" not in ids and "transfer" not in ids, str(ids))
-            check("R-218 禁用后终端标签是占位控件",
-                  type(victim.console).__name__ == "QWidget",
-                  type(victim.console).__name__)
+            check("R-326 禁用后没有终端页",
+                  victim.plugin_page("console") is None
+                  and "console" not in victim._page_keys,
+                  str(victim._page_keys))
 
             errors: list[str] = []
             try:
@@ -8234,18 +8267,23 @@ def main() -> int:
 
     def step_terminal_buttons(next_):
         """R-188: reset and full screen are two different, working actions."""
+        from omnicom import i18n
         from omnicom.i18n import tr
         from omnicom.ui.widgets import GlyphButton
 
-        page = window.console
+        page = window.plugin_page("console")
         check("R-188 重置状态使用独立的回转箭头图标",
               page.btn_reset.glyph == GlyphButton.RESET
               and page.btn_reset.glyph != page.btn_full.glyph,
               f"{page.btn_reset.glyph} / {page.btn_full.glyph}")
+        # Compare the button against the plugin's own registered copy instead of
+        # ``tr()``: an earlier step in this same suite deliberately unloads every
+        # plugin, so the global lookup is not the right yardstick here (R-326).
+        registered = i18n.plugin_table("terminal").get("term.fullscreen")
         check("R-188 全屏按钮的提示说的是全屏，不是重置",
-              tr("term.fullscreen") not in ("", "term.fullscreen")
+              registered is not None and registered[0] == "终端全屏"
               and page.btn_full.toolTip() == tr("term.fullscreen"),
-              page.btn_full.toolTip())
+              f"{registered} / {page.btn_full.toolTip()}")
 
         window.switch_page("console")
         app.processEvents()
@@ -9128,7 +9166,7 @@ def main() -> int:
             "HEX 开关文字": window.row_hex.label,
             "日志提示": window.log_hint,
             "搜索提示": window.search_panel.hint,
-            "终端标题": window.console.title,
+            "终端标题": window.plugin_page("console").title,
             "文件提示": window.send_panel.file_hint,
         }
         for widget in targets.values():

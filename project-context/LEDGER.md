@@ -748,3 +748,48 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - 2026-11-23补核：GitHub资产metadata的 `digest` 与上述本地SHA-256完全相同，Release公开且含修复说明，API latest仍为v1.1.7；线上raw main插件目录与重建后本地JSON一致。
 - 重新构建chart1.1.3、hexview1.0.0、launcher1.0.0成功，哈希与已发布包相同，无需再次上传；核心插件仍通过主程序便携包交付。
 - R-320性能边界不变；本次未重跑全工程GUI/总验收，不将插件自测通过宣称为全工程全绿。
+## L-322 终端/传输与宿主完全同构 / 第二个窗口清掉第一个窗口文案（FIXED-verified）
+- 宿主删掉了 `window.console` / `window.transfer` 与 `BUILTIN_PLUGIN_PAGES`：页键改由清单
+  `page` / `page_order` 声明，宿主只按页键挂载与卸载；终端插件用 `api.on_rx` 自己取数据，
+  `_on_rx` 不再调 `absorb`。
+- 顺带发现并修掉真实缺陷：开第二个窗口时 `PluginHost.unload()` 会注销第一个窗口仍在用的
+  插件文案表（终端按钮提示变回 `term.fullscreen`）。文案表改为按宿主对象引用计数。
+- 证据：`ui_selftest --only plugins` 全通过（含「宿主不再持有终端专用接收通道」）；探针证明
+  全部插件停用时收数据仍进日志、终端只靠自身订阅即可拿到 `prompt$` 且切页后保留。
+
+## L-323 「卸载」只记标记、永远显示已安装（FIXED-verified）
+- 2026-11-23 用户反证：重复多次卸载后仍出现「启用/已安装」；原单次285项验证不覆盖真实按钮循环及双副本，不能视为闭环。来源框也再次被否定，R-325整行交互待修复。
+- 本次复现：双副本时只移走用户目录，随包副本仍存在且disabled=True。修复为移动全部活动副本并清除disabled；恢复按原来源，重复卸载不清空备份；下载重装清除来源记录，失败恢复目录及两份记录。
+- 新证据：`tools/plugin_selftest.py --interaction-only`，用户/随包/双副本各六轮真实按钮、重建Store与隔离PluginHost通过；额外覆盖跨盘复制回退、双副本失败回滚、重装写记录失败。限定为当前源码；旧发行包未更新。
+- 旧 `uninstall()` 只写 `plugins-disabled.json` 并把目录挪到 `plugin-updates/`，`installed()`
+  仍扫描原路径，于是行永远显示「已安装/已停用」。用户要求真实卸载。
+- 现在目录真的离开 `plugins/`（随包核心插件同样移出），宿主立即不加载、页签消失；
+  `plugin-sources.json` 记录来源与备份，行标记 `removed=True` 且只给「安装」；再装可从备份
+  还原同一版本，`plugin-data/<id>` 不动。
+- 跨盘（数据目录与程序目录不在同一盘）从 `Path.rename` 改 `shutil.move`，否则 WinError 17；
+  失败时把目录移回并恢复两份记录。
+- 旧证据：`plugin_selftest` 285项仅单次流程；永久宿主测试使用隔离PluginHost，不是用户真实窗口，旧「真实窗口」表述不准确。
+- 教训：探针不要指向真实安装目录 —— 一次探针真卸载了仓库 `plugins/terminal`，
+  用 `git checkout -- plugins/terminal` 恢复，并要重新应用该目录的未提交改动。
+
+## L-324 多曲线来源框不能整行勾选 / 黑块难辨（FIXED-verified）
+- 后续用户反证滚轮悬停仍黑底：原生drawControl可重新盖上系统高亮；现背景、文字、复选框均自行绘制。强制Highlight/HighlightedText黑色，滚轮三次选中鼠标下行像素仍浅，滚动不改勾选；Windows字体截图已查看。来源入口只供line，非line多名称只绑定第一项。
+- 用户2026-11-23再次否定来源框。原列表行高14px、文字点击不切换，未选中也画成黑块；改为至少32px且适配字体、整行左键释放只切换一次、原生空格键可切换，主题空框与白色勾号明确区分。
+- `--interaction-only`覆盖文字/方框/空格、六次连续切换、未知通道保留、空选择禁用确认；卡片真实模态编辑取消不改配置，确认后页面系列从AA/BB变BB/CC、几何不变。Windows字体截图已查看；旧包未更新，用户实机尚未确认。
+- 插件动态加载模块与普通import的同名类不是同一类型，测试必须使用实际加载模块的SourcesDialog；没有字体的offscreen截图不能作为视觉验收。
+
+## L-325 灯自定义亮灭颜色 / 调色板 / 颜色保存丢失（FIXED-verified）
+- R-328：创建色块、现有灯齿轮与真实Qt调色板，亮灭颜色贯通绘制/describe/persist/配置；旧null颜色兼容。真实回归抓到persist遗漏字段和模态持有旧布局对象，均修复；QSS用对象名限定，避免子调色板按钮染色，内置文案经api.t本地化。
+- `python tools/plugin_selftest.py --interaction-only` 362项：颜色选择/取消、亮灭DOM RGB、现有灯编辑/取消、导入导出、非法颜色拒绝通过；`.artifacts/lamp-palette.png`已视觉核对。本轮未打包发布。
+
+## L-326 保留点数低于展示帧数时只有保留量（REVERTED）
+- 曾把有效容量改成 max(保留, 展示)，但那会篡改用户的显式「曲线点数」：R-301 要求显式值就是保留上限，points=150 必须保留 150。已回退为 `min(MAX_POINTS, max(100, limit))`，`visible` 只控制每帧绘制尾部。
+- 证据：完整插件套件 R-301「曲线点数按设置生效」在错误实现下失败（300≠150），回退后全套 587 项通过。该推测未解释用户实际 5000/5000/0，见 L-327。
+
+## L-327 实际5000帧设置未满即历史消失（OPEN）
+- 只读核对用户settings.ini实际window=0/visible=5000/points=5000。两条曲线同配置在128/1000/3200/4999/5000/5101/6200保持完整首尾，尚未复现；不能把L-326当成其根因。下一步用用户实际布局/原始输入与运行副本证据区分接收、缩放可见范围、旧包；不宣称整个问题修好。
+
+## L-328 多色灯 / 单色灯任意触发数值 / 数值颜色映射（FIXED-verified）
+- R-329：同一个lamp的colorRules精确数值匹配，单条规则就是单色灯；fallbackColor支持无色或自定义色。创建入口/现有卡片复用LampColorsDialog，可增删规则、调色和指定无色。旧无规则或null字段仍保持零/非零二态，明确启用匹配后迁移。
+- 页面setLayout/addWidget/describe/persist及Python规范化、INI和文件往返均保留规则；重复数值、非有限值、布尔值、缺字段和非法颜色被拒；用repr保留双精度编辑往返。无数据为空心且显示--，不误当零或默认值。
+- `python tools/plugin_selftest.py --interaction-only`409项通过：真实创建/调色板、0红/1白/2黄/其它无色、其它自定义色、-3.5单规则、明确无色优先、增删/取消、文件/设置持久化；旧二态灯、来源及曲线回归通过。`.artifacts/lamp-rules.png`已视觉核对。源码候选，未打包发布；L-327仍OPEN。

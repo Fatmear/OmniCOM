@@ -23,6 +23,16 @@ LANG_NAMES = {"zh": "中文", "en": "English"}
 #: pushing it into ``_TABLE``; see :func:`register_plugin_table` (R-322).
 _PLUGIN_TABLES: dict[str, dict[str, tuple[str, str]]] = {}
 
+#: ``plugin_id -> [owner, ...]``; hosts that loaded the same plugin at once.
+#: A second window loading ``terminal`` must not delete the strings the first
+#: window is still drawing (2026-11-23: opening a second window blanked the
+#: first one's terminal copy).  An entry is only removed when the last owner
+#: lets go.
+_PLUGIN_OWNERS: dict[str, list[object]] = {}
+
+#: The object used when a caller registers without naming an owner.
+_SHARED_OWNER = object()
+
 _TABLE: dict[str, tuple[str, str]] = {
     "store.title": ("插件商店", "Plugin Store"),
     "pref.plugin_sources": ("插件仓库（每行一个地址）", "Plugin catalogs (one URL per line)"),
@@ -42,6 +52,7 @@ _TABLE: dict[str, tuple[str, str]] = {
     "store.tag.installed": ("已安装", "installed"),
     "store.tag.installed_of": ("已安装 {version}", "installed {version}"),
     "store.tag.disabled": ("已停用", "disabled"),
+    "store.tag.removed": ("已卸载", "uninstalled"),
     "store.tag.latest": ("最新", "latest"),
     "store.tag.api": ("需新版主程序", "needs newer app"),
     "store.same_tip": ("已安装这个版本，无需操作", "This version is already installed"),
@@ -49,6 +60,7 @@ _TABLE: dict[str, tuple[str, str]] = {
     "store.installed": ("已安装 {current} · 最新 {latest}", "Installed {current} · Latest {latest}"),
     "store.missing": ("未安装 · 最新 {latest}", "Not installed · Latest {latest}"),
     "store.disabled_row": ("已停用 · 版本 {version}", "Disabled · version {version}"),
+    "store.removed_row": ("已卸载 · 最新 {latest}", "Uninstalled · latest {latest}"),
     "store.unknown": ("未知", "Unknown"),
     "store.cached": ("本地目录 / 缓存，尚未在线检查", "Local catalog / cache; not checked online yet"),
     "store.checked": ("插件库已刷新", "Catalog refreshed"),
@@ -616,21 +628,46 @@ def tr(key: str, **kwargs) -> str:
     return text
 
 
-def register_plugin_table(plugin_id: str, table: dict[str, tuple[str, str]]) -> None:
-    """Register (or replace) a plugin's own ``key -> (zh, en)`` table."""
+def register_plugin_table(plugin_id: str, table: dict[str, tuple[str, str]],
+                          owner=None) -> None:
+    """Register (or replace) a plugin's own ``key -> (zh, en)`` table.
+
+    ``owner`` identifies the loader (a host object).  Two windows may load the
+    same plugin, so ``unregister_plugin_table`` only removes the strings once
+    *every* owner has released it.
+    """
     if not plugin_id or not table:
         return
-    _PLUGIN_TABLES[str(plugin_id)] = dict(table)
+    key = str(plugin_id)
+    owners = _PLUGIN_OWNERS.setdefault(key, [])
+    marker = owner if owner is not None else _SHARED_OWNER
+    if not any(item is marker for item in owners):
+        owners.append(marker)
+    _PLUGIN_TABLES[key] = dict(table)
 
 
-def unregister_plugin_table(plugin_id: str) -> None:
-    """Drop a plugin's table so a disabled plugin leaves no strings behind."""
-    _PLUGIN_TABLES.pop(str(plugin_id), None)
+def unregister_plugin_table(plugin_id: str, owner=None) -> None:
+    """Drop a plugin's table when the last owner releases it."""
+    key = str(plugin_id)
+    owners = _PLUGIN_OWNERS.get(key)
+    if owners is None:
+        _PLUGIN_TABLES.pop(key, None)
+        return
+    marker = owner if owner is not None else _SHARED_OWNER
+    _PLUGIN_OWNERS[key] = [item for item in owners if item is not marker]
+    if not _PLUGIN_OWNERS[key]:
+        _PLUGIN_OWNERS.pop(key, None)
+        _PLUGIN_TABLES.pop(key, None)
 
 
 def plugin_text_keys(plugin_id: str) -> list[str]:
     """Keys owned by one plugin (used by the decoupling self-test)."""
     return sorted(_PLUGIN_TABLES.get(str(plugin_id), {}))
+
+
+def plugin_table(plugin_id: str) -> dict[str, tuple[str, str]]:
+    """A copy of one plugin's ``key -> (zh, en)`` table (read-only use)."""
+    return dict(_PLUGIN_TABLES.get(str(plugin_id), {}))
 
 
 def bind(setter: Callable[[str], None], key: str, **kwargs) -> Callable[[str], None]:

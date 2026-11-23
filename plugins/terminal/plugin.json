@@ -12,6 +12,8 @@
   },
   "entry": "plugin.py",
   "icon": "icon.png",
+  "page": "console",
+  "page_order": 10,
   "api": 3,
   "services": {
     "terminal": "VT100 屏幕服务（CLI screen/keys 用）"

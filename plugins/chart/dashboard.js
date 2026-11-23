@@ -242,6 +242,12 @@
     return {
       animation: false,
       backgroundColor: "transparent",
+      legend: {
+        show: !!(widget.channels && widget.channels.length > 1),
+        type: "scroll",
+        top: 2,
+        textStyle: { color: theme().ink || "#121A2B", fontSize: 11 }
+      },
       /* A crosshair + readout is free measurement: hovering reports the value at
        * that instant instead of forcing the user to eyeball a pixel. */
       tooltip: {
@@ -260,7 +266,7 @@
          * the right edge of the curve (R-170).  ``containLabel`` already reserves
          * the label band, so the extra space is the strip plus that band. */
         right: ZOOM_STRIP + 6,
-        top: 8,
+        top: widget.channels && widget.channels.length > 1 ? 28 : 8,
         bottom: ZOOM_STRIP + 16,
         containLabel: true
       },
@@ -394,6 +400,22 @@
     head.appendChild(el("span", "grip", "\u2261"));
     head.appendChild(el("span", "title", widget.title || widget.channel || widget.id));
     head.appendChild(el("span", "kind", widget.kind));
+    if (widget.kind === "line" || widget.kind === "lamp") {
+      var sources = el("button", "sources", "\u2699");
+      sources.type = "button";
+      sources.title = widget.kind === "lamp"
+        ? (theme().lampColorLabel || "Lamp colors")
+        : (theme().sourceLabel || "Curve data sources");
+      sources.setAttribute("aria-label", sources.title);
+      sources.addEventListener("pointerdown", function (event) {
+        event.stopPropagation();
+      });
+      sources.addEventListener("click", function (event) {
+        event.stopPropagation();
+        send("sources", { id: widget.id });
+      });
+      head.appendChild(sources);
+    }
     var del = el("button", "del", "\u00d7");
     del.type = "button";
     del.addEventListener("click", function (event) {
@@ -504,7 +526,7 @@
   }
 
   /* Parts of a card that must keep their own meaning instead of starting a drag. */
-  var NO_DRAG = ".del, .resize";
+  var NO_DRAG = ".del, .resize, .sources";
 
   /* R-170: the two axis sliders live inside the plot, so a press on one of them
    * has to reach ECharts.  Only the strips themselves are excluded - the rest of
@@ -515,7 +537,8 @@
     var box = plot.getBoundingClientRect();
     var x = event.clientX - box.left;
     var y = event.clientY - box.top;
-    return y >= box.height - ZOOM_HIT || x >= box.width - ZOOM_HIT;
+    return y >= box.height - ZOOM_HIT || x >= box.width - ZOOM_HIT ||
+      (card.dataset.kind === "line" && y < 24);
   }
 
   function hookPointer(card, widget, head, grip) {
@@ -746,8 +769,26 @@
       var dot = node.querySelector('[data-role="dot"]');
       var text = node.querySelector('[data-role="lampText"]');
       var on = current !== undefined && current !== null && Number(current) !== 0;
-      if (dot) { dot.className = "lamp-dot" + (on ? " on" : ""); }
-      if (text) { text.textContent = on ? (widget.onText || "ON") : (widget.offText || "OFF"); }
+      var matching = Array.isArray(widget.colorRules);
+      var color;
+      var known = current !== undefined && current !== null && isFinite(Number(current));
+      if (matching) {
+        var rule = known ? widget.colorRules.find(function (item) {
+          return Number(item.value) === Number(current);
+        }) : null;
+        color = known ? (rule ? rule.color : widget.fallbackColor) : null;
+        on = !!color;
+      } else {
+        color = on ? (widget.onColor || theme().ok || "#16A34A") : (widget.offColor || "#C8D0DC");
+      }
+      if (dot) {
+        dot.className = "lamp-dot" + (on ? " on" : "");
+        dot.style.backgroundColor = color || "transparent";
+      }
+      if (text) {
+        text.textContent = matching ? (known ? formatValue(current, widget.decimals) : "--")
+          : (on ? (widget.onText || "ON") : (widget.offText || "OFF"));
+      }
       return;
     }
     if (widget.kind === "bar") { paintBar(widget, current); return; }
@@ -806,6 +847,10 @@
           decimals: raw.decimals,
           onText: raw.onText || "ON",
           offText: raw.offText || "OFF",
+          onColor: raw.onColor || null,
+          offColor: raw.offColor || null,
+          colorRules: Array.isArray(raw.colorRules) ? raw.colorRules : null,
+          fallbackColor: raw.fallbackColor || null,
           x: Number(raw.x) || 0,
           y: Number(raw.y) || 0,
           w: Math.max(MIN_W, Number(raw.w) || 320),
@@ -969,6 +1014,10 @@
         decimals: raw.decimals,
         onText: raw.onText || "ON",
         offText: raw.offText || "OFF",
+        onColor: raw.onColor || null,
+        offColor: raw.offColor || null,
+        colorRules: Array.isArray(raw.colorRules) ? raw.colorRules : null,
+        fallbackColor: raw.fallbackColor || null,
         x: auto ? spot.x : snap(raw.x),
         y: auto ? spot.y : snap(raw.y),
         w: Math.max(MIN_W, Number(raw.w) || 360),
@@ -1022,6 +1071,8 @@
             unit: widget.unit, min: widget.min, max: widget.max,
             decimals: widget.decimals,
             onText: widget.onText, offText: widget.offText,
+            onColor: widget.onColor, offColor: widget.offColor,
+            colorRules: widget.colorRules, fallbackColor: widget.fallbackColor,
             x: widget.x, y: widget.y, w: widget.w, h: widget.h
           };
         }),
@@ -1136,6 +1187,8 @@
           channel: widget.channel, channels: widget.channels, unit: widget.unit,
           min: widget.min, max: widget.max, decimals: widget.decimals,
           onText: widget.onText, offText: widget.offText,
+          onColor: widget.onColor, offColor: widget.offColor,
+          colorRules: widget.colorRules, fallbackColor: widget.fallbackColor,
           x: widget.x, y: widget.y, w: widget.w, h: widget.h
         };
       })

@@ -101,6 +101,26 @@ class PluginInfo:
         path = os.path.join(self.path, icon)
         return path if os.path.isfile(path) else None
 
+    def page_key(self) -> str:
+        """Key of the top-bar tab this plugin owns (R-326).
+
+        A plugin may *claim* a long-standing page key through ``"page"`` in its
+        manifest - ``"console"`` for the terminal, ``"transfer"`` for file
+        transfers.  Those keys predate the plugin split and are part of the
+        window's public contract (``current_page()``, the CLI and the test
+        suite), so honouring them keeps the API stable **without** the host
+        hard-coding any plugin id.
+        """
+        claimed = str(self.manifest.get("page") or "").strip()
+        return claimed or f"plugin:{self.id}"
+
+    def page_order(self) -> int:
+        """Position of this plugin's tab; lower comes first (R-326)."""
+        try:
+            return int(self.manifest.get("page_order", 100))
+        except (TypeError, ValueError):
+            return 100
+
 
 class PluginApi(QObject):
     """The only surface a plugin is allowed to touch."""
@@ -109,9 +129,10 @@ class PluginApi(QObject):
 
     def __init__(self, info: PluginInfo, notify, log_line, send_bytes=None,
                  service_lookup=None, service_register=None,
-                 port_lookup=None) -> None:
+                 port_lookup=None, host=None) -> None:
         super().__init__()
         self.info = info
+        self._host = host
         self._notify = notify
         self._log_line = log_line
         self._send_bytes = send_bytes
@@ -155,7 +176,7 @@ class PluginApi(QObject):
         uninstalled plugin leaves no orphaned strings behind.  Keys registered
         here are looked up by :meth:`tr` and are removed on unload.
         """
-        i18n.register_plugin_table(self.info.id, table)
+        i18n.register_plugin_table(self.info.id, table, owner=self._host)
         self.info.manifest.setdefault("text_keys", sorted(table))
 
     @staticmethod
@@ -379,6 +400,10 @@ class PluginHost(QObject):
                  port=None) -> None:
         super().__init__(parent)
         self.plugins: list[PluginInfo] = []
+        #: Identity used as the owner of the plugin text tables, so unloading a
+        #: second window cannot erase copy the first window is still drawing
+        #: (R-326).
+        self._host = self
         self._notify = notify
         self._log_line = log_line
         self._send_bytes = send_bytes
@@ -478,7 +503,7 @@ class PluginHost(QObject):
                 if info.api is not None:
                     info.api.deleteLater()
                     info.api = None
-                i18n.unregister_plugin_table(info.id)
+                i18n.unregister_plugin_table(info.id, owner=self._host)
                 info.error = f"{type(exc).__name__}: {exc}"
                 self._report(info.name(), info.error, traceback.format_exc())
         self.plugins = loaded + [item for item in self.plugins if item.error]
@@ -516,7 +541,7 @@ class PluginHost(QObject):
         api = PluginApi(info, self._notify, self._log_line, self._send_bytes,
                         service_lookup=self.service,
                         service_register=self._register_service,
-                        port_lookup=(lambda: self._port))
+                        port_lookup=(lambda: self._port), host=self)
         info.api = api
         widget = create(api)
         from PySide6.QtWidgets import QWidget
@@ -577,7 +602,7 @@ class PluginHost(QObject):
                     pass
             info.widget = None
             info.module = None
-            i18n.unregister_plugin_table(info.id)
+            i18n.unregister_plugin_table(info.id, owner=self._host)
             if info.api is not None:
                 info.api.deleteLater()
                 info.api = None

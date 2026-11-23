@@ -192,7 +192,7 @@ def select_version(item: dict, version: str) -> dict:
     """
     for entry in item.get("versions") or []:
         if str(entry.get("version")) == str(version):
-            if entry.get("local"):
+            if entry.get("local") and not entry.get("recoverable"):
                 # An installed build that no catalog carries - there is nothing
                 # to download, and pretending otherwise would reinstall the
                 # head instead of the requested version.
@@ -246,6 +246,12 @@ class PluginStore:
         self.failures: list[dict[str, str]] = []
         self.cache = self.data / "plugin-catalog.json"
         self.disabled_path = self.data / "plugins-disabled.json"
+        #: ``{id: {origin, backup}}`` for plugins that were **really** removed.
+        #: Uninstalling moves the folder out of ``plugins/`` (so the host stops
+        #: loading it immediately) and remembers where it came from, which is
+        #: what makes "install" possible again afterwards - without pretending
+        #: the plugin is still installed (user, 2026-11-23).
+        self.sources_path = self.data / "plugin-sources.json"
 
     def disabled(self) -> set[str]:
         try:
@@ -255,15 +261,7 @@ class PluginStore:
             return set()
 
     def set_disabled(self, identifier: str, disabled: bool) -> None:
-        """Enable or disable one plugin without touching its package (R-323).
-
-        Uninstalling a *bundled* plugin cannot delete the program's own folder,
-        so the host records the id here instead.  That flag used to also make
-        the plugin vanish from the store, which left the user with no way to
-        switch it back on: the store lists ``installed | remote catalog`` and
-        the two core plugins are deliberately absent from the remote catalog
-        (R-174).  Disabling is therefore a *state*, not a removal.
-        """
+        """Disable or enable an installed plugin without uninstalling its files."""
         current = self.disabled()
         if disabled:
             current.add(identifier)
@@ -367,12 +365,18 @@ class PluginStore:
 
     def rows(self, catalog: list[dict]) -> list[dict]:
         installed = self.installed()
+        removed = self.removed()
         remote = {item["id"]: item for item in catalog}
         rows = []
-        for identifier in sorted(installed.keys() | remote.keys()):
+        for identifier in sorted(installed.keys() | remote.keys() | removed):
             current = installed.get(identifier)
             latest = remote.get(identifier)
-            item = dict(latest or current)
+            item = dict(latest or current or {})
+            if not item:
+                # Uninstalled and absent from every catalog: the row survives so
+                # the user can see it is gone (and install it if a catalog
+                # later offers it), but it claims nothing about a local copy.
+                item = {"id": identifier, "version": "", "api": 1}
             current_version = str(current.get("version", "0.0.0")) if current else None
             item["installed_version"] = current_version
             item["latest_version"] = str(latest["version"]) if latest else None
@@ -381,17 +385,38 @@ class PluginStore:
             item["disabled"] = bool(current and current.get("disabled"))
             item["bundled"] = bool(current and current.get("path", "").startswith(
                 str(self.bundled)))
+            # A really uninstalled plugin is neither installed nor disabled: it
+            # only shows a way back (`安装`), never `已安装` (R-327).
+            item["removed"] = bool(identifier in removed and current is None)
             item["update_available"] = bool(current and latest and version_key(latest["version"]) > version_key(current.get("version", "0")))
             item["compatible"] = int(item.get("api", 1)) <= API_VERSION
             # R-178: the picker needs one flat, newest-first list that always
             # contains what is installed (a locally built copy may not be in any
             # catalog) and always offers at least the latest build.
             versions = list((latest or {}).get("versions") or [])
-            if current_version and current_version not in {str(entry["version"]) for entry in versions}:
+            if (current_version and not item["removed"]
+                    and current_version not in {str(entry["version"]) for entry in versions}):
                 versions.append({"version": current_version,
                                  "api": int(current.get("api", 1)), "local": True})
             if not versions and latest is not None:
                 versions = [{key: latest[key] for key in VERSION_FIELDS if key in latest}]
+            if not versions and item["removed"]:
+                # A bundled plugin the user really uninstalled is not in any
+                # catalog, but its backup is still on disk: offer that exact
+                # build as the installable version (R-327).
+                recorded = self._sources().get(identifier) or {}
+                backup = Path(recorded["backup"]) if recorded.get("backup") else None
+                if backup is not None and (backup / "plugin.json").is_file():
+                    try:
+                        manifest = json.loads((backup / "plugin.json").read_text(
+                            encoding="utf-8"))
+                    except (OSError, ValueError):
+                        manifest = {}
+                    version = str(manifest.get("version") or "")
+                    if VERSION.fullmatch(version):
+                        versions = [{"version": version,
+                                     "api": int(manifest.get("api", 1)),
+                                     "local": True, "recoverable": True}]
             versions.sort(key=lambda entry: version_key(entry["version"]), reverse=True)
             item["versions"] = versions
             item["installed_downgradable"] = bool(
@@ -445,12 +470,48 @@ class PluginStore:
             raise StoreError("path")
         return target
 
-    def restore(self, identifier: str) -> None:
+    def restore(self, identifier: str, expect_version: str | None = None) -> None:
+        """Put an installed-by-default plugin back (R-323/R-327).
+
+        The plugin may still sit in the program folder (normal re-enable) or it
+        may have been really uninstalled and live in the backup area; both are
+        handled, so 安装 always ends with a real folder under ``plugins/``.
+        """
         with self.operation():
-            self._target(identifier)
-            if not (self.bundled / identifier / "plugin.json").is_file():
+            target = self._target(identifier)
+            sources = self._sources()
+            record = dict(sources.get(identifier) or {})
+            backup = Path(record["backup"]) if record.get("backup") else None
+            destination = self.bundled / identifier if record.get("origin") == "bundled" else target
+            candidate = backup if backup is not None else destination
+            if not (candidate / "plugin.json").is_file():
                 raise StoreError("package")
-            atomic_json(self.disabled_path, sorted(self.disabled() - {identifier}))
+            if expect_version is not None:
+                try:
+                    manifest = json.loads((candidate / "plugin.json").read_text(encoding="utf-8"))
+                except (OSError, ValueError) as exc:
+                    raise StoreError("package") from exc
+                if manifest.get("id") != identifier or str(manifest.get("version")) != str(expect_version):
+                    raise StoreError("package")
+            if destination.is_symlink() or destination.is_junction() or destination.parent.is_symlink() or destination.parent.is_junction():
+                raise StoreError("path")
+            old_disabled = self.disabled()
+            previous_sources = dict(sources)
+            copied = False
+            try:
+                if not destination.exists():
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    copied = True
+                    shutil.copytree(candidate, destination)
+                atomic_json(self.disabled_path, sorted(old_disabled - {identifier}))
+                sources.pop(identifier, None)
+                atomic_json(self.sources_path, sources)
+            except BaseException:
+                if copied and destination.exists():
+                    shutil.rmtree(destination)
+                atomic_json(self.disabled_path, sorted(old_disabled))
+                atomic_json(self.sources_path, previous_sources)
+                raise
 
     def install(self, item: dict, cancel=None, progress=None) -> None:
         # ``rows()`` decorates an entry with a derived ``versions`` history and a
@@ -465,13 +526,11 @@ class PluginStore:
         if (item.get("python") and item["python"] != f"{sys.version_info.major}.{sys.version_info.minor}") or (item.get("platform") and item["platform"] != "win_amd64"):
             raise StoreError("api")
         if not item.get("url"):
-            try:
-                manifest = json.loads((self.bundled / identifier / "plugin.json").read_text(encoding="utf-8"))
-                if manifest.get("version") != item["version"]:
-                    raise StoreError("package")
-            except (OSError, ValueError) as exc:
-                raise StoreError("package") from exc
-            self.restore(identifier)
+            # A bundled plugin can be reinstalled after a real uninstall: the
+            # folder was moved to the backup area with its origin recorded, so
+            # put it back instead of claiming there is nothing to install
+            # (R-327).
+            self.restore(identifier, expect_version=item["version"])
             return
         cancel = cancel or threading.Event()
         payload = fetch(item["url"], MAX_DOWNLOAD, cancel, progress)
@@ -505,16 +564,23 @@ class PluginStore:
                     raise Cancelled()
                 backup = work / (identifier + "-backup-" + uuid.uuid4().hex)
                 had_target = target.exists()
+                old_disabled = self.disabled()
+                previous_sources = self._sources()
                 if had_target:
                     target.rename(backup)
                 try:
                     candidate.rename(target)
-                    atomic_json(self.disabled_path, sorted(self.disabled() - {identifier}))
+                    atomic_json(self.disabled_path, sorted(old_disabled - {identifier}))
+                    sources = dict(previous_sources)
+                    sources.pop(identifier, None)
+                    atomic_json(self.sources_path, sources)
                 except BaseException:
                     if target.exists():
                         shutil.rmtree(target)
                     if had_target:
                         backup.rename(target)
+                    atomic_json(self.disabled_path, sorted(old_disabled))
+                    atomic_json(self.sources_path, previous_sources)
                     raise
 
     @staticmethod
@@ -547,15 +613,69 @@ class PluginStore:
                     shutil.copyfileobj(source, output, 1024 * 1024)
 
     def uninstall(self, identifier: str) -> None:
+        """**Really** remove an installed plugin (R-327).
+
+        Disabling is a state; uninstalling is not.  The folder leaves
+        ``plugins/`` (a bundled core plugin leaves the program folder too), so
+        the host stops loading it and the store no longer reports it as
+        installed.  Where it came from is recorded in ``plugin-sources.json``,
+        which is what lets the user install it again afterwards.
+
+        The plugin's own **data** (``plugin-data/<id>``) is a user file and is
+        never touched.
+        """
         with self.operation():
             target = self._target(identifier)
             old_disabled = self.disabled()
-            atomic_json(self.disabled_path, sorted(old_disabled | {identifier}))
+            sources = self._sources()
+            previous_sources = dict(sources)
+            bundled = self.bundled / identifier
+            folders = list(dict.fromkeys(folder for folder in (target, bundled) if folder.is_dir()))
+            if any(folder.is_symlink() or folder.is_junction()
+                   or folder.parent.is_symlink() or folder.parent.is_junction() for folder in folders):
+                raise StoreError("path")
+            if not folders:
+                atomic_json(self.disabled_path, sorted(old_disabled - {identifier}))
+                return
+            work = self.data / "plugin-updates"
+            work.mkdir(parents=True, exist_ok=True)
+            moved = []
             try:
-                if target.exists():
-                    work = self.data / "plugin-updates"
-                    work.mkdir(parents=True, exist_ok=True)
-                    target.rename(work / (identifier + "-removed-" + uuid.uuid4().hex))
+                for folder in folders:
+                    backup = work / (identifier + "-removed-" + uuid.uuid4().hex)
+                    # ``shutil.move`` instead of ``Path.rename``: the data
+                    # folder is not guaranteed to sit on the same drive as the
+                    # program folder (portable copies, redirected data dirs),
+                    # and a cross-drive rename fails with WinError 17 (R-327).
+                    shutil.move(str(folder), str(backup))
+                    moved.append((folder, backup))
+                atomic_json(self.disabled_path, sorted(old_disabled - {identifier}))
+                sources[identifier] = {
+                    "origin": "user" if folders[0] == target else "bundled",
+                    "backup": str(moved[0][1]),
+                }
+                atomic_json(self.sources_path, sources)
             except BaseException:
-                atomic_json(self.disabled_path, sorted(old_disabled))
+                # Never leave a half-uninstalled plugin: put the folder back and
+                # restore the records they were written with.
+                for folder, backup in reversed(moved):
+                    if backup.exists() and not folder.exists():
+                        with contextlib.suppress(OSError):
+                            shutil.move(str(backup), str(folder))
+                with contextlib.suppress(OSError, ValueError):
+                    atomic_json(self.disabled_path, sorted(old_disabled))
+                    atomic_json(self.sources_path, previous_sources)
                 raise
+
+    def removed(self) -> set[str]:
+        """Ids the user uninstalled (they keep their data and can be reinstalled)."""
+        return set(self._sources())
+
+    def _sources(self) -> dict[str, dict]:
+        try:
+            value = json.loads(self.sources_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        return {key: item for key, item in value.items() if isinstance(item, dict)}

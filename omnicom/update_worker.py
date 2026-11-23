@@ -38,6 +38,10 @@ def prepare_files(source: Path, target: Path, progress=None):
     source, target = source.resolve(), target.resolve()
     if source == target or source in target.parents:
         raise ValueError("Invalid update source")
+    missing_core = {
+        name for name in ("terminal", "transfer")
+        if not (target / "plugins" / name).exists()
+    }
     entries = []
     for base, folders, files in os.walk(source):
         folders[:] = [
@@ -53,11 +57,9 @@ def prepare_files(source: Path, target: Path, progress=None):
                 raise ValueError(f"Refusing symbolic link: {path}")
             if target not in destination.resolve().parents:
                 raise ValueError(f"Unsafe destination: {destination}")
-            # R-174: plugins are installed from the plugin store, never from an
-            # update archive.  Skipping the folder outright (instead of only
-            # protecting existing files) means an older package cannot smuggle
-            # a bundled plugin back next to the user's own copy.
-            if relative.parts[0].lower() == "plugins":
+            if relative.parts[0].lower() == "plugins" and (
+                    len(relative.parts) < 3
+                    or relative.parts[1] not in missing_core):
                 continue
             entries.append((path, relative, destination))
     work = Path(tempfile.mkdtemp(prefix=".omnicom-update-", dir=target))

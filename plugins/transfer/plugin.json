@@ -12,5 +12,7 @@
   },
   "entry": "plugin.py",
   "icon": "icon.png",
+  "page": "transfer",
+  "page_order": 20,
   "api": 3
 }

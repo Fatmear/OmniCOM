@@ -944,17 +944,15 @@ class OmniWindow(QMainWindow):
         # impossible. An explicit minimum overrides the hint.
         self.stack.setMinimumWidth(400)
         self.stack.addWidget(self._build_terminal_page())
-        # 终端 and 文件传输 are plugins (R-218).  When a plugin is disabled the
-        # tab stays but shows a short explanation instead of vanishing, so the
-        # user can see *why* the page is gone and where to turn it back on.
+        # Every plugin owns its own page (R-326): the host mounts whatever the
+        # loaded set provides, in the order each manifest asks for.  It knows
+        # nothing about a terminal or a transfer widget, so a missing plugin is
+        # simply a missing tab - the serial log keeps working on its own.
         #
-        # NB: do **not** connect ``keyBytes`` here.  The terminal plugin already
-        # routes its keys through ``api.send`` itself; a second connection sent
-        # every keystroke twice ("ls" arrived as "llss", L-292).
-        self.console = self._plugin_page("terminal")
-        self.transfer = self._plugin_page("transfer")
-        self.stack.addWidget(self.console)
-        self.stack.addWidget(self.transfer)
+        # NB: do **not** connect ``keyBytes`` here.  The terminal plugin routes
+        # its keys through ``api.send`` itself; a second connection sent every
+        # keystroke twice ("ls" arrived as "llss", L-292).
+        self._mount_plugin_pages()
         self.body_split.addWidget(self.stack)
 
         self.sidebar = self._build_sidebar()
@@ -1472,23 +1470,27 @@ class OmniWindow(QMainWindow):
                 halo.setColor(QColor(255, 255, 255, 235))
                 label.setGraphicsEffect(halo)
 
+    #: Key of the serial-log page.  It stays ``terminal`` because that is the
+    #: window's long-standing public page name (CLI, tests, saved state).
+    LOG_PAGE = "terminal"
+
     # --------------------------------------------------------------- tabs
     def _rebuild_tabs(self) -> None:
+        """One tab per loaded plugin, ordered by its manifest (R-326)."""
         entries: list[tuple[str, str, str]] = [
-            ("terminal", tr("win.tab.terminal"), tr("win.tab.terminal")),
-            ("console", tr("win.tab.console"), tr("win.tab.console")),
-            ("transfer", tr("win.tab.transfer"), tr("win.tab.transfer")),
+            (self.LOG_PAGE, tr("win.tab.terminal"), tr("win.tab.terminal")),
         ]
-        self._page_keys = ["terminal", "console", "transfer"]
-        for info in self.plugins.loaded():
-            if info.id in self.BUILTIN_PLUGIN_PAGES:
-                # terminal / transfer already own a fixed tab; adding a
-                # `plugin:<id>` tab as well would show the same page twice
-                # (R-218).
+        self._page_keys = [self.LOG_PAGE]
+        for info in sorted(self.plugins.loaded(),
+                           key=lambda item: (item.page_order(), item.id)):
+            if info.widget is None:
                 continue
-            key = f"plugin:{info.id}"
-            entries.append((key, info.name(), info.manifest.get("description", "")
-                            if isinstance(info.manifest.get("description"), str)
+            key = info.page_key()
+            if key in self._page_keys:
+                continue
+            description = info.manifest.get("description", "")
+            entries.append((key, info.name(),
+                            description if isinstance(description, str)
                             else info.name()))
             self._page_keys.append(key)
         self.titlebar.set_tabs(entries)
@@ -1501,14 +1503,13 @@ class OmniWindow(QMainWindow):
         index = self._page_keys.index(page)
         self.stack.setCurrentIndex(index)
         self.titlebar.select_tab(page)
-        if page == "console":
-            view = getattr(self.console, "view", None)
-            if view is not None:
-                view.setFocus()
-        elif page.startswith("plugin:"):
-            widget = self.stack.widget(index)
-            if widget is not None:
-                widget.setFocus()
+        widget = self.stack.widget(index)
+        if widget is None:
+            return
+        # A page that exposes its own view (a terminal, say) focuses that; any
+        # other page focuses itself.  No plugin id is named here (R-326).
+        focus = getattr(widget, "view", None) or widget
+        focus.setFocus()
 
     def current_page(self) -> str:
         """Key of the page the user is looking at (``log`` / ``console`` / …)."""
@@ -1526,167 +1527,86 @@ class OmniWindow(QMainWindow):
         button now follows the *visible* page: log page → log, terminal page →
         terminal screen.
         """
-        if self.current_page() == "console":
-            clear = getattr(self.console, "clear", None)
-            if clear is not None:
-                clear()
+        page = self._plugin_pages.get(self.current_page())
+        clear = getattr(page, "clear", None) if page is not None else None
+        if clear is not None:
+            clear()
             return
         self.clear_log()
 
     # -------------------------------------------------------------- plugins
-    #: Plugin ids that own a **built-in tab** instead of getting a
-    #: ``plugin:<id>`` tab of their own (R-218).  They are still ordinary
-    #: plugins - disabling one leaves an explanation page in its place.
-    BUILTIN_PLUGIN_PAGES = ("terminal", "transfer")
+    #: ``page_key -> widget`` for the serial-log page and every loaded plugin.
+    #: The host reaches a page **by key**, never by plugin id (R-326).
 
-    def _plugin_page(self, plugin_id: str) -> QWidget:
-        """The widget of a built-in-tab plugin, or a "disabled" placeholder.
+    def _mount_plugin_pages(self) -> None:
+        """Put every loaded plugin widget into the stack, in manifest order.
 
-        Returns a plain ``QWidget`` either way, so the rest of the window can call
-        the page without a ``hasattr`` dance.  The placeholder carries the plugin
-        name so the user knows which switch to flip.
+        This is the only place the stack learns about plugin pages.  It used to
+        special-case two plugin ids, which meant adding a third host-provided
+        page required editing the window; now the manifest decides (R-326).
         """
-        for info in self.plugins.loaded():
-            if info.id == plugin_id and info.widget is not None:
-                return info.widget
-        return self._disabled_page(plugin_id)
+        log_page = self.stack.widget(0)
+        if log_page is not None:
+            self._plugin_pages[self.LOG_PAGE] = log_page
+        for info in sorted(self.plugins.loaded(),
+                           key=lambda item: (item.page_order(), item.id)):
+            if info.widget is None:
+                continue
+            self._plugin_pages[info.page_key()] = info.widget
+            self.stack.addWidget(info.widget)
 
-    def _disabled_page(self, plugin_id: str) -> QWidget:
-        """Placeholder shown in a built-in tab whose plugin is disabled."""
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(8)
-        title = QLabel(tr("plugin.disabled.title", name=self._plugin_label(plugin_id)))
-        title.setStyleSheet("font-size: 15px; font-weight: 600;")
-        layout.addWidget(title)
-        hint = QLabel(tr("plugin.disabled.hint"))
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {theme.DIM};")
-        layout.addWidget(hint)
-        layout.addStretch(1)
-        return page
-
-    @staticmethod
-    def _plugin_label(plugin_id: str) -> str:
-        return "终端 / Terminal" if plugin_id == "terminal" \
-            else "文件传输 / File Transfer"
+    def _unmount_plugin_pages(self) -> None:
+        """Remove every plugin page from the stack (their owners delete them)."""
+        log_page = self._plugin_pages.get(self.LOG_PAGE)
+        for key in list(self._plugin_pages):
+            widget = self._plugin_pages.pop(key, None)
+            if widget is None or widget is log_page:
+                continue
+            index = self.stack.indexOf(widget)
+            if index >= 0:
+                self.stack.removeWidget(widget)
+            with contextlib.suppress(RuntimeError):
+                widget.setParent(None)
 
     def _load_plugins(self) -> None:
-        # ``plugins.load()`` already ran before `_build_ui` (R-218) so the built-in
-        # tabs could be built from it; calling it again would *re-instantiate*
-        # every plugin and the pages in the stack would be the discarded copies.
+        # ``plugins.load()`` already ran before `_build_ui` so the tabs could be
+        # built from it; calling it again would *re-instantiate* every plugin and
+        # the pages in the stack would be the discarded copies (R-218).
         if not self.plugins.loaded():
             self.plugins.load()
-        for info in self.plugins.loaded():
-            widget = info.widget
-            if widget is None:
-                continue
-            if info.id in self.BUILTIN_PLUGIN_PAGES:
-                # It already has a fixed tab (built by `_plugin_page`), so it must
-                # not also get a `plugin:<id>` one.
-                continue
-            key = f"plugin:{info.id}"
-            self._plugin_pages[key] = widget
-            self.stack.addWidget(widget)
+            self._mount_plugin_pages()
         self._rebuild_tabs()
 
     def reload_plugins(self) -> None:
         """Tear the plugin pages down, then load whatever is on disk now."""
         current = self.stack.currentWidget()
-        key_before = next((key for key, widget in self._plugin_pages.items() if widget is current), None)
+        key_before = next((key for key, widget in self._plugin_pages.items()
+                           if widget is current), None)
         self.suspend_plugins()
         self.plugins.load()
-        for info in self.plugins.loaded():
-            widget = info.widget
-            if widget is None:
-                continue
-            if info.id in self.BUILTIN_PLUGIN_PAGES:
-                continue
-            key = f"plugin:{info.id}"
-            self._plugin_pages[key] = widget
-            self.stack.addWidget(widget)
-        # terminal / transfer are rebuilt as well: unloading destroyed the old
-        # widgets, so `self.console` would otherwise point at a dead C++ object
-        # and every later call would raise "already deleted" (R-218).
-        self._rebind_builtin_pages()
-        self._rebuild_tabs()
+        self._mount_plugin_pages()
+        # A reload destroys the old widgets, so every cached reference must be
+        # replaced *after* unloading - keeping one would address a dead C++
+        # object and raise "already deleted" on the next repaint (R-218).
         if key_before in self._plugin_pages:
             self.switch_page(key_before)
+        self._rebuild_tabs()
         self.notify(tr("plugin.reloaded", n=len(self.plugins.loaded())), "ok")
 
-    #: Stack index of each built-in plugin tab, in `_page_keys` order.
-    _BUILTIN_SLOTS = (("terminal", 0), ("transfer", 2))
-
-    def _rebind_builtin_pages(self) -> None:
-        """Point ``self.console`` / ``self.transfer`` at the live plugin pages.
-
-        Called after a reload (the old widgets were destroyed) and it is also the
-        single place that swaps in the "plugin disabled" placeholder.
-        """
-        for plugin_id, slot in self._BUILTIN_SLOTS:
-            old = getattr(self, "console" if plugin_id == "terminal" else "transfer",
-                          None)
-            widget = self._plugin_page(plugin_id)
-            if widget is old:
-                continue
-            index = -1
-            if old is not None:
-                with contextlib.suppress(RuntimeError):
-                    index = self.stack.indexOf(old)
-                    self.stack.removeWidget(old)
-            if index < 0:
-                index = slot
-            self.stack.insertWidget(min(index, self.stack.count()), widget)
-            if plugin_id == "terminal":
-                # ``console`` is only a reference: the plugin owns the key ->
-                # ``api.send`` wiring, so the window must not connect again
-                # (a second connection duplicated every keystroke, L-292).
-                self.console = widget
-            else:
-                self.transfer = widget
-
     def suspend_plugins(self) -> None:
-        """Unload every plugin, including the built-in-tab ones (R-218).
+        """Unload every plugin and take its page out of the stack (R-326).
 
-        ``self.console`` / ``self.transfer`` point *into* those widgets, so they
-        are swapped for placeholders **before** the unload destroys them -
-        otherwise the window would keep a reference to a dead C++ object and the
-        next ``retranslate()``/``apply_font()`` would raise "already deleted".
+        The plugin destroys its own widget in ``unload()``; the window only has
+        to stop pointing into it first, otherwise the next ``retranslate()`` or
+        ``apply_font()`` would address a dead C++ object.
         """
-        for plugin_id in self.BUILTIN_PLUGIN_PAGES:
-            attribute = "console" if plugin_id == "terminal" else "transfer"
-            widget = getattr(self, attribute, None)
-            if widget is None or not self._is_builtin_page(plugin_id):
-                continue
-            placeholder = self._disabled_page(plugin_id)
-            index = self.stack.indexOf(widget)
-            if index >= 0:
-                self.stack.removeWidget(widget)
-                self.stack.insertWidget(index, placeholder)
-            else:
-                self.stack.addWidget(placeholder)
-            setattr(self, attribute, placeholder)
-            widget.setParent(None)
-            with contextlib.suppress(RuntimeError):
-                widget.deleteLater()
+        self._unmount_plugin_pages()
         self.plugins.unload()
-        for key in list(self._plugin_pages):
-            widget = self._plugin_pages.pop(key)
-            index = self.stack.indexOf(widget)
-            if index >= 0:
-                self.stack.removeWidget(widget)
-            widget.setParent(None)
-            widget.deleteLater()
         self._rebuild_tabs()
 
-    def _is_builtin_page(self, plugin_id: str) -> bool:
-        """True when the current page for ``plugin_id`` is a live plugin widget."""
-        for info in self.plugins.loaded():
-            if info.id == plugin_id and info.widget is not None:
-                attribute = "console" if plugin_id == "terminal" else "transfer"
-                return getattr(self, attribute, None) is info.widget
-        return False
+    def plugin_page(self, key: str) -> QWidget | None:
+        """The live widget behind a page key, or ``None`` when it is absent."""
+        return self._plugin_pages.get(key)
 
     def open_plugin_store(self) -> None:
         from .plugin_store import PluginStoreDialog
@@ -2088,9 +2008,9 @@ class OmniWindow(QMainWindow):
             return
         if port == status.get("port"):
             return
-        reset = getattr(self.console, "reset", None)
-        if reset is not None:
-            reset()
+        # Switching ports is a host concern; the terminal plugin only has an
+        # optional hook, so it is called through the page lookup (R-326).
+        self._optional_page_call("console", "reset")
         self.notify(tr("misc.switching", port=port), "info")
         self.bridge.open(port, self._serial_opts())
 
@@ -2205,13 +2125,10 @@ class OmniWindow(QMainWindow):
         # object, so there is no second grid to drift apart - and `cli screen`
         # keeps working while the user sits on the log page (R-211).
         #
-        # The terminal is a **plugin** now (R-218): when it is disabled the tab
-        # holds a plain placeholder widget, and a received byte must still be
-        # logged instead of raising on every packet (the packaged self-test
-        # caught exactly that: `'QWidget' object has no attribute 'absorb'`).
-        absorb = getattr(self.console, "absorb", None)
-        if absorb is not None:
-            absorb(data)
+        # The terminal is a **plugin** now, so it subscribes to received bytes
+        # itself through ``api.on_rx`` - the host neither knows that a screen
+        # exists nor calls ``absorb`` on it (R-326).  Received bytes are still
+        # logged below even when the plugin is missing.
         self._rx_queue.append((ts, data))
         if not self._rx_timer.isActive():
             self._rx_timer.start()
@@ -3266,12 +3183,31 @@ class OmniWindow(QMainWindow):
         self.settings.setValue("send/history", "[]")
         self.notify(tr("misc.history.cleared"), "ok")
 
+    def _optional_page_call(self, key: str, method: str):
+        """Call ``method`` on the page behind ``key`` if it exposes one.
+
+        The host must never assume a particular plugin is installed or that its
+        widget has a particular class, so every optional hook goes through this
+        lookup (R-326).  Returns the call's result, or ``None``.
+        """
+        page = self._plugin_pages.get(key)
+        callback = getattr(page, method, None) if page is not None else None
+        if callback is None:
+            return None
+        try:
+            return callback()
+        except RuntimeError:
+            return None
+
     def apply_log_font(self, family: str, pixel_size: int) -> int:
         """Change the log face/size (terminal included) on its own (R-096)."""
         used = self.log.apply_font(pixel_size, family)
-        for page in (self.console, self.search_panel):
-            if hasattr(page, "apply_font"):
-                page.apply_font()
+        for _key, page in list(self._plugin_pages.items()):
+            callback = getattr(page, "apply_font", None)
+            if callback is not None:
+                callback()
+        if getattr(self.search_panel, "apply_font", None) is not None:
+            self.search_panel.apply_font()
         self.settings.setValue("display/log_family", theme.log_family())
         self.settings.setValue("display/log_px", used)
         self.notify(tr("misc.font.log", size=used), "ok")
@@ -3418,7 +3354,7 @@ class OmniWindow(QMainWindow):
         self.commands_panel.retranslate()
         self.search_panel.retranslate()
         self.send_panel.retranslate()
-        for page in (self.console, self.transfer):
+        for _key, page in list(self._plugin_pages.items()):
             retranslate = getattr(page, "retranslate", None)
             if retranslate is not None:
                 retranslate()

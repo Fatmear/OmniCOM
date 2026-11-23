@@ -1441,6 +1441,9 @@ def create(api):
     _bind(api)
     api.register_text(TEXT)
     widget = TerminalPlugin(api)
+    # The plugin pulls received bytes from the host's RX channel itself, exactly
+    # like any other plugin; the window no longer calls ``absorb`` on it (R-326).
+    api.on_rx(lambda _ts, data: widget.absorb(data))
     api.provide("terminal", lambda: widget.service)
     api.on_language(lambda _lang: widget.retranslate())
     return widget
