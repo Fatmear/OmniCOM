@@ -34,6 +34,7 @@ from omnicom.plugin_store import (  # noqa: E402
     select_version,
     validate_catalog,
 )
+from omnicom.plugins import API_VERSION  # noqa: E402
 
 #: Widget kinds the dashboard must be able to place (mirrors the plugin's
 #: own palette order; the panel sorts nothing, so order matters).
@@ -149,6 +150,42 @@ def store_checks() -> None:
             store.install(entries[0])
             check("R-148 retry reinstalls plugin", "demo" in store.installed())
             check("R-148 offline cache retains catalog", len(store.cached_catalog()) == 2)
+
+            # ------------------------------------------------ R-323 disabled
+            # A bundled plugin cannot be deleted from the program folder, so
+            # "uninstall" only records a flag.  That flag used to also drop the
+            # entry out of ``installed()``, and the store's rows are
+            # ``installed | remote catalog`` - while ``terminal`` / ``transfer``
+            # are deliberately absent from the remote catalog (R-174).  The
+            # user therefore saw them disappear from the store with no way to
+            # switch them back on.
+            core_bundle = root / "core-bundle"
+            core_bundle.mkdir()
+            for name in ("terminal", "transfer"):
+                folder = core_bundle / name
+                folder.mkdir()
+                atomic_json(folder / "plugin.json",
+                            {"id": name, "name": name, "version": "1.0.0",
+                             "api": API_VERSION, "entry": "plugin.py"})
+                (folder / "plugin.py").write_text("def create(api):\n    return None\n",
+                                                  encoding="utf-8")
+            core = PluginStore(root / "data", core_bundle, base + "catalog.json")
+            visible = {row["id"] for row in core.rows(core.cached_catalog())}
+            check("R-323 bundled core plugins appear in the store",
+                  {"terminal", "transfer"} <= visible, sorted(visible))
+            core.set_disabled("terminal", True)
+            rows = {row["id"]: row for row in core.rows(core.cached_catalog())}
+            check("R-323 disabling keeps the plugin visible and tagged",
+                  "terminal" in rows and rows["terminal"]["disabled"] is True,
+                  sorted(rows))
+            check("R-323 a disabled plugin still reports its installed version",
+                  rows["terminal"]["installed_version"] == "1.0.0",
+                  rows["terminal"]["installed_version"])
+            core.set_disabled("terminal", False)
+            rows = {row["id"]: row for row in core.rows(core.cached_catalog())}
+            check("R-323 enabling clears the flag without reinstalling",
+                  rows["terminal"]["disabled"] is False and core.disabled() == set(),
+                  (rows["terminal"]["disabled"], core.disabled()))
 
             # ------------------------------------------------- R-178 versions
             older = package(root, "1.0.5")
@@ -2434,6 +2471,7 @@ def decoupling_checks() -> None:
     # Register the shipped tables the way ``create()`` does and prove the keys
     # resolve; the panels may not be loaded in this suite.
     registered = []
+    loaded_tables: list[dict] = []
     for plugin_id, relative in (("hexview", "plugins/hexview/text.py"),
                                 ("terminal", "plugins/terminal/text.py"),
                                 ("transfer", "plugins/transfer/text.py")):
@@ -2441,6 +2479,7 @@ def decoupling_checks() -> None:
         exec(compile((ROOT / relative).read_text(encoding="utf-8"),
                      relative, "exec"), namespace)
         table = namespace["TEXT"]
+        loaded_tables.append(table)
         i18n.register_plugin_table(plugin_id, table)
         registered.append((plugin_id, table))
     check("R-322 registered plugin copy resolves through tr()",
@@ -2450,6 +2489,34 @@ def decoupling_checks() -> None:
     for plugin_id, _table in registered:
         i18n.unregister_plugin_table(plugin_id)
     check("R-322 unloading a plugin drops its copy", i18n.tr("hex.open") == "hex.open")
+    # ------------------------------------------------------ R-324 key coverage
+    # ``tr("menu.help")`` shipped with no entry in any table, so the Help menu
+    # literally read "menu.help" on screen.  A missing key is silent by design
+    # (it falls back to itself), which means only a static scan can catch it -
+    # grepping for the *literal* keys the code passes to ``tr()``.
+    source_keys: set[str] = set()
+    for base in (ROOT / "omnicom", ROOT / "plugins"):
+        for path in sorted(base.rglob("*.py")):
+            if "vendor" in path.parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not node.args:
+                    continue
+                if ast.unparse(node.func) not in ("tr", "i18n.tr", "api.tr", "self.api.tr"):
+                    continue
+                first = node.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    source_keys.add(first.value)
+    known = set(i18n._TABLE)
+    for table in loaded_tables:
+        known |= set(table)
+    unknown = sorted(key for key in source_keys if key not in known)
+    check(f"R-324 every literal tr() key resolves (checked {len(source_keys)})",
+          not unknown, unknown[:10])
+    for key in ("menu.help", "menu.docs", "menu.about"):
+        check(f"R-324 {key} has real text, not the key itself",
+              i18n.tr(key) not in ("", key), i18n.tr(key))
 
 
 def main() -> int:

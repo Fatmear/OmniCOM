@@ -254,6 +254,23 @@ class PluginStore:
         except (OSError, ValueError, TypeError):
             return set()
 
+    def set_disabled(self, identifier: str, disabled: bool) -> None:
+        """Enable or disable one plugin without touching its package (R-323).
+
+        Uninstalling a *bundled* plugin cannot delete the program's own folder,
+        so the host records the id here instead.  That flag used to also make
+        the plugin vanish from the store, which left the user with no way to
+        switch it back on: the store lists ``installed | remote catalog`` and
+        the two core plugins are deliberately absent from the remote catalog
+        (R-174).  Disabling is therefore a *state*, not a removal.
+        """
+        current = self.disabled()
+        if disabled:
+            current.add(identifier)
+        else:
+            current.discard(identifier)
+        atomic_json(self.disabled_path, sorted(current))
+
     def cached_catalog(self) -> list[dict]:
         cached = self._cached_sources()
         if cached:
@@ -319,7 +336,16 @@ class PluginStore:
         return result
 
     def installed(self) -> dict[str, dict]:
-        result = {}
+        """Every plugin folder that exists, disabled ones included (R-323).
+
+        ``disabled`` used to filter the id out entirely.  Because the store's
+        row list is ``installed | remote catalog`` and ``terminal`` /
+        ``transfer`` are intentionally not in the remote catalog (R-174), a
+        disabled core plugin disappeared from the store and could never be
+        enabled again.  The flag now travels with the entry instead of deleting
+        it, so the row can offer 启用.
+        """
+        result: dict[str, dict] = {}
         disabled = self.disabled()
         for root in (self.root, self.bundled):
             if not root.is_dir():
@@ -330,10 +356,11 @@ class PluginStore:
                 try:
                     item = json.loads((folder / "plugin.json").read_text(encoding="utf-8"))
                     identifier = str(item.get("id", ""))
-                    if not PLUGIN_ID.fullmatch(identifier) or identifier in disabled:
+                    if not PLUGIN_ID.fullmatch(identifier):
                         continue
                     if identifier not in result:
-                        result[identifier] = {**item, "path": str(folder)}
+                        result[identifier] = {**item, "path": str(folder),
+                                              "disabled": identifier in disabled}
                 except (OSError, ValueError, TypeError, AttributeError):
                     continue
         return result
@@ -349,6 +376,11 @@ class PluginStore:
             current_version = str(current.get("version", "0.0.0")) if current else None
             item["installed_version"] = current_version
             item["latest_version"] = str(latest["version"]) if latest else None
+            # ``disabled`` is a state of the installed copy, not of the remote
+            # catalog, so it must come from ``current`` (R-323).
+            item["disabled"] = bool(current and current.get("disabled"))
+            item["bundled"] = bool(current and current.get("path", "").startswith(
+                str(self.bundled)))
             item["update_available"] = bool(current and latest and version_key(latest["version"]) > version_key(current.get("version", "0")))
             item["compatible"] = int(item.get("api", 1)) <= API_VERSION
             # R-178: the picker needs one flat, newest-first list that always
