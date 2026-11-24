@@ -157,11 +157,21 @@ def main(argv: list[str] | None = None) -> int:
     for path in paths:
         name = os.path.basename(path)
         size = os.path.getsize(path)
+        digest = sha256_of(path)
         old = existing.get(name)
-        if old is not None and int(old.get("size") or -1) == size:
-            print(f"  跳过 {name}（已存在，{size} B）")
-            continue
+        # Size alone is not identity: ``catalog.json`` keeps the same byte count
+        # when a version's sha256 changes (the hash is the same length), so the
+        # old asset was skipped and the published catalog kept pointing at the
+        # previous package.  Compare GitHub's own digest when it publishes one.
         if old is not None:
+            remote = str(old.get("digest") or old.get("sha256") or "")
+            if remote.startswith("sha256:"):
+                remote = remote[len("sha256:"):]
+            same = (remote == digest) if remote else (
+                int(old.get("size") or -1) == size)
+            if same:
+                print(f"  跳过 {name}（内容未变，{size} B）")
+                continue
             make_release.api(f"/releases/assets/{old['id']}", "DELETE")
             print(f"  删除旧 {name}")
         with open(path, "rb") as handle:
@@ -176,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  上传 {name} 失败：", status, result.get("message"))
             ok = False
             continue
-        print(f"  已上传 {name} {size} B sha256 {sha256_of(path)}")
+        print(f"  已上传 {name} {size} B sha256 {digest}")
 
     status, latest = make_release.api("/releases/latest")
     name = latest.get("tag_name") if status == 200 else f"status {status}"
