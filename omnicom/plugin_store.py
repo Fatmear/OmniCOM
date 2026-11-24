@@ -31,6 +31,12 @@ MAX_UNPACKED = 384 * 1024 * 1024
 #: is parsed on the GUI thread and cached as JSON, so the list stays bounded.
 MAX_VERSIONS = 100
 
+#: Plugins that ship **inside** the application bundle (R-293) instead of the
+#: store (R-174).  They can be switched off, but they are never installed or
+#: uninstalled: the folder belongs to the program, not to the user, so the
+#: store UI offers 启用 / 禁用 for them (user, 2026-11-24).
+CORE_PLUGINS = ("terminal", "transfer")
+
 
 class StoreError(Exception):
     def __init__(self, code: str, detail: str = "") -> None:
@@ -383,6 +389,10 @@ class PluginStore:
             # ``disabled`` is a state of the installed copy, not of the remote
             # catalog, so it must come from ``current`` (R-323).
             item["disabled"] = bool(current and current.get("disabled"))
+            # Core plugins ship with the program (R-293): the store may switch
+            # them off but never moves their folder away, so the row offers
+            # 启用 / 禁用 instead of 安装 / 卸载 (user, 2026-11-24).
+            item["core"] = identifier in CORE_PLUGINS
             item["bundled"] = bool(current and current.get("path", "").startswith(
                 str(self.bundled)))
             # A really uninstalled plugin is neither installed nor disabled: it
@@ -623,7 +633,13 @@ class PluginStore:
 
         The plugin's own **data** (``plugin-data/<id>``) is a user file and is
         never touched.
+
+        Core plugins are refused: they belong to the program folder (R-293), so
+        the store switches them off with :meth:`set_disabled` instead of moving
+        their files away (user, 2026-11-24).
         """
+        if identifier in CORE_PLUGINS:
+            raise StoreError("core")
         with self.operation():
             target = self._target(identifier)
             old_disabled = self.disabled()

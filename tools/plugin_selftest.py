@@ -2218,8 +2218,12 @@ def store_ui_checks(app) -> None:
               core_store.disabled() == set(), str(core_store.disabled()))
         restored = core_dialog.rows["terminal"]
         labels = [button.text() for button in restored["widget"].findChildren(QPushButton)]
-        check("R-323 an enabled plugin gets its 卸载 action back",
-              "卸载" in labels and "启用" not in labels, str(labels))
+        # A core plugin ships with the app, so enabling it must **not** bring a
+        # destructive 卸载 action back: the only action stays the on/off toggle
+        # (R-293, user 2026-11-24).
+        check("R-323 an enabled core plugin offers 禁用 and never 卸载",
+              "禁用" in labels and "卸载" not in labels
+              and "安装" not in labels, str(labels))
         core_dialog.close()
         core_dialog.deleteLater()
         app.processEvents()
@@ -2231,7 +2235,10 @@ def store_ui_checks(app) -> None:
         # own data untouched.
         uninstall_root = root / "uninstall-ui"
         uninstall_bundle = uninstall_root / "bundle"
-        for name in ("terminal", "transfer"):
+        # A *store* plugin: core plugins (terminal/transfer) are toggled on/off
+        # and can no longer be really uninstalled (R-293, user 2026-11-24), so
+        # the uninstall contract is exercised on a normal plugin.
+        for name in ("gauge", "probe"):
             folder = uninstall_bundle / name
             folder.mkdir(parents=True)
             atomic_json(folder / "plugin.json",
@@ -2240,28 +2247,28 @@ def store_ui_checks(app) -> None:
             (folder / "plugin.py").write_text(
                 "from PySide6.QtWidgets import QWidget\n\n\n"
                 "def create(api):\n    return QWidget()\n", encoding="utf-8")
-        user_data = uninstall_root / "data" / "plugin-data" / "terminal" / "settings.ini"
+        user_data = uninstall_root / "data" / "plugin-data" / "gauge" / "settings.ini"
         user_data.parent.mkdir(parents=True)
         user_data.write_bytes(b"keep me")
         uninstall_store = PluginStore(uninstall_root / "data", uninstall_bundle,
                                       catalog_urls=[])
         placed = sorted(uninstall_store.installed())
-        check("R-327 the core plugins start out installed",
-              placed == ["terminal", "transfer"], str(placed))
+        check("R-327 the store plugins start out installed",
+              placed == ["gauge", "probe"], str(placed))
 
-        uninstall_store.uninstall("terminal")
+        uninstall_store.uninstall("gauge")
         check("R-327 uninstall really removes the plugin folder",
-              not (uninstall_bundle / "terminal").is_dir(),
-              str(uninstall_bundle / "terminal"))
+              not (uninstall_bundle / "gauge").is_dir(),
+              str(uninstall_bundle / "gauge"))
         check("R-327 a removed plugin is no longer reported as installed",
-              sorted(uninstall_store.installed()) == ["transfer"],
+              sorted(uninstall_store.installed()) == ["probe"],
               str(sorted(uninstall_store.installed())))
         check("R-327 uninstall keeps the user's plugin data",
               user_data.read_bytes() == b"keep me")
 
         removed_rows = {row["id"]: row for row in
                         uninstall_store.rows(uninstall_store.cached_catalog())}
-        removed = removed_rows["terminal"]
+        removed = removed_rows["gauge"]
         check("R-327 a removed row claims neither installed nor disabled",
               removed["installed_version"] is None
               and removed["removed"] is True
@@ -2270,7 +2277,7 @@ def store_ui_checks(app) -> None:
         removed_dialog = PluginStoreDialog(window, uninstall_store)
         removed_dialog.show()
         app.processEvents()
-        removed_row = removed_dialog.rows["terminal"]
+        removed_row = removed_dialog.rows["gauge"]
         labels = [button.text() for button in
                   removed_row["widget"].findChildren(QPushButton)]
         check("R-327 a removed row offers 安装 and nothing else",
@@ -2286,17 +2293,128 @@ def store_ui_checks(app) -> None:
             app.processEvents()
         app.processEvents()
         check("R-327 installing a removed plugin puts its folder back",
-              (uninstall_bundle / "terminal" / "plugin.json").is_file())
+              (uninstall_bundle / "gauge" / "plugin.json").is_file())
         check("R-327 the reinstall clears the removed record",
               uninstall_store.removed() == set(),
               str(uninstall_store.removed()))
         reinstalled = sorted(uninstall_store.installed())
         check("R-327 the reinstalled plugin is installed again",
-              reinstalled == ["terminal", "transfer"], str(reinstalled))
+              reinstalled == ["gauge", "probe"], str(reinstalled))
         check("R-327 reinstalling never touches the user's data",
               user_data.read_bytes() == b"keep me")
         removed_dialog.close()
         removed_dialog.deleteLater()
+        app.processEvents()
+
+        # A plugin that lives **only** in the user folder (no remote catalog
+        # carries it, e.g. a hand-installed build) must behave the same way:
+        # after a real uninstall its row survives and 安装 puts the backup back.
+        # ``terminal`` above proves the bundled path; this proves the local one.
+        local_folder = uninstall_store.root / "localonly"
+        local_folder.mkdir(parents=True)
+        atomic_json(local_folder / "plugin.json",
+                    {"id": "localonly", "name": "Local only", "version": "2.1.0",
+                     "api": API_VERSION, "entry": "plugin.py"})
+        (local_folder / "plugin.py").write_text(
+            "from PySide6.QtWidgets import QWidget\n\n\n"
+            "def create(api):\n    return QWidget()\n", encoding="utf-8")
+        uninstall_store.uninstall("localonly")
+        local_dialog = PluginStoreDialog(window, uninstall_store)
+        local_dialog.show()
+        app.processEvents()
+        local_row = local_dialog.rows.get("localonly")
+        check("R-327 a local-only uninstall keeps a row",
+              local_row is not None, str(sorted(local_dialog.rows)))
+        check("R-327 a local-only removed row can install its backup",
+              local_row is not None and local_row["install"].isEnabled()
+              and local_row["install"].text() == "安装",
+              f"{local_row and local_row['install'].text()}")
+        if local_row is not None:
+            check("R-327 a local-only row never offers uninstall",
+                  not any(button.text() == "卸载" for button in
+                          local_row["widget"].findChildren(QPushButton)))
+            local_row["install"].click()
+            deadline = time.perf_counter() + 10
+            while local_dialog.busy() and time.perf_counter() < deadline:
+                app.processEvents()
+            app.processEvents()
+        check("R-327 a local-only reinstall restores the folder",
+              (uninstall_store.root / "localonly" / "plugin.json").is_file())
+        local_dialog.close()
+        local_dialog.deleteLater()
+        app.processEvents()
+
+        # Backup deleted out from under us: the row must stay (so the plugin is
+        # not silently gone) but the button may not pretend an install would
+        # work, and it explains why (R-327).
+        uninstall_store.uninstall("probe")
+        for folder in (uninstall_root / "data" / "plugin-updates").iterdir():
+            if folder.name.startswith("probe-removed"):
+                shutil.rmtree(folder)
+        gone_dialog = PluginStoreDialog(window, uninstall_store)
+        gone_dialog.show()
+        app.processEvents()
+        gone_row = gone_dialog.rows.get("probe")
+        check("R-327 an uninstalled row survives a deleted backup",
+              gone_row is not None, str(sorted(gone_dialog.rows)))
+        check("R-327 a deleted backup disables the install button",
+              gone_row is not None and not gone_row["install"].isEnabled()
+              and "备份" in gone_row["install"].toolTip(),
+              f"{gone_row and gone_row['install'].toolTip()}")
+        gone_dialog.close()
+        gone_dialog.deleteLater()
+        app.processEvents()
+        uninstall_store.restore("localonly", expect_version="2.1.0")
+
+        # Core plugins are switched on/off, never installed or uninstalled
+        # (R-293 + user, 2026-11-24).  The toggle wrote the *inverse* flag once,
+        # so 启用 actually disabled the plugin again - the user reported 启用终端
+        # 启用不了.  This drives the real button and reads the persisted state.
+        atomic_json(uninstall_bundle / "terminal" / "plugin.json",
+                    {"id": "terminal", "name": "terminal", "version": "1.0.0",
+                     "api": API_VERSION, "entry": "plugin.py"})
+        (uninstall_bundle / "terminal" / "plugin.py").write_text(
+            "from PySide6.QtWidgets import QWidget\n\n\n"
+            "def create(api):\n    return QWidget()\n", encoding="utf-8")
+        uninstall_store.set_disabled("terminal", True)
+        core_dialog = PluginStoreDialog(window, uninstall_store)
+        core_dialog.show()
+        app.processEvents()
+        core_row = core_dialog.rows["terminal"]
+        check("R-293 a core row offers a toggle instead of install/uninstall",
+              core_row.get("toggle") is not None
+              and core_row.get("install") is None
+              and core_row.get("picker") is None
+              and not any(button.text() in ("安装", "卸载")
+                          for button in core_row["widget"].findChildren(QPushButton)),
+              str([b.text() for b in core_row["widget"].findChildren(QPushButton)]))
+        check("R-293 a disabled core row reads 启用",
+              core_row["toggle"].text() == "启用", core_row["toggle"].text())
+        core_row["toggle"].click()
+        deadline = time.perf_counter() + 10
+        while core_dialog.busy() and time.perf_counter() < deadline:
+            app.processEvents()
+        for _ in range(5):
+            app.processEvents()
+        check("R-293 enabling a core plugin clears its disabled flag",
+              "terminal" not in uninstall_store.disabled(),
+              str(sorted(uninstall_store.disabled())))
+        enabled_row = core_dialog.rows["terminal"]
+        check("R-293 an enabled core row reads 禁用",
+              enabled_row["toggle"].text() == "禁用", enabled_row["toggle"].text())
+        enabled_row["toggle"].click()
+        deadline = time.perf_counter() + 10
+        while core_dialog.busy() and time.perf_counter() < deadline:
+            app.processEvents()
+        for _ in range(5):
+            app.processEvents()
+        check("R-293 disabling a core plugin sets its disabled flag",
+              "terminal" in uninstall_store.disabled(),
+              str(sorted(uninstall_store.disabled())))
+        check("R-293 the core folder is never moved by the toggle",
+              (uninstall_bundle / "terminal" / "plugin.json").is_file())
+        core_dialog.close()
+        core_dialog.deleteLater()
         app.processEvents()
 
         # The host must obey the removal immediately: after a real uninstall its
@@ -2311,13 +2429,13 @@ def store_ui_checks(app) -> None:
 
         host_data = root / "host-data"
         host_plugins = root / "host-plugins"
-        for name in ("terminal", "transfer"):
+        for name in ("gauge", "probe"):
             folder = host_plugins / name
             folder.mkdir(parents=True)
             atomic_json(folder / "plugin.json",
                         {"id": name, "name": name, "version": "1.0.0",
                          "api": API_VERSION, "entry": "plugin.py",
-                         "page": "console" if name == "terminal" else "transfer"})
+                         "page": "console" if name == "gauge" else "transfer"})
             (folder / "plugin.py").write_text(
                 "from PySide6.QtWidgets import QWidget\n\n\n"
                 "def create(api):\n    return QWidget()\n", encoding="utf-8")
@@ -2328,20 +2446,20 @@ def store_ui_checks(app) -> None:
             host.load()
             before_ids = sorted(info.id for info in host.loaded())
             check("R-327 the host loads both plugins from its own folder",
-                  before_ids == ["terminal", "transfer"], str(before_ids))
+                  before_ids == ["gauge", "probe"], str(before_ids))
             host_store = PluginStore(host_data, host_plugins, catalog_urls=[])
-            host_store.uninstall("terminal")
+            host_store.uninstall("gauge")
             host.unload()
             host.load()
             after_ids = sorted(info.id for info in host.loaded())
             check("R-327 the host stops loading a removed plugin",
-                  "terminal" not in after_ids, str(after_ids))
+                  "gauge" not in after_ids, str(after_ids))
             check("R-327 the other plugin is unaffected",
-                  "transfer" in after_ids
-                  and (host_plugins / "transfer" / "plugin.json").is_file(),
+                  "probe" in after_ids
+                  and (host_plugins / "probe" / "plugin.json").is_file(),
                   str(after_ids))
             check("R-327 the removed folder is really gone from disk",
-                  not (host_plugins / "terminal").exists())
+                  not (host_plugins / "gauge").exists())
         finally:
             host.search_paths = original_paths
             host.unload()
@@ -2517,6 +2635,44 @@ def store_ui_checks(app) -> None:
                  if badge.isWindow() or badge.parent() is None]
         check("R-181 no store badge is a top-level window",
               not stray)
+        # The update dot is a plain ``QWidget``, not a ``Badge``: checking only
+        # the Badge type let an unparented 8x8 ``QWidget`` become a visible
+        # top-level window on every rebuild, which the user saw as a small blank
+        # window flashing after 启用/安装/卸载 (R-181).
+        dots = picker_dialog.findChildren(QWidget, "PluginUpdateDot")
+        check("R-181 every store update dot has a parent",
+              bool(dots) and all(dot.parent() is not None and not dot.isWindow()
+                                 for dot in dots),
+              f"{len(dots)} dots")
+        # ``parent()`` alone cannot prove this: a parentless widget becomes a
+        # top-level window while ``setVisible(True)`` runs, and ``addWidget()``
+        # re-parents it later, leaving no trace to inspect afterwards.  Only a
+        # widget that is *created with its parent* never shows as a window, so
+        # the regression is reproduced on a fresh instance and both orderings
+        # are compared (that is what the user saw: a blank window flashing).
+        orphan = QWidget()
+        orphan.setFixedSize(8, 8)
+        orphan.setVisible(True)
+        orphan_was_window = orphan.isWindow()
+        row_probe = QFrame()
+        QVBoxLayout(row_probe).addWidget(orphan)
+        fixed_dot = QWidget(row_probe)
+        fixed_dot.setFixedSize(8, 8)
+        fixed_dot.setVisible(True)
+        fixed_was_window = fixed_dot.isWindow()
+        row_probe.deleteLater()
+        check("R-181 a dot created without a parent really flashes as a window",
+              orphan_was_window and not fixed_was_window,
+              f"orphan={orphan_was_window} parented={fixed_was_window}")
+        check("R-181 store dots are created with their row, not re-parented later",
+              all(dot.parent() is not None and not dot.isWindow() for dot in dots))
+        # The only construction that *cannot* flash is "parent in the
+        # constructor": assert the source keeps it that way, because the
+        # runtime state after the rebuild looks identical either way.
+        source = (ROOT / "omnicom" / "ui" / "plugin_store.py").read_text(encoding="utf-8")
+        check("R-181 the update dot is constructed with its row as parent",
+              'badge = QWidget(row)' in source
+              and 'badge = QWidget()' not in source)
         detached = widgets_module.Badge()
         detached.show_text("R-181")
         never_shown = not detached.isVisible() and detached.isWindow()

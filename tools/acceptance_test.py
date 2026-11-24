@@ -630,8 +630,13 @@ def suite_gui() -> None:
             continue
         status, req, name, detail = match.groups()
         add(req, name.strip(), status == "PASS", detail or "")
-    add("R-001", "GUI 验收整体通过", "ALL GUI SELFTESTS PASSED" in out,
-        "" if "ALL GUI SELFTESTS PASSED" in out else out.strip().splitlines()[-1:])
+    # Qt prints platform warnings (e.g. "This plugin does not support
+    # propagateSizeHints()") on the *same* line as the suite's closing banner,
+    # so a substring test failed on a perfectly green run.  Match the banner as
+    # a whole line instead of anywhere in the output.
+    passed = any(line.strip() == "ALL GUI SELFTESTS PASSED" for line in out.splitlines())
+    add("R-001", "GUI 验收整体通过", passed,
+        "" if passed else out.strip().splitlines()[-1:])
     # -- a check without an R-id is invisible to the aggregation above, so a
     #    silently dropped/renamed check would still look like full coverage.
     add("R-001", "GUI 每项检查都映射到需求（无游离检查）", not unmapped,

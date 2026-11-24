@@ -144,8 +144,8 @@ class VersionPicker(QWidget):
         # uninstall moved it to the backup area, and 安装 copies it back
         # (R-327).  Only an *installed* build that no catalog carries is a
         # local-only record that cannot be selected.
-        bundled = bool(row["item"].get("bundled") or row["item"].get("removed")
-                       or entry.get("recoverable"))
+        recoverable = bool(entry.get("recoverable"))
+        bundled = bool(row["item"].get("bundled") or recoverable)
         download = bool(row["item"].get("versions") and version
                         and (not entry.get("local") or bundled))
         if not version:
@@ -173,6 +173,11 @@ class VersionPicker(QWidget):
             button.setToolTip(tr("store.incompatible"))
         elif state == "same":
             button.setToolTip(tr("store.same_tip"))
+        elif state == "none":
+            # A real uninstall whose backup folder was deleted has no local
+            # build and no catalog entry: the row stays so the plugin is not
+            # silently gone, but the button must not pretend to install (R-327).
+            button.setToolTip(tr("store.no_build_tip"))
         else:
             button.setToolTip("")
         button.setObjectName("Primary" if state in ("install", "update", "downgrade") else "Ghost")
@@ -286,7 +291,15 @@ class PluginStoreDialog(QDialog):
                 disabled_tag = widgets.Badge("", row)
                 disabled_tag.show_text(tr("store.tag.disabled"))
                 header.addWidget(disabled_tag, 0, Qt.AlignmentFlag.AlignTop)
-            badge = QWidget()
+            # Parented to ``row`` before any ``setVisible``: a widget without a
+            # parent is a top-level window, so a visible dot flashed as an 8x8
+            # empty window every time the list was rebuilt - the
+            # "小空白窗口弹一下就消失" the user saw after 启用/安装/卸载 (R-181).
+            # Parented to ``row`` before any ``setVisible``: a widget without a
+            # parent is a top-level window, so a visible dot flashed as an 8x8
+            # empty window every time the list was rebuilt - the
+            # "小空白窗口弹一下就消失" the user saw after 启用/安装/卸载 (R-181).
+            badge = QWidget(row)
             badge.setObjectName("PluginUpdateDot")
             badge.setFixedSize(8, 8)
             badge.setStyleSheet(f"background: {theme.DANGER}; border-radius: 4px;")
@@ -308,7 +321,11 @@ class PluginStoreDialog(QDialog):
             description.setWordWrap(True)
             layout.addWidget(description)
             latest = item["latest_version"] or tr("store.unknown")
-            if item.get("disabled"):
+            if item.get("core"):
+                # No install/update story to tell: the copy always comes from
+                # the program, so the line only names the shipped version.
+                version_text = tr("store.core_row", version=item["installed_version"])
+            elif item.get("disabled"):
                 # "禁用" is a state of an installed copy, so the ordinary
                 # 已安装/最新 line would be misleading: it would look loaded.
                 version_text = tr("store.disabled_row", version=item["installed_version"])
@@ -326,6 +343,26 @@ class PluginStoreDialog(QDialog):
             entry = {"item": item, "widget": row, "badge": badge, "version": version,
                      "installed_tag": installed_tag, "picked": None}
             actions = QHBoxLayout()
+            if item.get("core"):
+                # A core plugin ships inside the program (R-293): its folder is
+                # not the user's to install or delete, so the only meaningful
+                # action is switching it on or off (user, 2026-11-24).  There is
+                # deliberately no version picker: a version that arrives with the
+                # app would be a second, shadowing copy.
+                toggle = QPushButton(tr("store.enable") if item.get("disabled")
+                                     else tr("store.disable"))
+                toggle.setObjectName("Primary" if item.get("disabled") else "Ghost")
+                want = bool(item.get("disabled"))   # 启用 -> True, 禁用 -> False
+                toggle.clicked.connect(
+                    lambda _checked=False, key=item["id"], on=want:
+                    self.set_enabled(key, on))
+                actions.addStretch(1)
+                actions.addWidget(toggle)
+                entry["toggle"] = toggle
+                layout.addLayout(actions)
+                self.list_layout.addWidget(row)
+                self.rows[item["id"]] = entry
+                continue
             picker = VersionPicker(entry)
             actions.addWidget(picker, 1)
             if item.get("disabled"):
