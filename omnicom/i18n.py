@@ -387,6 +387,9 @@ _TABLE: dict[str, tuple[str, str]] = {
                            "Log closed; the serial port is available again"),
     "menu.openlog.done": ("已重放 {lines} 行、{seconds:.1f} 秒的看板数据",
                           "Replayed {lines} lines ({seconds:.1f} s) of dashboard data"),
+    "menu.openlog.estimated": ("日志没有可识别的时间戳，时间轴按顺序等间隔估算（{lines} 行）",
+                               "No timestamp found in the log; the x-axis is evenly "
+                               "estimated from line order ({lines} lines)"),
     "menu.openlog.noplugin": ("数据看板插件未启用，无法重放",
                              "The dashboard plugin is disabled, so nothing can replay it"),
     # ---- hex viewer plugin (R-303)

@@ -1,5 +1,15 @@
 # Current requirements
-Updated: 2026-11-23
+Updated: 2026-11-24
+
+## Log Replay Candidate (2026-11-24)
+
+| ID | Priority | Scope | Requirement | Acceptance check | Status |
+| --- | --- | --- | --- | --- | --- |
+| R-331 | MUST | UI/Log | 日志回放优先使用完整墙钟时间并保留毫秒，包括 `[2026-11-24_11:10:36:584]`；同一行的芯片 tick 不覆盖墙钟。无时间戳时明确提示估算，不把全部样本压在零秒（user, 2026-11-24） | 真实日志相邻时间差正确；无戳提示估算；混合时间源和分行字段尚待处理 | open |
+| R-332 | MUST | Delivery/Core | 升级后缺失的 terminal/transfer 核心目录须补齐，已有用户目录及数据保留（user, 2026-11-24） | 用户旧安装实际升级路径验证；当前恢复来源仍待核实 | open |
+| R-333 | MUST | Plugin/Chart | 打开日志后首次显示看板必须正确，不得依赖 WebEngine 右键 Reload（user, 2026-11-24） | 用户已手测确认正常；插件 603 / GUI 980 / 总验收 1780 项通过 | active |
+| R-334 | MUST NOT | Chart/Delivery | 候选改动须先交用户手测再跑后续验证；不得将静态分析称为修复验证（user, 2026-11-24） | 用户已确认通过，本轮已完成验证 | closed |
+| R-335 | MUST | Delivery | 重发沿用应用 1.1.7 与 chart 1.1.4，不升级版本（user, 2026-11-24） | 用户已确认可发布，同版本重发并核对资产与目录哈希 | active |
 
 | ID | Priority | Scope | Requirement | Acceptance check | Status |
 | --- | --- | --- | --- | --- | --- |

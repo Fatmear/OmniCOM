@@ -42,8 +42,10 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import traceback
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, QSettings, Signal
@@ -52,6 +54,11 @@ from . import __version__, i18n, paths
 
 MANIFEST = "plugin.json"
 REQUIRED_FIELDS = ("id", "entry")
+
+#: Plugins the program itself must provide (R-293): without them there is no
+#: console page and no transfer page, and the store never offers them (R-174).
+#: Kept in sync with ``tools/make_dist.CORE_PLUGINS``.
+CORE_PLUGINS = ("terminal", "transfer")
 #: API version the host guarantees.  Bump when the shape below changes.
 #:
 #: 3 - plugins stopped importing ``omnicom.ui.*`` / ``omnicom.i18n`` and use the
@@ -483,8 +490,46 @@ class PluginHost(QObject):
         return infos
 
     # ----------------------------------------------------------------- load
+    def restore_core_plugins(self) -> list[str]:
+        """Re-ship the bundled core plugins that are missing on disk (R-332).
+
+        ``terminal`` and ``transfer`` ship **inside** the program (R-293); the
+        host has fixed tabs for them and nothing else provides those pages.  An
+        install can still lose them - an unpacked 1.1.6-era copy, a partial
+        copy, a folder deleted by hand - and the user then simply has no
+        console and no transfer page, with no way to get them from the store
+        (they are not store plugins, R-174).
+
+        Restoring is safe because the bundled copy is the authority for these
+        two ids and they are never user-edited in place: a folder that exists
+        is left untouched (the user may have disabled it, which is a *state*,
+        not a missing file), and ``plugin-data/<id>`` is never touched.
+        """
+        restored: list[str] = []
+        bundled = Path(paths.resource_dir()) / "plugins"
+        user_root = Path(paths.data_dir()) / "plugins"
+        for name in CORE_PLUGINS:
+            source = bundled / name
+            if not (source / MANIFEST).is_file():
+                continue                       # a trimmed build without it
+            targets = [user_root / name, bundled / name]
+            if any((target / MANIFEST).is_file() for target in targets):
+                continue                       # present: keep whatever is there
+            destination = user_root / name
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(source, destination,
+                                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            except OSError:
+                continue                       # read-only install: report later
+            restored.append(name)
+        return restored
+
     def load(self) -> list[PluginInfo]:
         """Discover + import + instantiate every plugin.  Never raises."""
+        # A missing core plugin is repaired first: the pages are decided by
+        # discovery, so restoring it afterwards would need a second reload.
+        self.restore_core_plugins()
         self.discover()
         loaded: list[PluginInfo] = []
         for info in self.plugins:

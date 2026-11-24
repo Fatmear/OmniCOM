@@ -2887,7 +2887,12 @@ class OmniWindow(QMainWindow):
                 self.plugins.publish_replay(seconds, payload)
             QApplication.processEvents()
         dashboard.end_replay()
-        self.notify(tr("menu.openlog.done", lines=chart_lines, seconds=span), "ok")
+        if log_replay.has_timestamps(path):
+            self.notify(tr("menu.openlog.done", lines=chart_lines, seconds=span), "ok")
+        else:
+            # No clock and no tick anywhere: the x-axis is an even estimate, so
+            # say so instead of letting the user believe it is the device's time.
+            self.notify(tr("menu.openlog.estimated", lines=chart_lines), "warn")
 
     def _show_log_text(self, path: str, text: str, encoding: str) -> None:
         """Put the file's text into the log view as one batched replace."""

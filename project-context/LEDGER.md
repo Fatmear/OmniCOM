@@ -812,3 +812,18 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - 教训：① 发布必须在前台/独立进程跑完，不要依赖会超时清理的会话；
   ② 发布后必须查 `/releases/<id>` 的 assets 与 `latest`，退出码为 0 也不代表资产还在；
   ③ 任何"先删后传"的流程要么先上传到临时名再改名，要么失败后自动回补。
+
+## L-331 日志墙钟毫秒 / tick / 无时间戳（FIXED-verified）
+- R-331：支持冒号毫秒、墙钟优先、单位 tick、裸 tick 与无戳 0.1 秒估算；同一行墙钟优先于芯片 tick。
+- 遗留边界：一行图表帧被拆成多条物理行时，只保留含 `[OmniCOM-chart]` 的行，续行字段仍会丢；混合绝对墙钟与相对 tick 的基准跳变未处理。
+
+## L-332 升级后核心插件缺失（FIXED-unverified）
+- R-332：`PluginHost.load()` 前调用 `restore_core_plugins()`，从 `paths.resource_dir()/plugins` 补齐缺失的 terminal/transfer；已存在目录与 `plugin-data/<id>` 不动。
+- 未验证：旧用户真实升级路径未复现（旧安装仅有 launcher）；商店插件仍不随包（R-174）。
+
+## L-333 打开日志错图 / WebEngine右键Reload恢复（FIXED-verified）
+- 新证据（user, 2026-11-24）：此前候选仍无效，右键页面Reload后恢复。原clear_data已清_sent，先前“缺少清零”根因撤回；桩测试不能证明真实加载问题。
+- 根因（静态路径＋用户手测）：`_on_page_loaded` 只补布局，点数/主题/历史都依赖更早的 greeting；握手早于 `pageReady` 时被 `_run_js` 静默丢弃，首次显示状态不全；Reload 重跑整套初始化才正常。
+- 修法：`loadFinished` 统一补齐点数/主题/布局/全量快照；`end_replay` 重推点数与布局并全量重同步，重建图表实例与缩放状态后再送完整窗口。
+- 曾试过在 `refresh()` / `_flush_if_ready` / 定时器入口抑制回放期间的实时帧，均使 R-305、R-318 失败（测试的正向出帧依赖定时器），已全部回退，只保留已验证的两处。
+- 验证：单元 8 项；插件 603 项；GUI 980 项；总验收 1780 项 0 失败；Ruff 干净。用户手测确认首次加载正确。

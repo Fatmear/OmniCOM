@@ -692,6 +692,7 @@ class DashboardPanel(QWidget):
         self.throttled = 0
         #: Chart lines received through a log replay (R-302).
         self.replayed_lines = 0
+        self._replay_active = False
         #: Milliseconds the page reported for its last paint.  Used to slow the
         #: timer down instead of queueing frames the renderer cannot absorb.
         self.paint_ms = 0.0
@@ -1107,18 +1108,18 @@ class DashboardPanel(QWidget):
             return
         self.stack.setCurrentIndex(0)
         self._install_wheel_guard()
-        self._push_layout()
+        self._after_greeting()
 
     def _after_greeting(self) -> None:
-        """The page proved the bridge works: replay layout and theme."""
-        self._push_layout()
-        self.apply_theme()
+        """Replay the complete page state once JavaScript can receive it."""
+        if not self.page_ready:
+            return
         self._push_points()
-        # A fresh page holds no samples at all, so the next frame must ship the
-        # retained window instead of only the new tail.
-        self._sent.clear()
-        self._resync_needed = True
-        self._pending_ack = 0
+        self.apply_theme()
+        self._push_layout()
+        self.request_resync()
+        if not self._replay_active:
+            self.flush()
 
     def _on_acked(self, epoch: int) -> None:
         """The page consumed batch ``epoch``; release the next one."""
@@ -1863,6 +1864,9 @@ class DashboardPanel(QWidget):
         self._received.clear()
         self._revision = 0
         self._sent_revision = 0
+        self._last_revision = 0
+        self._last_sent = {}
+        self._resync_needed = True
         self.values.clear()
         self.order.clear()
         self._pending_names.clear()
@@ -1893,6 +1897,7 @@ class DashboardPanel(QWidget):
         keeps refreshing afterwards with whatever the port sends next.
         """
         self.replay_name = str(name)
+        self._replay_active = True
         self.clear_data()
         self.live.setChecked(True)
         self.refresh_status()
@@ -1900,6 +1905,9 @@ class DashboardPanel(QWidget):
     def end_replay(self) -> None:
         """Push the last replayed window to the page and say how much arrived."""
         self._flush_names()
+        self._replay_active = False
+        self._push_points()
+        self._push_layout()
         self.request_resync()
         self.flush()
         self.refresh_status()
