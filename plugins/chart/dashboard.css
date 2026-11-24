@@ -81,6 +81,17 @@ html, body {
 .card.selected { border-color: var(--teal); box-shadow: 0 0 0 1px var(--teal); }
 .card.dragging { opacity: 0.86; }
 
+/* R-337: the rubber band drawn while dragging on the blank canvas.  It lives
+ * on #surface (content coordinates), so it scrolls with the grid; pointer
+ * events must pass through or the band itself would eat the pointermove. */
+.marquee {
+  position: absolute;
+  border: 1px solid var(--teal);
+  background: rgba(11, 122, 110, 0.12);
+  pointer-events: none;
+  z-index: 30;
+}
+
 .card .head {
   height: 26px;
   flex: 0 0 26px;

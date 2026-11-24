@@ -10,6 +10,13 @@ Updated: 2026-11-24
 | R-333 | MUST | Plugin/Chart | 打开日志后首次显示看板必须正确，不得依赖 WebEngine 右键 Reload（user, 2026-11-24） | 用户已手测确认正常；插件 603 / GUI 980 / 总验收 1780 项通过 | active |
 | R-334 | MUST NOT | Chart/Delivery | 候选改动须先交用户手测再跑后续验证；不得将静态分析称为修复验证（user, 2026-11-24） | 用户已确认通过，本轮已完成验证 | closed |
 | R-335 | MUST | Delivery | 重发沿用应用 1.1.7 与 chart 1.1.4，不升级版本（user, 2026-11-24） | 用户已确认可发布，同版本重发并核对资产与目录哈希 | active |
+| R-336 | MUST | Plugin/Chart | 曲线数据超过保留上限后**边刷新边变形**必须消除：绘制层降采样不得在窗口滑动时跳到不同代表点。LTTB 每个桶按三角面积取点，窗口滑动一格就换点，实测每帧 4.0% 画布像素变化、峰值 16.6%；改为 `minmax`（保留每桶极值）后为 2.3% 且无尖峰，同时窄脉冲不被抹掉（user, 2026-11-24：「数据看板曲线当帧数超过目前设计的最大缓存时，曲线显示的波形会变形，边刷新边变形」） | `plugin_selftest` R-307 断言 `sampling == "minmax"`；`.artifacts/probe_chart_deform2.py` 对比三种采样的帧间像素差；`.artifacts/probe_chart_deform.py` 证明刷新中未出现局部绘制 | active |
+| R-337 | MUST | Plugin/Chart | 看板支持像 Windows 桌面一样**左键在空白处长按框选**卡片，并**整组拖动**：Ctrl 点选切换成员；框选范围落在内容层坐标，随滚动跟随；拖动任一已选卡片时整组同步位移，且不越过画布左/上边界（相对位置不变）；空白单击清除选择（user, 2026-11-24） | `plugin_selftest` R-337：真实 PointerEvent 拖出选框选中相交卡片且显示选框；拖动已选卡片后两张同步位移且未选卡片不动 | active |
+| R-339 | MUST | Plugin/Chart | 「清空控件」改名**「清空看板」**并移入菜单，不再占用顶栏；顶栏只留 暂停/继续、清空数据、菜单三项（user, 2026-11-24） | `plugin_selftest` R-315 断言顶栏 3 个按钮；R-339 断言「清空看板」在菜单项中且不在顶栏控件列表 | active |
+| R-338 | MUST | Plugin/Chart | 顶栏提供**一键清空数据**按钮：清空接收采样与曲线，保留所有卡片；与「清空看板」（删卡片、留数据）互补（user, 2026-11-24） | `plugin_selftest` R-338：按钮文案为「清空数据」且可见；点击后页面保留序列全为 0，卡片数不变 | active |
+
+## Superseded (2026-11-24)
+- R-315 的「顶栏 = 暂停/继续 + 清空控件 + 菜单」→ R-339：清空看板进菜单，顶栏改为 暂停/继续 + 清空数据 + 菜单。
 
 | ID | Priority | Scope | Requirement | Acceptance check | Status |
 | --- | --- | --- | --- | --- | --- |

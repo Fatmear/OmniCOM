@@ -786,6 +786,24 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - 曾把有效容量改成 max(保留, 展示)，但那会篡改用户的显式「曲线点数」：R-301 要求显式值就是保留上限，points=150 必须保留 150。已回退为 `min(MAX_POINTS, max(100, limit))`，`visible` 只控制每帧绘制尾部。
 - 证据：完整插件套件 R-301「曲线点数按设置生效」在错误实现下失败（300≠150），回退后全套 587 项通过。该推测未解释用户实际 5000/5000/0，见 L-327。
 
+## L-336 满缓存后曲线边刷新边变形（FIXED-verified）
+- 新症状（2026-11-24）：用户报「帧数超过当前最大缓存时波形变形，边刷新边变形」。不是停刷（L-311/L-313/L-314 已修），而是**形状抖动**。
+- 先排除：绘制切片严格单调（`node` 探针 5000 点 0 处非递增）；真实页面刷新中与停止后墨迹像素 0.99~1.00，不存在分帧渲染被截断（`.artifacts/probe_chart_deform.py`）。
+- 真因：`sampling: "lttb"`。LTTB 每桶按三角面积选一个代表点，窗口滑一格桶就位移，代表点在桶内跳动，于是形状**每帧都在变**。实测 `.artifacts/probe_chart_deform2.py` 相邻帧像素差：lttb 均值 4.01%、峰值 16.6%；minmax 2.26%、峰值 2.63%；none 0.01%。
+- 修法：改为 `sampling: "minmax"`（保留每桶极值），保形稳定且窄脉冲不被平均掉；保留 `large`/`progressive` 上限（R-307 性能约束不变，仅采样式改变）。
+- 断言同步：`plugin_selftest` R-307 改为断言 `sampling == "minmax"`；`acceptance_test` R-307 描述同步。
+
+## L-337 看板框选与整组拖动（FIXED-verified）
+- R-337：新增 `state.selection`（多选）与 `hookMarquee()`：在 `#canvas`/`#surface` 空白处左键按下开始框选，选框挂在 `#surface` 内容层（随滚动跟随），相交即选中；Ctrl 追加/切换；空白单击清空。
+- 整组拖动：`beginDrag()` 在拖动已选卡片时收集全部成员起点，组相对位移一致，并按最左/最上成员夹紧，保证不越过画布边界且相对位置不变。
+- 踩坑：顶栏/菜单断言原用 `isVisibleTo(panel)` 判「不在顶栏」不成立（未加入布局的按钮仍算可见），改用 `not in bar_widgets` 直接判断布局成员。
+- 证据：`plugin_selftest` R-337 用真实 `PointerEvent` 序列验证选框显示、选中 sel-a/sel-b（不含 sel-c）、整组位移 (+96,+64) 且 sel-c 不动。
+
+## L-338 / L-339 清空数据与清空看板（FIXED-verified）
+- R-338：顶栏新增「清空数据」，直接调用既有 `clear_data()`（清采样、保留卡片），与「清空看板」互补。证据：点击真实按钮后页面 `retained` 全为 0，卡片数不变。
+- R-339：原「清空控件」改名「清空看板」并移入菜单，顶栏变为 暂停 / 清空数据 / 菜单 三项；`build_menu()` 在清除数据后追加 `clear_widgets_button.text()`。这修订 R-315 的顶栏组成（已登记 Superseded）。
+- 本轮回归：`plugin_selftest` 608 项、GUI 980 项、总验收 1785 项 0 失败、Ruff 干净。
+
 ## L-327 实际5000帧设置未满即历史消失（OPEN）
 - 只读核对用户settings.ini实际window=0/visible=5000/points=5000。两条曲线同配置在128/1000/3200/4999/5000/5101/6200保持完整首尾，尚未复现；不能把L-326当成其根因。下一步用用户实际布局/原始输入与运行副本证据区分接收、缩放可见范围、旧包；不宣称整个问题修好。
 

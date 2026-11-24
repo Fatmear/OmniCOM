@@ -784,7 +784,14 @@ class DashboardPanel(QWidget):
 
         self.clear_widgets_button = QPushButton()
         self.clear_widgets_button.clicked.connect(self.clear_widgets)
-        bar.addWidget(self.clear_widgets_button)
+        # R-339: 清空看板 lives in the menu now (it wipes every card) while the
+        # frequent "wipe the waveform" action stays on the bar (R-338).
+        # R-338: wiping the *samples* is a separate job from wiping the cards.
+        # It used to be menu-only, so "clear the waveform" was three clicks
+        # away from the toolbar the user was looking at.
+        self.clear_data_button = QPushButton()
+        self.clear_data_button.clicked.connect(self.clear_data)
+        bar.addWidget(self.clear_data_button)
         # Every other action is created here but only shown from the menu, so
         # the translations and the existing connections keep working.
         self.menu_button = QPushButton()
@@ -823,6 +830,7 @@ class DashboardPanel(QWidget):
         menu.addAction(self.import_config_button.text(), self.import_config_dialog)
         menu.addSeparator()
         menu.addAction(self.clear_button.toolTip(), self.clear_data)
+        menu.addAction(self.clear_widgets_button.text(), self.clear_widgets)
         menu.addSeparator()
         title = menu.addAction(self.options_title or "")
         title.setEnabled(False)
@@ -2000,9 +2008,14 @@ class DashboardPanel(QWidget):
             "每条曲线每帧实际绘制的点数，越小越流畅；不影响保留的历史",
             "Points a curve draws per frame; smaller is smoother and does not "
             "affect the history that is kept"))
-        self.clear_widgets_button.setText(self.api.t("清空控件", "Clear widgets"))
+        self.clear_widgets_button.setText(self.api.t("清空看板", "Clear board"))
         self.clear_widgets_button.setToolTip(self.api.t(
-            "移除所有卡片，接收的数据保留", "Remove every card; received data is kept"))
+            "移除看板上的所有卡片，接收的数据保留；可从菜单调用",
+            "Remove every card from the board; received data is kept"))
+        self.clear_data_button.setText(self.api.t("清空数据", "Clear data"))
+        self.clear_data_button.setToolTip(self.api.t(
+            "清空接收到的采样与曲线，卡片保留",
+            "Drop the received samples and curves; cards are kept"))
         self.menu_button.setText(self.api.t("菜单", "Menu"))
         self.menu_button.setToolTip(self.api.t(
             "截图、导出 CSV、导入导出看板、显示设置、清除数据",

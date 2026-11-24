@@ -860,6 +860,81 @@ def chart_checks(app, kinds):
                  "document.querySelector('.card')).cursor")
     check(f"R-169 the card advertises that it can be dragged (cursor={cursor})",
           cursor == "move")
+
+    # ---------------------------------------- R-337 rubber-band selection
+    # Windows-desktop behaviour: drag on the blank canvas to select the cards
+    # the band touches, then drag any selected card to move them as a group.
+    # Driven through real DOM pointer events, not the API.
+    band_layout = {"widgets": [
+        {"id": "sel-a", "kind": "value", "channel": "AA", "title": "a",
+         "x": 32, "y": 32, "w": 208, "h": 128},
+        {"id": "sel-b", "kind": "value", "channel": "AA", "title": "b",
+         "x": 288, "y": 32, "w": 208, "h": 128},
+        {"id": "sel-c", "kind": "value", "channel": "AA", "title": "c",
+         "x": 32, "y": 220, "w": 208, "h": 128},
+    ]}
+    _js(app, chart, "omniDashboard.setLayout(" + json.dumps(band_layout) + ")")
+    _wait(app, chart, 3)
+    banded = json.loads(_js(app, chart, """(function () {
+      var canvas = document.getElementById('canvas');
+      canvas.scrollLeft = 0; canvas.scrollTop = 0;
+      var surface = document.getElementById('surface');
+      var box = surface.getBoundingClientRect();
+      function fire(kind, x, y) {
+        canvas.dispatchEvent(new PointerEvent(kind, {
+          bubbles: true, cancelable: true, button: 0, pointerId: 11,
+          clientX: box.left + x, clientY: box.top + y,
+          pointerType: 'mouse', isPrimary: true, buttons: kind === 'pointerup' ? 0 : 1
+        }));
+      }
+      /* Start on blank space to the right of the cards and sweep left over a
+       * and b only: their rects span y 32..160 while c starts at y 220. */
+      fire('pointerdown', 600, 180);
+      fire('pointermove', 320, 120);
+      fire('pointermove', 20, 20);
+      var band = document.querySelector('.marquee');
+      var during = !!band;
+      fire('pointerup', 20, 20);
+      return JSON.stringify({ during: during,
+                              selection: JSON.parse(omniDashboard.describe()).selection });
+    })()""") or "{}")
+    check(f"R-337 空白处拖出选框可多选卡片 ({banded})",
+          banded.get("during") is True
+          and sorted(banded.get("selection") or []) == ["sel-a", "sel-b"],
+          str(banded))
+
+    # Dragging one selected card moves the whole selection by the same delta.
+    before = {widget["id"]: (widget["x"], widget["y"])
+              for widget in _describe(app, chart)["widgets"]}
+    grouped = json.loads(_js(app, chart, """(function () {
+      var card = document.querySelector('.card[data-id="sel-a"]');
+      var box = card.getBoundingClientRect();
+      function fire(kind, dx, dy) {
+        card.dispatchEvent(new PointerEvent(kind, {
+          bubbles: true, cancelable: true, button: 0, pointerId: 12,
+          clientX: box.left + 40 + dx, clientY: box.top + 40 + dy,
+          pointerType: 'mouse', isPrimary: true, buttons: kind === 'pointerup' ? 0 : 1
+        }));
+      }
+      fire('pointerdown', 0, 0);
+      fire('pointermove', 96, 64);
+      fire('pointerup', 96, 64);
+      var described = JSON.parse(omniDashboard.describe());
+      var out = {};
+      described.widgets.forEach(function (item) { out[item.id] = [item.x, item.y]; });
+      return JSON.stringify({ moved: out, selection: described.selection });
+    })()""") or "{}")
+    moved = grouped.get("moved") or {}
+    delta_a = (moved.get("sel-a", (0, 0))[0] - before["sel-a"][0],
+               moved.get("sel-a", (0, 0))[1] - before["sel-a"][1])
+    delta_b = (moved.get("sel-b", (0, 0))[0] - before["sel-b"][0],
+               moved.get("sel-b", (0, 0))[1] - before["sel-b"][1])
+    check(f"R-337 拖动已选卡片时整组同步移动 ({grouped})",
+          len(grouped.get("selection") or []) == 2
+          and delta_a == delta_b and delta_a != (0, 0)
+          and moved.get("sel-c") == list(before["sel-c"]),
+          f"{delta_a} {delta_b} {moved}")
+
     chart.layout_data = parked_layout
     chart._save_layout()
     _js(app, chart, "omniDashboard.setLayout("
@@ -2946,8 +3021,10 @@ def chart_stream_checks(app, chart, api_like=None) -> None:
         # ---- R-307: the *drawing* must stay bounded even at 展示帧数 = 5000.
         # Plain rendering of two 5000-point curves measured ~47 ms per frame,
         # which is what froze the whole dashboard once the user raised the
-        # setting.  LTTB down-sampling plus progressive rendering brought that
-        # to ~28 ms; the data itself is never reduced.
+        # setting.  Down-sampling plus progressive rendering brought that to
+        # ~28 ms; the data itself is never reduced.  The sampler is ``minmax``,
+        # not ``lttb``: LTTB's per-bucket pick jumps as the window slides, so
+        # the curve morphed while refreshing (R-336, probe_chart_deform2).
         option = _js(app, chart, """JSON.stringify((() => {
           const series = omniDashboard ? true : true;
           const host = document.querySelector('#canvas .card .plot');
@@ -2959,8 +3036,8 @@ def chart_stream_checks(app, chart, api_like=None) -> None:
                   large: !!s.large};
         })())""")
         cfg = json.loads(option) if option else {}
-        check(f"R-307 曲线开启 LTTB 降采样（绘制层，不改数据）({cfg})",
-              cfg.get("sampling") == "lttb", cfg.get("sampling"))
+        check(f"R-307 曲线开启 minmax 降采样（绘制层，不改数据，帧间不抖动）({cfg})",
+              cfg.get("sampling") == "minmax", cfg.get("sampling"))
         check(f"R-307 曲线开启分帧绘制 progressive ({cfg})",
               cfg.get("progressive") == 800
               and cfg.get("progressiveThreshold") == 1500, cfg)
@@ -3072,7 +3149,7 @@ def chart_stream_checks(app, chart, api_like=None) -> None:
                        if toolbar.itemAt(index).widget() is not None]
         bar_buttons = [widget.text() for widget in bar_widgets
                        if hasattr(widget, "text")]
-        check("R-315 顶栏只剩暂停、清空控件、菜单三个按钮",
+        check("R-315 顶栏只剩暂停、清空数据、菜单三个按钮",
               len(bar_buttons) == 3, str(bar_buttons))
         check("R-315 顶栏不再有数字框",
               not any(widget.__class__.__name__ == "QSpinBox"
@@ -3093,6 +3170,40 @@ def chart_stream_checks(app, chart, api_like=None) -> None:
                   "时间窗 / 秒", "曲线点数", "展示帧数")
         check("R-315 菜单包含截图/CSV/导入导出/显示设置",
               all(item in entries for item in needed), str(entries))
+        check("R-339 清空看板在菜单里、不在顶栏",
+              "清空看板" in entries
+              and "清空看板" not in bar_buttons
+              and panel.clear_widgets_button not in bar_widgets,
+              f"{entries} / {bar_buttons}")
+
+        # ---- R-338: 清空数据 is a first-class toolbar action.
+        # It must clear the samples/curves and keep every card, which is the
+        # opposite contract of 清空控件.  Click its real button, then prove the
+        # page's retained series is empty while the cards are still mounted.
+        check("R-338 顶栏有清空数据按钮",
+              panel.clear_data_button.text() == "清空数据"
+              and panel.clear_data_button.isVisibleTo(panel),
+              panel.clear_data_button.text())
+        cards_before = len(_describe(app, panel)["widgets"])
+        panel.feed(6100.0, b"[OmniCOM-chart] AA=7\n")
+        panel.request_resync()
+        panel.flush()
+        _wait(app, panel, cards_before)
+        had_data = json.loads(_js(app, panel, """JSON.stringify(
+          JSON.parse(omniDashboard.diagnostics()).retained)""") or "[]")
+        panel.clear_data_button.click()
+        app.processEvents()
+        panel.request_resync()
+        panel.flush()
+        _wait(app, panel, cards_before)
+        retained = json.loads(_js(app, panel, """JSON.stringify(
+          JSON.parse(omniDashboard.diagnostics()).retained)""") or "[]")
+        counts = [item.get("count") for item in retained]
+        check(f"R-338 清空数据清掉曲线但保留卡片 ({had_data} -> {retained})",
+              cards_before > 0
+              and len(_describe(app, panel)["widgets"]) == cards_before
+              and bool(had_data) and all(not number for number in counts),
+              f"{len(counts)} {counts}")
 
         # ---- R-313: a small window must be able to scroll to every card.
         # ``#canvas`` is the scroll viewport and ``#surface`` the content box;

@@ -29,6 +29,9 @@
   var state = {
     widgets: [],            // [{id, kind, title, channel, x, y, w, h, options}]
     selected: null,
+    /* R-337: rubber-band multi-selection, like the Windows desktop.  The
+     * first entry is the anchor card a group drag measures its delta from. */
+    selection: [],
     theme: {},
     values: {},             // channel -> latest numeric value
     /* channel -> [[t, v], ...].  The page keeps its own copy so a frame only
@@ -210,14 +213,14 @@
        * segments through the renderer. */
       entry.large = true;
       entry.largeThreshold = 200;
-      /* LTTB down-sampling for the *drawing* only.  The user can raise 展示帧数
-       * to 5000, and at that size plain rendering cost 14.2 ms per card per
-       * frame (measured), which froze the whole dashboard when a couple of
-       * curves were on screen.  With ``sampling: 'lttb'`` the same 5000 points
-       * cost 6.7 ms and the curve keeps its shape, because the points that are
-       * dropped are the ones that carry no visual information.  The data itself
-       * is untouched - every sample is still in ``data``. */
-      entry.sampling = "lttb";
+      /* LTTB picks one representative point per bucket by triangle area.  As
+       * the window slides one sample per frame the buckets shift and the pick
+       * jumps to a different point, so the drawn shape *morphs* while the
+       * stream runs (measured: 4% of canvas pixels change per frame, spikes to
+       * 16.6%, for a 0.2 px window shift).  ``minmax`` keeps both extremes of
+       * every bucket: the envelope is stable frame to frame (2.3%, no spikes)
+       * and narrow spikes survive instead of being averaged away (R-336). */
+      entry.sampling = "minmax";
       /* Progressive rendering splits the drawing across several animation
        * frames instead of doing all of it inside the current one.  For a 5000
        * point curve that turns one long block into a few short ones, so the
@@ -555,13 +558,19 @@
       /* A press on an axis slider must zoom, not drag the card (R-170). */
       if (inZoomStrip(card, event)) { return; }
       event.preventDefault();
-      select(widget.id);
+      /* R-337: Ctrl toggles membership; a plain press on an already selected
+       * card keeps the group so it can be dragged as a whole (desktop rule). */
+      if (event.ctrlKey || event.metaKey) {
+        toggleSelect(widget.id);
+        return;
+      }
+      if (state.selection.indexOf(widget.id) < 0) { select(widget.id); }
       beginDrag(event, card, widget, false);
     });
     grip.addEventListener("pointerdown", function (event) {
       if (event.button !== 0) { return; }
       event.preventDefault();
-      select(widget.id);
+      if (state.selection.indexOf(widget.id) < 0) { select(widget.id); }
       beginDrag(event, card, widget, true);
     });
   }
@@ -571,7 +580,29 @@
     var startX = event.clientX;
     var startY = event.clientY;
     var origin = { x: widget.x, y: widget.y, w: widget.w, h: widget.h };
+    /* R-337: dragging a selected card moves the whole selection.  Each member
+     * keeps its own origin, and the group delta is clamped so no card crosses
+     * the canvas edge - the relative arrangement survives the clamp. */
+    var group = [];
+    if (!resizing && state.selection.indexOf(widget.id) >= 0) {
+      state.widgets.forEach(function (item) {
+        if (state.selection.indexOf(item.id) >= 0) {
+          group.push({ widget: item, x: item.x, y: item.y });
+        }
+      });
+    }
+    var minOriginX = origin.x;
+    var minOriginY = origin.y;
+    group.forEach(function (member) {
+      minOriginX = Math.min(minOriginX, member.x);
+      minOriginY = Math.min(minOriginY, member.y);
+    });
     card.classList.add("dragging");
+    group.forEach(function (member) {
+      if (member.widget.id !== widget.id && nodes[member.widget.id]) {
+        nodes[member.widget.id].classList.add("dragging");
+      }
+    });
     /* Pointer capture is what keeps the moves coming once the cursor leaves the
      * card, but it throws when the pointer is already gone (a synthetic event,
      * or a press whose release raced the handler).  A throw here used to abort
@@ -588,17 +619,32 @@
       if (resizing) {
         widget.w = Math.max(MIN_W, snap(origin.w + dx));
         widget.h = Math.max(MIN_H, snap(origin.h + dy));
+        place(card, widget);
+        resizeChart(widget);
+      } else if (group.length > 1) {
+        dx = Math.max(dx, -minOriginX);
+        dy = Math.max(dy, -minOriginY);
+        group.forEach(function (member) {
+          member.widget.autoPlaced = false;
+          member.widget.x = Math.max(0, snap(member.x + dx));
+          member.widget.y = Math.max(0, snap(member.y + dy));
+          if (nodes[member.widget.id]) { place(nodes[member.widget.id], member.widget); }
+        });
       } else {
         widget.x = Math.max(0, snap(origin.x + dx));
         widget.y = Math.max(0, snap(origin.y + dy));
+        place(card, widget);
       }
-      place(card, widget);
-      if (resizing) { resizeChart(widget); }
       scheduleLayout();
     }
 
     function up() {
       card.classList.remove("dragging");
+      group.forEach(function (member) {
+        if (nodes[member.widget.id]) {
+          nodes[member.widget.id].classList.remove("dragging");
+        }
+      });
       card.removeEventListener("pointermove", move);
       card.removeEventListener("pointerup", up);
       card.removeEventListener("pointercancel", up);
@@ -621,8 +667,101 @@
 
   function select(id) {
     state.selected = id;
+    state.selection = id === null ? [] : [id];
+    paintSelection();
+  }
+
+  /* R-337: Ctrl+click membership toggle; the anchor follows the newest pick. */
+  function toggleSelect(id) {
+    var index = state.selection.indexOf(id);
+    if (index >= 0) {
+      state.selection.splice(index, 1);
+      state.selected = state.selection.length
+        ? state.selection[state.selection.length - 1] : null;
+    } else {
+      state.selection.push(id);
+      state.selected = id;
+    }
+    paintSelection();
+  }
+
+  function setSelection(ids) {
+    state.selection = ids.slice();
+    state.selected = ids.length ? ids[ids.length - 1] : null;
+    paintSelection();
+  }
+
+  function paintSelection() {
     Object.keys(nodes).forEach(function (key) {
-      nodes[key].classList.toggle("selected", key === id);
+      nodes[key].classList.toggle("selected", state.selection.indexOf(key) >= 0);
+    });
+  }
+
+  /* R-337: rubber band on the blank canvas, like the Windows desktop.
+   *
+   * A left press that lands on ``#canvas``/``#surface`` itself (not a card)
+   * starts a marquee in *surface* coordinates so it stays glued to the grid
+   * while the canvas scrolls.  Cards whose rectangles intersect the marquee
+   * are selected live; Ctrl adds to the previous selection.  A press without
+   * movement is a plain click on the background and clears the selection. */
+  var MARQUEE_MIN = 4;
+
+  function hookMarquee() {
+    if (!canvas) { return; }
+    canvas.addEventListener("pointerdown", function (event) {
+      if (event.button !== 0) { return; }
+      var target = event.target;
+      if (target !== canvas && target.id !== "surface" && target.id !== "empty"
+          && !target.closest("#empty")) { return; }
+      event.preventDefault();
+      var surface = document.getElementById("surface");
+      var box = surface.getBoundingClientRect();
+      var startX = event.clientX - box.left;
+      var startY = event.clientY - box.top;
+      var additive = event.ctrlKey || event.metaKey;
+      var base = additive ? state.selection.slice() : [];
+      var band = el("div", "marquee");
+      surface.appendChild(band);
+      var moved = false;
+      try { canvas.setPointerCapture(event.pointerId); } catch (error) { /* synthetic */ }
+
+      function applyBand(currentX, currentY) {
+        var left = Math.min(startX, currentX);
+        var top = Math.min(startY, currentY);
+        var width = Math.abs(currentX - startX);
+        var height = Math.abs(currentY - startY);
+        band.style.left = left + "px";
+        band.style.top = top + "px";
+        band.style.width = width + "px";
+        band.style.height = height + "px";
+        var picked = base.slice();
+        state.widgets.forEach(function (widget) {
+          var hit = widget.x < left + width && widget.x + widget.w > left &&
+            widget.y < top + height && widget.y + widget.h > top;
+          if (hit && picked.indexOf(widget.id) < 0) { picked.push(widget.id); }
+        });
+        setSelection(picked);
+      }
+
+      function move(moveEvent) {
+        var currentX = moveEvent.clientX - box.left;
+        var currentY = moveEvent.clientY - box.top;
+        if (Math.abs(currentX - startX) >= MARQUEE_MIN ||
+            Math.abs(currentY - startY) >= MARQUEE_MIN) { moved = true; }
+        if (moved) { applyBand(currentX, currentY); }
+      }
+
+      function up() {
+        canvas.removeEventListener("pointermove", move);
+        canvas.removeEventListener("pointerup", up);
+        canvas.removeEventListener("pointercancel", up);
+        if (band.parentNode) { band.parentNode.removeChild(band); }
+        if (!moved && !additive) { setSelection([]); }
+      }
+
+      canvas.addEventListener("pointermove", move);
+      canvas.addEventListener("pointerup", up);
+      canvas.addEventListener("pointercancel", up);
     });
   }
 
@@ -646,6 +785,8 @@
       finishBatch();
     }
     if (state.selected === id) { state.selected = null; }
+    var pick = state.selection.indexOf(id);
+    if (pick >= 0) { state.selection.splice(pick, 1); }
     renderEmpty();
     scheduleLayout();
     persist();
@@ -858,6 +999,8 @@
         };
       });
       state.nextId = state.widgets.length + 1;
+      state.selected = null;
+      state.selection = [];
       rebuild();
       return state.widgets.length;
     },
@@ -1064,6 +1207,7 @@
     describe: function () {
       return JSON.stringify({
         selected: state.selected,
+        selection: state.selection.slice(),
         widgets: state.widgets.map(function (widget) {
           return {
             id: widget.id, kind: widget.kind, title: widget.title,
@@ -1215,5 +1359,6 @@
     connect();
     renderEmpty();
     watchSize();
+    hookMarquee();
   });
 }());
