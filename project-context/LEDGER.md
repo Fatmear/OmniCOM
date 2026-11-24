@@ -804,6 +804,21 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - R-339：原「清空控件」改名「清空看板」并移入菜单，顶栏变为 暂停 / 清空数据 / 菜单 三项；`build_menu()` 在清除数据后追加 `clear_widgets_button.text()`。这修订 R-315 的顶栏组成（已登记 Superseded）。
 - 本轮回归：`plugin_selftest` 608 项、GUI 980 项、总验收 1785 项 0 失败、Ruff 干净。
 
+## L-340 v1.1.7 第五次重发（FIXED-verified）
+- 内容：R-336 minmax 采样、R-337 框选整组拖动、R-338 清空数据、R-339 清空看板入菜单，
+  加上前一轮 R-331/R-332/R-333。
+- 源码：`3ec0145`（功能）+ `2769c0b`（store catalog 哈希与发布脚本按内容判定，已推送）。
+- 应用：Release #452554311 替换 `OmniCOM-1.1.7-win64.zip`，线上 digest
+  `sha256:33818bb0694e168df1220bc4c65c967e156e9e0729d311adc879c2526db3cfc4`（190883602 B），
+  公开 `releases/latest/download` HEAD 200 且长度一致，`latest=v1.1.7`。
+- 插件商店：`chart-1.1.4.zip` 替换为 387450 B `sha256 6322a2dd…`；`catalog.json` 已上传
+  新哈希并在仓库内核实（raw CDN 事后也已刷新为 6322a2dd）。
+- 发布教训（新增）：`publish_plugin_store.py` 原先只比**字节数**决定跳过，而
+  `catalog.json` 换哈希时长度不变，导致目录从未真正更新（L-330 同族）。已改为优先比
+  GitHub 返回的 `digest`。
+- 另注：`Select-Object -Last` 会缓冲输出，长时间上传在后台会话里看不到进度，
+  不能据此判断卡死；完成后必须查 `/releases/<id>` 的 assets 与 digest。
+
 ## L-327 实际5000帧设置未满即历史消失（OPEN）
 - 只读核对用户settings.ini实际window=0/visible=5000/points=5000。两条曲线同配置在128/1000/3200/4999/5000/5101/6200保持完整首尾，尚未复现；不能把L-326当成其根因。下一步用用户实际布局/原始输入与运行副本证据区分接收、缩放可见范围、旧包；不宣称整个问题修好。
 
