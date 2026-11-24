@@ -786,6 +786,13 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - 曾把有效容量改成 max(保留, 展示)，但那会篡改用户的显式「曲线点数」：R-301 要求显式值就是保留上限，points=150 必须保留 150。已回退为 `min(MAX_POINTS, max(100, limit))`，`visible` 只控制每帧绘制尾部。
 - 证据：完整插件套件 R-301「曲线点数按设置生效」在错误实现下失败（300≠150），回退后全套 587 项通过。该推测未解释用户实际 5000/5000/0，见 L-327。
 
+## L-341 数据来源选择框悬停背景变黑（FIXED-verified）
+- 症状：多曲线「数据来源」对话框里，鼠标悬停的行背景是纯黑，未勾选复选框边框也是黑的。
+- 根因：`SourceDelegate.paint()` 把 `theme.WASH_HOVER` / `theme.LINE_STRONG` 直接交给 `QColor`。这两个令牌是 Qt 样式表形式 `rgba(18, 26, 43, 14)`（alpha 0-255），`QColor` **完全无法解析**，返回 `isValid()==False` 的颜色，`fillRect`/`setPen` 于是画成不透明黑。`omnicom/ui/theme.py` 第 59 行早有同样注释（`WINDOW_EDGE` 因此拆成两个令牌）。
+- 修法：插件内新增 `_paint_color()`，用正则把 `rgba(r, g, b, a)` 拆成 `QColor(r, g, b)` 并设置 alpha（兼容 0-1 与 0-255 两种 alpha）；`#RRGGBB` 仍直接交给 `QColor`。插件自包含，不依赖宿主新增令牌，旧版 1.1.7 宿主也能正确显示。
+- 证据：`.artifacts/probe_source_hover.py` 修复前悬停行 `#000000`，修复后 `#f2f2f3`、未勾选边框 `#e3e4e6`；`.artifacts/probe_source_negative.py` 把转换改回 `QColor` 后断言失败（`#000000`）。`plugin_selftest --chart-only` 316 项通过（新增 R-341 两项）。
+- 教训：既有 R-325 只验证「选中」行，从未验证「悬停」行，所以这个缺陷一直没被发现；任何自绘背景都要同时断言 hover 与 selected 两种状态。
+
 ## L-336 满缓存后曲线边刷新边变形（OPEN）
 - 2026-11-24 用户反证：同组数据的两张截图波形不同；用户确认没有缩放，但截图时间不同，所以横轴510–690与480–660的差异本身不是故障证据。原 minmax 已彻底解决的结论撤回；下面旧实验只证明特定负载的帧间像素变化。
 - 本轮已复现机制：真实ECharts 5.5.1中，5000点窗口仅滑动1点，minmax实际绘制834点，重叠历史区间800个已绘制时间点被重新抽掉；历史线段因此不是固定的。`tools/chart_runtime_selftest.js`原配置断言失败，关闭自动采样（sampling=none）后5000点完整绘制，历史遗漏=0。不改容量、增量游标、缩放或现有progressive配置。

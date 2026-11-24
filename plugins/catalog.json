@@ -19,15 +19,15 @@
       "platform": "win_amd64",
       "icon": "icon.png",
       "url": "https://github.com/Fatmear/OmniCOM/releases/download/plugin-store/chart-1.1.5.zip",
-      "sha256": "1969ab6513523a2fdedf6c06165533042e0cbb15baa4a24589ebb1636372fd09",
-      "size": 387200,
+      "sha256": "7d8a29e02665e25b191153f57910d52bae207c2b94a5b7ff2c37bae1b10aa673",
+      "size": 387671,
       "versions": [
         {
           "version": "1.1.5",
           "api": 2,
           "url": "https://github.com/Fatmear/OmniCOM/releases/download/plugin-store/chart-1.1.5.zip",
-          "sha256": "1969ab6513523a2fdedf6c06165533042e0cbb15baa4a24589ebb1636372fd09",
-          "size": 387200
+          "sha256": "7d8a29e02665e25b191153f57910d52bae207c2b94a5b7ff2c37bae1b10aa673",
+          "size": 387671
         },
         {
           "version": "1.1.4",

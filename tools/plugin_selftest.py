@@ -347,6 +347,28 @@ def source_dialog_checks(app) -> None:
             check("R-325 hovered row stays light after scrolling with black OS highlight",
                   image.pixelColor(rect.right() - 15, rect.center().y()).lightness() > 170)
         check("R-325 scrolling does not change checked sources", dialog.sources() == before)
+        # R-341: the row background is painted by hand from theme tokens, and
+        # ``theme.WASH_HOVER`` / ``theme.LINE_STRONG`` are Qt *stylesheet*
+        # ``rgba(r, g, b, a)`` strings.  ``QColor`` cannot parse that form: it
+        # returns an invalid colour and Qt paints opaque black, so a hovered row
+        # used to turn black.  Sample the composited dialog (the list itself is
+        # transparent) and require a light wash, not just "not the OS highlight".
+        dialog.channels.clearSelection()
+        dialog.channels.setCurrentItem(None)
+        app.processEvents()
+        hover_rect = dialog.channels.visualItemRect(dialog.channels.item(2))
+        QTest.mouseMove(viewport, QPoint(hover_rect.right() - 20, hover_rect.center().y()))
+        app.processEvents()
+        composed = dialog.grab().toImage()
+        origin = viewport.mapTo(dialog, QPoint(0, 0))
+        hovered = composed.pixelColor(origin.x() + hover_rect.right() - 20,
+                                      origin.y() + hover_rect.center().y())
+        check("R-341 hovered source row is a light wash, never opaque black",
+              hovered.lightness() > 200, f"{hovered.name()} lightness={hovered.lightness()}")
+        border = composed.pixelColor(origin.x() + hover_rect.left() + 8,
+                                     origin.y() + hover_rect.center().y())
+        check("R-341 unchecked source checkbox border is light, not black",
+              border.lightness() > 150, f"{border.name()} lightness={border.lightness()}")
         dialog.grab().save(str(ROOT / ".artifacts" / "sources-dialog-fixed.png"))
         dialog.reject()
         check("R-325 cancel rejects source edits", dialog.result() == QDialog.DialogCode.Rejected)

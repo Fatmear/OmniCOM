@@ -119,6 +119,33 @@ _KIND_LABELS = {
 _STROKE = "rgba(18, 26, 43, 0.10)"
 _STROKE_SOFT = "rgba(18, 26, 43, 0.07)"
 
+#: ``theme.WASH_HOVER`` / ``theme.LINE_STRONG`` are Qt *stylesheet* strings of
+#: the form ``rgba(r, g, b, a)`` with a 0-255 alpha.  ``QColor`` cannot parse
+#: that form at all: it returns an **invalid** colour, and Qt then paints it as
+#: opaque black.  The source list is painted by hand, so it has to convert the
+#: token itself instead of handing the string to ``QColor`` (L-341).
+_RGBA = re.compile(
+    r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)"
+)
+
+
+def _paint_color(token: str) -> QColor:
+    """Turn a theme token into a real ``QColor`` (never an invalid one).
+
+    ``#RRGGBB`` parses directly; ``rgba(r, g, b, a)`` is split by hand because
+    ``QColor`` rejects it and silently degrades to black.
+    """
+    match = _RGBA.fullmatch(str(token).strip())
+    if match is None:
+        return QColor(token)
+    red, green, blue, alpha = match.groups()
+    color = QColor(int(red), int(green), int(blue))
+    if alpha is not None:
+        value = float(alpha)
+        # Stylesheet alpha is 0-255; CSS alpha is 0-1.  Accept both.
+        color.setAlpha(round(value * 255) if value <= 1 else round(value))
+    return color
+
 
 def source_names(text: str) -> list[str]:
     return list(dict.fromkeys(
@@ -137,9 +164,10 @@ class SourceDelegate(QStyledItemDelegate):
             theme = self.theme
             selected = bool(option.state & QStyle.StateFlag.State_Selected)
             hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
-            background = (theme.TEAL_SOFT if selected else
-                          theme.WASH_HOVER if hovered else theme.CARD)
-            painter.fillRect(option.rect, QColor(background))
+            background = (_paint_color(theme.TEAL_SOFT) if selected else
+                          _paint_color(theme.WASH_HOVER) if hovered else
+                          _paint_color(theme.CARD))
+            painter.fillRect(option.rect, background)
             text_rect = option.rect.adjusted(theme.CHECK_SIZE + 20, 0, -8, 0)
             painter.setFont(option.font)
             painter.setPen(QColor(theme.INK))
@@ -156,8 +184,8 @@ class SourceDelegate(QStyledItemDelegate):
                        == Qt.CheckState.Checked.value)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             border = theme.TEAL if checked else theme.LINE_STRONG
-            painter.setPen(QPen(QColor(border), 1))
-            painter.setBrush(QColor(theme.TEAL if checked else theme.CARD))
+            painter.setPen(QPen(_paint_color(border), 1))
+            painter.setBrush(_paint_color(theme.TEAL if checked else theme.CARD))
             radius = theme.CHECK_RADIUS
             painter.drawRoundedRect(box, radius, radius)
             if checked:
