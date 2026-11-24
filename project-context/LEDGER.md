@@ -791,6 +791,8 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - 本轮已复现机制：真实ECharts 5.5.1中，5000点窗口仅滑动1点，minmax实际绘制834点，重叠历史区间800个已绘制时间点被重新抽掉；历史线段因此不是固定的。`tools/chart_runtime_selftest.js`原配置断言失败，关闭自动采样（sampling=none）后5000点完整绘制，历史遗漏=0。不改容量、增量游标、缩放或现有progressive配置。
 - 源码候选已验证：`python tools/plugin_selftest.py --chart-only`314项、Node4项、Ruff通过。真实QtWebEngine四通道各5000复杂波形，320/920px两宽度与0/1/300点滑动，逐个绘制点等于原始数据、画布非空；同步setOption约25.9–64.4ms，不等于持续30fps或合成器呈现耗时。
 - 2026-11-24 用户复测确认「解决了」，R-336 关闭。交付路径核实：`make_dist.CORE_PLUGINS` 仅 terminal/transfer，`verify_runtime` 断言包内不得有 `plugins/chart`，所以主便携包不含看板；本轮只发布插件，chart 升 1.1.5（387200 B，sha256 1969ab65…），应用仍为 1.1.7。
+- 2026-11-24 发布完成（源码 `6a08467`，已推送 `main`）：插件商店 #436347358 上传 `chart-1.1.5.zip`（387200 B，`sha256:1969ab6513523a2fdedf6c06165533042e0cbb15baa4a24589ebb1636372fd09`）与新的 `catalog.json`（4497 B，`sha256:b6315fb2fe3ef98a7d04762dbb4f9ed59492c2fe533328853f948041f78a1ec7`）；7 个包 Range 请求均 206，`/releases/latest` 仍为 v1.1.7，公开 raw 目录 chart=1.1.5 且哈希一致。
+- 发布过程教训：PowerShell `Set-Content -Encoding UTF8` 会给提交信息写 BOM，Git 标题出现 `锘縖`；Python 脚本 `read_text`/`write_text` 把原本 LF 的 `project-context/*.md` 转成 CRLF，导致 LEDGER 出现 1727 行假差异。改提交前必须核对 `git show HEAD~1:<file> | count('\r\n')`，只用 `write_bytes` 写 LF。
 - 新症状（2026-11-24）：用户报「帧数超过当前最大缓存时波形变形，边刷新边变形」。不是停刷（L-311/L-313/L-314 已修），而是**形状抖动**。
 - 先排除：绘制切片严格单调（`node` 探针 5000 点 0 处非递增）；真实页面刷新中与停止后墨迹像素 0.99~1.00，不存在分帧渲染被截断（`.artifacts/probe_chart_deform.py`）。
 - 旧假设/实验：LTTB滑动桶会重新选择代表点。`.artifacts/probe_chart_deform2.py`相邻帧像素差lttb均值4.01%、峰值16.6%；minmax2.26%、峰值2.63%；none0.01%。这不能证明minmax保形或唯一根因。
