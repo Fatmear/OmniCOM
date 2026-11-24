@@ -786,12 +786,15 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - 曾把有效容量改成 max(保留, 展示)，但那会篡改用户的显式「曲线点数」：R-301 要求显式值就是保留上限，points=150 必须保留 150。已回退为 `min(MAX_POINTS, max(100, limit))`，`visible` 只控制每帧绘制尾部。
 - 证据：完整插件套件 R-301「曲线点数按设置生效」在错误实现下失败（300≠150），回退后全套 587 项通过。该推测未解释用户实际 5000/5000/0，见 L-327。
 
-## L-336 满缓存后曲线边刷新边变形（FIXED-verified）
+## L-336 满缓存后曲线边刷新边变形（OPEN）
+- 2026-11-24 用户反证：同组数据的两张截图波形不同；用户确认没有缩放，但截图时间不同，所以横轴510–690与480–660的差异本身不是故障证据。原 minmax 已彻底解决的结论撤回；下面旧实验只证明特定负载的帧间像素变化。
+- 本轮已复现机制：真实ECharts 5.5.1中，5000点窗口仅滑动1点，minmax实际绘制834点，重叠历史区间800个已绘制时间点被重新抽掉；历史线段因此不是固定的。`tools/chart_runtime_selftest.js`原配置断言失败，关闭自动采样（sampling=none）后5000点完整绘制，历史遗漏=0。不改容量、增量游标、缩放或现有progressive配置。
+- 源码候选已验证：`python tools/plugin_selftest.py --chart-only`314项、Node4项、Ruff通过。真实QtWebEngine四通道各5000复杂波形，320/920px两宽度与0/1/300点滑动，逐个绘制点等于原始数据、画布非空；同步setOption约25.9–64.4ms，不等于持续30fps或合成器呈现耗时。
+- 2026-11-24 用户复测确认「解决了」，R-336 关闭。交付路径核实：`make_dist.CORE_PLUGINS` 仅 terminal/transfer，`verify_runtime` 断言包内不得有 `plugins/chart`，所以主便携包不含看板；本轮只发布插件，chart 升 1.1.5（387200 B，sha256 1969ab65…），应用仍为 1.1.7。
 - 新症状（2026-11-24）：用户报「帧数超过当前最大缓存时波形变形，边刷新边变形」。不是停刷（L-311/L-313/L-314 已修），而是**形状抖动**。
 - 先排除：绘制切片严格单调（`node` 探针 5000 点 0 处非递增）；真实页面刷新中与停止后墨迹像素 0.99~1.00，不存在分帧渲染被截断（`.artifacts/probe_chart_deform.py`）。
-- 真因：`sampling: "lttb"`。LTTB 每桶按三角面积选一个代表点，窗口滑一格桶就位移，代表点在桶内跳动，于是形状**每帧都在变**。实测 `.artifacts/probe_chart_deform2.py` 相邻帧像素差：lttb 均值 4.01%、峰值 16.6%；minmax 2.26%、峰值 2.63%；none 0.01%。
-- 修法：改为 `sampling: "minmax"`（保留每桶极值），保形稳定且窄脉冲不被平均掉；保留 `large`/`progressive` 上限（R-307 性能约束不变，仅采样式改变）。
-- 断言同步：`plugin_selftest` R-307 改为断言 `sampling == "minmax"`；`acceptance_test` R-307 描述同步。
+- 旧假设/实验：LTTB滑动桶会重新选择代表点。`.artifacts/probe_chart_deform2.py`相邻帧像素差lttb均值4.01%、峰值16.6%；minmax2.26%、峰值2.63%；none0.01%。这不能证明minmax保形或唯一根因。
+- 旧候选（已被本轮替代）：minmax仍动态抽点，不能保证历史波形不变；旧仅检查配置字符串的R-307断言已改为R-336完整绘制检查。large/progressive设置保留，性能目标未关闭。
 
 ## L-337 看板框选与整组拖动（FIXED-verified）
 - R-337：新增 `state.selection`（多选）与 `hookMarquee()`：在 `#canvas`/`#surface` 空白处左键按下开始框选，选框挂在 `#surface` 内容层（随滚动跟随），相交即选中；Ctrl 追加/切换；空白单击清空。

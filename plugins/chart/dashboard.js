@@ -213,14 +213,7 @@
        * segments through the renderer. */
       entry.large = true;
       entry.largeThreshold = 200;
-      /* LTTB picks one representative point per bucket by triangle area.  As
-       * the window slides one sample per frame the buckets shift and the pick
-       * jumps to a different point, so the drawn shape *morphs* while the
-       * stream runs (measured: 4% of canvas pixels change per frame, spikes to
-       * 16.6%, for a 0.2 px window shift).  ``minmax`` keeps both extremes of
-       * every bucket: the envelope is stable frame to frame (2.3%, no spikes)
-       * and narrow spikes survive instead of being averaged away (R-336). */
-      entry.sampling = "minmax";
+      entry.sampling = "none";
       /* Progressive rendering splits the drawing across several animation
        * frames instead of doing all of it inside the current one.  For a 5000
        * point curve that turns one long block into a few short ones, so the

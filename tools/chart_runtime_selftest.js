@@ -13,9 +13,44 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(source.replace("window.omniDashboard = api;",
-  "window.omniDashboard = api; window.probe = {state: state, drawnBuffer: drawnBuffer};"), context);
+  "window.omniDashboard = api; window.probe = {state: state, drawnBuffer: drawnBuffer, lineOption: lineOption};"), context);
 const api = context.window.omniDashboard;
 const probe = context.window.probe;
+
+const echarts = require("../plugins/chart/vendor/echarts.min.js");
+const streaming = echarts.init(null, null, { renderer: "svg", ssr: true, width: 920, height: 250 });
+const snapshot = echarts.init(null, null, { renderer: "svg", ssr: true, width: 920, height: 250 });
+api.setPoints({ limit: 5000, visible: 5000 });
+const wave = index => [index / 10, Math.sin(index / 19) + (index % 137 === 0 ? 3 : 0)];
+const initial = Array.from({ length: 5000 }, (_, index) => wave(index));
+api.setValues({ history: { A: initial }, values: { A: initial.at(-1)[1] } });
+streaming.setOption(probe.lineOption({ channel: "A" }, probe.state.series));
+for (let offset = 5000; offset < 7000; offset += 100) {
+  const tail = Array.from({ length: 100 }, (_, index) => wave(offset + index));
+  api.setValues({ append: true, history: { A: tail }, values: { A: tail.at(-1)[1] } });
+  streaming.setOption({ series: [{ id: "A", data: probe.drawnBuffer("A", probe.state.series.A) }] });
+}
+snapshot.setOption(probe.lineOption({ channel: "A" }, probe.state.series));
+const extent = chart => chart.getModel().getComponent("xAxis").axis.scale.getExtent();
+console.log("R-336 streaming/snapshot x extents", extent(streaming), extent(snapshot));
+assert.deepEqual(extent(streaming), extent(snapshot), "identical retained data must have identical unzoomed axes");
+assert.deepEqual(streaming.getOption().series[0].data, snapshot.getOption().series[0].data);
+const renderedRows = chart => {
+  const data = chart.getModel().getSeriesByIndex(0).getData();
+  return data.mapArray(["x", "y"], (time, value) => [time, value]);
+};
+const beforeSlide = renderedRows(streaming);
+api.setValues({ append: true, history: { A: [wave(7000)] }, values: { A: wave(7000)[1] } });
+streaming.setOption({ series: [{ id: "A", data: probe.drawnBuffer("A", probe.state.series.A) }] });
+const afterSlide = renderedRows(streaming);
+const drawnTimes = new Set(afterSlide.map(row => row[0]));
+const lostHistorical = beforeSlide.filter(row => row[0] > 210 && row[0] < 690 && !drawnTimes.has(row[0]));
+console.log("R-336 rendered points before/after slide", beforeSlide.length, afterSlide.length,
+  "unchanged historical points omitted", lostHistorical.length);
+assert.equal(lostHistorical.length, 0, "sliding capacity must not change which unchanged historical samples are drawn");
+streaming.dispose();
+snapshot.dispose();
+console.log("PASS R-336 streaming and newly created curves agree past capacity");
 
 api.setPoints({ limit: 0, visible: 300 });
 api.setValues({ history: { A: [[0, 0], [1, 1]] }, values: { A: 1 } });

@@ -3018,13 +3018,6 @@ def chart_stream_checks(app, chart, api_like=None) -> None:
         check("R-305 有新数据时仍然发帧",
               len(sent) > idle, f"{len(sent)} vs {idle}")
 
-        # ---- R-307: the *drawing* must stay bounded even at 展示帧数 = 5000.
-        # Plain rendering of two 5000-point curves measured ~47 ms per frame,
-        # which is what froze the whole dashboard once the user raised the
-        # setting.  Down-sampling plus progressive rendering brought that to
-        # ~28 ms; the data itself is never reduced.  The sampler is ``minmax``,
-        # not ``lttb``: LTTB's per-bucket pick jumps as the window slides, so
-        # the curve morphed while refreshing (R-336, probe_chart_deform2).
         option = _js(app, chart, """JSON.stringify((() => {
           const series = omniDashboard ? true : true;
           const host = document.querySelector('#canvas .card .plot');
@@ -3036,13 +3029,61 @@ def chart_stream_checks(app, chart, api_like=None) -> None:
                   large: !!s.large};
         })())""")
         cfg = json.loads(option) if option else {}
-        check(f"R-307 曲线开启 minmax 降采样（绘制层，不改数据，帧间不抖动）({cfg})",
-              cfg.get("sampling") == "minmax", cfg.get("sampling"))
+        check(f"R-336 曲线不重新抽取历史代表点 ({cfg})",
+              cfg.get("sampling") == "none", cfg.get("sampling"))
         check(f"R-307 曲线开启分帧绘制 progressive ({cfg})",
               cfg.get("progressive") == 800
               and cfg.get("progressiveThreshold") == 1500, cfg)
         check(f"R-307 大数据曲线仍走 large 批渲染 ({cfg})",
               cfg.get("large") is True, cfg.get("large"))
+        stability = _js(app, chart, """JSON.stringify((() => {
+                    const host = document.querySelector('#canvas .card .plot');
+                    const inst = echarts.getInstanceByDom(host);
+                    const saved = inst.getOption();
+                    const width = inst.getWidth(), height = inst.getHeight();
+                    const results = [];
+                    try {
+                        for (const size of [320, 920]) {
+                            inst.resize({width: size, height: 250});
+                            for (const offset of [0, 1, 300]) {
+                                const series = [0, 1, 2, 3].map(channel => Object.assign({}, saved.series[0], {
+                                    id: 'stability-' + channel,
+                                    name: 'stability-' + channel,
+                                    data: Array.from({length: 5000}, (_, index) => {
+                                        const tick = index + offset;
+                                        return [tick / 10, Math.sin(tick / 3 + channel) +
+                                            0.35 * Math.sin(tick / 1.3) + (tick % 137 === 0 ? 3 : 0)];
+                                    })
+                                }));
+                                const started = performance.now();
+                                inst.setOption({series: series}, {replaceMerge: ['series'], lazyUpdate: false});
+                                const elapsed = performance.now() - started;
+                                const exact = series.every((raw, seriesIndex) => {
+                                    const drawn = inst.getModel().getSeriesByIndex(seriesIndex).getData();
+                                    if (drawn.count() !== raw.data.length) { return false; }
+                                    return raw.data.every((row, index) =>
+                                        drawn.get('x', index) === row[0] && drawn.get('y', index) === row[1]);
+                                });
+                                const canvas = host.querySelector('canvas');
+                                const image = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+                                let ink = 0;
+                                for (let index = 3; index < image.length; index += 4) {
+                                    if (image[index] > 8) { ink += 1; }
+                                }
+                                results.push({width: size, offset: offset, exact: exact, ink: ink, ms: elapsed});
+                            }
+                        }
+                    } finally {
+                        inst.resize({width: width, height: height});
+                        inst.setOption(saved, {notMerge: true, lazyUpdate: false});
+                    }
+                    return results;
+                })())""")
+        frames = json.loads(stability) if stability else []
+        check("R-336 两种宽度下四通道5000点跨容量滑动，绘制点逐个等于原始数据",
+              len(frames) == 6 and all(frame["exact"] for frame in frames), frames)
+        check("R-336 复杂波形在真实画布中非空",
+              len(frames) == 6 and all(frame["ink"] > 1000 for frame in frames), frames)
     finally:
         panel._call_js = original
         panel.page_ready = False
