@@ -793,3 +793,22 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - R-329：同一个lamp的colorRules精确数值匹配，单条规则就是单色灯；fallbackColor支持无色或自定义色。创建入口/现有卡片复用LampColorsDialog，可增删规则、调色和指定无色。旧无规则或null字段仍保持零/非零二态，明确启用匹配后迁移。
 - 页面setLayout/addWidget/describe/persist及Python规范化、INI和文件往返均保留规则；重复数值、非有限值、布尔值、缺字段和非法颜色被拒；用repr保留双精度编辑往返。无数据为空心且显示--，不误当零或默认值。
 - `python tools/plugin_selftest.py --interaction-only`409项通过：真实创建/调色板、0红/1白/2黄/其它无色、其它自定义色、-3.5单规则、明确无色优先、增删/取消、文件/设置持久化；旧二态灯、来源及曲线回归通过。`.artifacts/lamp-rules.png`已视觉核对。源码候选，未打包发布；L-327仍OPEN。
+
+## L-329 核心插件启用无效 / 商店操作闪出空白小窗（FIXED-verified）
+- 用户反证「启用终端启用不了」：根因是 `toggle.clicked.connect(lambda _checked=False, ... on=not item.get("disabled"): self.set_enabled(key, on))`，而 `set_enabled` 内部写 `set_disabled(identifier, not enabled)`，两者叠加后点「启用」实际写入 `disabled=True`，所以永远启用不了。修法：用显式 `want = bool(item.get("disabled"))` 绑定，去掉二次取反。证据：探针抓到 `set_disabled calls: [('terminal', True)]`（点启用却写 True），修后为 `False` 且磁盘 `disabled` 清空、按钮变「禁用」。
+- 用户反证「启用/安装/卸载都闪出空白小窗」：每行更新红点是 `QWidget()`，无父控件在 `setVisible(True)` 时成为顶层窗口，出现 8x8 空窗，随后 `addWidget()` 重新挂父，事后检查 `parent()` 已看不出痕迹。修法：`QWidget(row)` 构造即带父。
+- **测试方法教训**：事后查 `parent()` 或 `topLevelWidgets()` 都抓不到这个缺陷（必须对比"创建即带父"与"先显示后挂父"两种顺序）。最终用源码级断言 `badge = QWidget(row)` 守门，并做负向验证：改回 `QWidget()` 时断言失败、退出码 1。
+- 同时按新契约调整旧断言：R-323「启用后卸载按钮回来」→「启用后只给禁用、永不出现卸载」；R-327 真实卸载回归改用非核心插件（gauge/probe），核心插件 `uninstall()` 改为抛 `core`。
+- `tools/acceptance_test.py` R-001 整体通过判据改为按整行匹配收尾横幅：Qt 的 `propagateSizeHints()` 警告会粘在同一行，旧子串判断在全绿时误判失败。
+- 证据：完整插件 603 项、GUI 980 项、总验收 1780 项 0 失败、Ruff 通过；负向验证抓红点缺陷。commit `82772c1`。
+
+## L-330 make_release 上传中断后留下空资产列表（FIXED-by-manual-upload）
+- 现象：代理侧 `make_release.py --publish` 在后台终端会话里反复被清理，最后报 `上传失败： 404 Not Found`；
+  查询 `/releases/452554311` 的 assets 为 `[]` —— 旧包已被删除、新包未上传成功，发布页短暂无任何可下载文件。
+- 根因：该脚本遇到 422「同名资产已存在」时会先 DELETE 旧资产再 POST 新包；一旦上传阶段失败，
+  资产列表就为空。加之 182 MB 上传耗时数分钟，长任务放在会被清理的后台会话里极易中断。
+- 处置：用户手动上传本轮构建的 `dist/OmniCOM-1.1.7-win64.zip`；核对线上 digest
+  `sha256:e307e197…`（190874335 B）与本地一致，公开链接 HEAD 200，`latest=v1.1.7`。
+- 教训：① 发布必须在前台/独立进程跑完，不要依赖会超时清理的会话；
+  ② 发布后必须查 `/releases/<id>` 的 assets 与 `latest`，退出码为 0 也不代表资产还在；
+  ③ 任何"先删后传"的流程要么先上传到临时名再改名，要么失败后自动回补。
