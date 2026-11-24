@@ -791,6 +791,7 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - 根因：`SourceDelegate.paint()` 把 `theme.WASH_HOVER` / `theme.LINE_STRONG` 直接交给 `QColor`。这两个令牌是 Qt 样式表形式 `rgba(18, 26, 43, 14)`（alpha 0-255），`QColor` **完全无法解析**，返回 `isValid()==False` 的颜色，`fillRect`/`setPen` 于是画成不透明黑。`omnicom/ui/theme.py` 第 59 行早有同样注释（`WINDOW_EDGE` 因此拆成两个令牌）。
 - 修法：插件内新增 `_paint_color()`，用正则把 `rgba(r, g, b, a)` 拆成 `QColor(r, g, b)` 并设置 alpha（兼容 0-1 与 0-255 两种 alpha）；`#RRGGBB` 仍直接交给 `QColor`。插件自包含，不依赖宿主新增令牌，旧版 1.1.7 宿主也能正确显示。
 - 证据：`.artifacts/probe_source_hover.py` 修复前悬停行 `#000000`，修复后 `#f2f2f3`、未勾选边框 `#e3e4e6`；`.artifacts/probe_source_negative.py` 把转换改回 `QColor` 后断言失败（`#000000`）。`plugin_selftest --chart-only` 316 项通过（新增 R-341 两项）。
+- 2026-11-24 重发完成（源码 `f5f55fa`，已推送 `main`）：插件商店 #436347358 用新包替换 `chart-1.1.5.zip`（387671 B，`sha256:7d8a29e02665e25b191153f57910d52bae207c2b94a5b7ff2c37bae1b10aa673`）与 `catalog.json`（4497 B，`sha256:e054ac40793096b2ece54e99d8e1332657a7a259e363c795f0cc05b02c6347d2`）；7 个包 Range 均 206，`/releases/latest` 仍为 v1.1.7，公开 raw 目录 chart=1.1.5 且哈希一致。
 - 教训：既有 R-325 只验证「选中」行，从未验证「悬停」行，所以这个缺陷一直没被发现；任何自绘背景都要同时断言 hover 与 selected 两种状态。
 
 ## L-336 满缓存后曲线边刷新边变形（OPEN）
