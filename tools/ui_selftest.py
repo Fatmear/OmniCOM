@@ -3832,6 +3832,36 @@ def main() -> int:
                   any("从不关闭显示器" in text for text in texts), str(texts))
             window.row_awake.setChecked(False)
             app.processEvents()
+
+        # R-343: the user asked whether closing OmniCOM leaves the screen
+        # awake.  ``closeEvent`` calls ``power.release()``, but that is only a
+        # claim until the OS is asked.  Read the *real* thread state back:
+        # ``SetThreadExecutionState`` returns the previous request, so re-sending
+        # ES_CONTINUOUS reports what is currently latched.
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.SetThreadExecutionState.argtypes = [ctypes.c_uint]
+        kernel32.SetThreadExecutionState.restype = ctypes.c_uint
+
+        def latched() -> int:
+            return kernel32.SetThreadExecutionState(
+                ctypes.c_uint(power.ES_CONTINUOUS))
+
+        window.row_awake.setChecked(True)
+        app.processEvents()
+        enabled = latched()
+        check("R-343 打开常亮后系统确实收到屏幕与系统请求",
+              bool(enabled & power.ES_DISPLAY_REQUIRED)
+              and bool(enabled & power.ES_SYSTEM_REQUIRED),
+              f"{enabled:#010x}")
+        window.close()
+        app.processEvents()
+        after = latched()
+        check("R-343 关闭窗口后系统请求被真正撤销（屏幕可以息屏）",
+              not (after & power.ES_DISPLAY_REQUIRED)
+              and not (after & power.ES_SYSTEM_REQUIRED),
+              f"{after:#010x}")
         next_()
 
     def step_launcher_sections(next_):

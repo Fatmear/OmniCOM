@@ -786,6 +786,14 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - 曾把有效容量改成 max(保留, 展示)，但那会篡改用户的显式「曲线点数」：R-301 要求显式值就是保留上限，points=150 必须保留 150。已回退为 `min(MAX_POINTS, max(100, limit))`，`visible` 只控制每帧绘制尾部。
 - 证据：完整插件套件 R-301「曲线点数按设置生效」在错误实现下失败（300≠150），回退后全套 587 项通过。该推测未解释用户实际 5000/5000/0，见 L-327。
 
+## L-343 关闭软件后屏幕是否仍常亮（FIXED-verified）
+- 用户确认：在软件里开了「保持屏幕常亮」，关掉软件后屏幕**不应**继续常亮。
+- 结论：不会残留。`SetThreadExecutionState` 是**线程作用域**的请求，线程退出（含 `TerminateProcess` 强杀）时 Windows 自动丢弃；`closeEvent` 里另有显式 `power.release()` 做正常关闭的即时释放。
+- 实测（不是读文档）：`.artifacts/probe_awake_close.py` 真实创建 `OmniWindow`，开启后向 OS 读回 `0x80000003`，`close()` 后读回 `0x80000000`；`.artifacts/probe_awake_kill.py` 强杀已 latch 的子进程，父线程仍为 `0x80000000`。
+- 多窗口不是风险：每个窗口是**独立进程**（`window-<n>.lock` 各自锁定），关一个不会清掉另一个的请求。
+- 新增 `ui_selftest` R-343 两项，直接向 OS 读回线程状态，而不是只断言 `release()` 被调用。
+- 教训：`powercfg /requests` 需要管理员权限，普通会话读不到；验证常亮要用 `SetThreadExecutionState` 的「返回上一次请求」语义读回，而不是依赖外部命令。
+
 ## L-342 换电脑后检查更新报 SSL 证书校验失败（FIXED-verified）
 - 症状：另一台电脑点「检查新版本」直接失败：`[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1032)`。
 - 根因：便携包用官方 CPython **embeddable** 运行时，`python313._pth` 关闭了 `site`，所以用户 site-packages 里的 `certifi` 不可见；运行时只带 `_ssl.pyd` + `libssl-3.dll`，**没有任何 CA 证书**。开发机能通是因为 Windows 上 OpenSSL 会回退到系统证书库（本机 79 张），而目标机器的系统库缺少根证书（精简镜像 / 新装 VM / 企业代理重签）。
