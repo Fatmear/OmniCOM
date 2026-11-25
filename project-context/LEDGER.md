@@ -801,6 +801,9 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - 提示改进：`update._reason()` 新增 `_is_certificate_error()` / `_certificate_detail()`，证书失败走 `update.check.tls`（提示查系统时间 / 代理根证书），不再误报「网络不通」。
 - 证据：`.artifacts/probe_tls_bundle.py` 仅用随包文件建出 121 张根证书并 HTTPS 200；`.artifacts/probe_packaged_tls.py` 用便携运行时确认 `dist/OmniCOM/assets/cacert.pem` 生效；`acceptance_test --only local` R-342 四项通过；Ruff 干净。
 - 注意：`releases.atom` 当时返回 HTTP 500（两种 UA 都一样），是 GitHub 侧临时故障，与证书无关；`raw.githubusercontent.com` 200 证明信任链正常。
+- 2026-11-25 固化门禁 + 重发完成（源码 `c05430a`）：`make_dist._verify_tls()` 在 `verify()` 里用包内 runtime 实测——先查 `assets/cacert.pem` 存在且 >100 KB，再用仅该文件建校验上下文（要求 >50 张根证书），最后实际访问 HTTPS；证书错误直接判打包失败，纯网络不通仅警告（根证书验证不依赖网络）。该门禁已写入 AGENTS.md 为发布硬约束。
+- 门禁自身修掉两个真实缺陷：`-E` 会忽略环境变量（改用内联绝对路径）；调用方传相对路径时`sys.path` 指向包内而导入失败（改在函数内 `resolve()`）。
+- 重发结果：Release #452554311 替换 `OmniCOM-1.1.7-win64.zip` 为 191022574 B `sha256 ec71d3a558228db973e0591f69b7b36560c2de22b0ed0e9a481eb2e1f4bfc25d`；公开 HEAD 200 且长度一致，`latest=v1.1.7`。打包前用 `.artifacts/verify_zip_runtime.py` 实测包内 HTTPS 200。
 - 教训：任何「开发机正常、换机器失败」的网络问题，先查**运行时是否自带 CA**，不要先怀疑代理或防火墙；嵌入式 Python 的 `._pth` 会静默屏蔽 site-packages。
 
 ## L-341 数据来源选择框悬停背景变黑（FIXED-verified）

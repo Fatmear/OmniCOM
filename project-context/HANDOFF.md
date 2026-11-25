@@ -18,7 +18,8 @@ Updated: 2026-11-25
 
 ## Active Goal
 
-- **R-342 便携包 HTTPS 证书修复（源码候选，未提交/未发布）**：新增 `omnicom/tls.py` + `assets/cacert.pem`（240216 B），GUI/CLI 入口安装信任；证书失败改报信任问题。
+- **R-342 已修复并重发 1.1.7**：新增 `omnicom/tls.py` + `assets/cacert.pem`（240216 B），GUI/CLI 入口安装信任；证书失败改报信任问题。Release #452554311 新资产 191022574 B `sha256 ec71d3a5…`，公开 HEAD 200，latest=v1.1.7。
+- **打包门禁已固化**：`make_dist._verify_tls()` 在每次 `--check` 时用包内运行时实测 HTTPS，证书错误直接失败；该约束已写入 `AGENTS.md`，检查更新失败不得再回归。
 - **R-336 已关闭**：用户复测确认解决了；`sampling=none` 源码已并入 chart **1.1.5** 插件包，应用版本保持 1.1.7（主便携包不含 chart）。
 - 保留 Python + QtWebEngine + 离线 ECharts；保留五种控件、双轴独立缩放、拖动缩放、滚动、居中添加、配置导入导出。
 - 不构建自制 exe（R-019）；真实用户设置和数据不得被测试改写。
