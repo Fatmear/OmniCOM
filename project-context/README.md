@@ -8,12 +8,18 @@ store. A light, flat, frameless window is part of the product identity.
 
 ## Read in this order
 
-1. `CAPABILITIES.md`  — what it does today, and what is missing or broken
-2. `REQUIREMENTS.md`  — binding rules; IDs are immutable, superseded ones stay listed
-3. `WORKLOG.md`       — what the recent sessions changed (newest first, with status)
-4. `HANDOFF.md`       — current state, in-flight work, next safe action
-5. `LEDGER.md`        — **search** by symptom keyword before investigating anything
-6. `DECISIONS.md`     — recurring traps and accepted choices
+1. `PRODUCT.md`       — what it must do: in-scope features and explicit non-goals
+2. `CAPABILITIES.md`  — what it does today, and what is missing or broken
+3. `REQUIREMENTS.md`  — binding rules; IDs are immutable, superseded ones stay listed
+4. `WORKLOG.md`       — what the recent sessions changed (newest first, with status)
+5. `HANDOFF.md`       — current state, in-flight work, next safe action
+6. `LEDGER.md`        — **search** by symptom keyword before investigating anything
+7. `DECISIONS.md`     — recurring traps and accepted choices
+
+`PRODUCT.md` and `CAPABILITIES.md` answer different questions and must not be merged:
+the first is the target, the second is reality. Before claiming a feature exists, check
+both — a row in `PRODUCT.md` that is absent from `CAPABILITIES.md` has not shipped, and a
+capability with no `S-` id was never agreed.
 
 Do not read `LEDGER.md` end to end; it is an index. Detail lives in `archive/`.
 
@@ -31,5 +37,7 @@ Do not read `LEDGER.md` end to end; it is an index. Detail lives in `archive/`.
 - The portable bundle carries its own CA file; a broken build gate blocks release (R-342).
 - The theme is light; colours come from `omnicom/ui/theme.py`, never hardcoded.
 - Requirements beat an old handoff. A newer user message beats an old requirement.
+- **A feature the user asks for is registered in `PRODUCT.md` in that same turn**; a feature the
+  user cancels is **deleted** from it, with one line left in the scope-change log.
 
 Historical detail: `git log`, `CHANGELOG.md`, `archive/`.

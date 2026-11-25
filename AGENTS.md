@@ -1,9 +1,17 @@
 # OmniCOM — Agent entry
 
 Read `project-context/README.md` first, then, in this order:
-`CAPABILITIES.md` (what works today) → `WORKLOG.md` (what the last sessions changed) →
-`HANDOFF.md` (current state) → `REQUIREMENTS.md` (only the ids the task touches) →
+`PRODUCT.md` (what it must do) → `CAPABILITIES.md` (what works today) →
+`WORKLOG.md` (what the last sessions changed) → `HANDOFF.md` (current state) →
+`REQUIREMENTS.md` (only the ids the task touches) →
 `LEDGER.md` (**search** by symptom keyword; never read it end to end).
+
+Scope changes are recorded in `PRODUCT.md`, in the same turn they are spoken:
+- The user asks for a feature → add an `S-x.y` row **with an acceptance criterion**, then build it.
+- The user cancels a feature → **delete its row** from the scope table and append one line to the
+  scope-change log (what, why, which sentence). Scope tables stay clean; history lives in the log.
+- Then reconcile: `CAPABILITIES.md` → `retired`, related `R-` rules → `superseded`, dead tests removed.
+- Never build an unregistered feature and mention it afterwards.
 
 Record discipline — this is not optional:
 - **Every non-trivial change appends a `WORKLOG.md` row in the same turn**, with a status:

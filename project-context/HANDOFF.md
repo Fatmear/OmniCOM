@@ -1,60 +1,68 @@
 # Current handoff
-Updated: 2026-11-25 (source: session that rebuilt the context files)
+Updated: 2026-11-25 (source: session that added the product-scope layer)
 
 ## Now
 
-- **Objective:** keep the project record trustworthy. The context files were just
-  restructured into global truth (`CAPABILITIES`, `REQUIREMENTS`), local record
-  (`WORKLOG`, `LEDGER`) and a snapshot (`HANDOFF`).
-- **Shipped:** app **v1.1.7** (Release #452554311, `OmniCOM-1.1.7-win64.zip`
-  191022574 B, `sha256 ec71d3a5…`, public HEAD 200, `latest=v1.1.7`) and plugin
-  **chart 1.1.5** (`387671 B`, `sha256 7d8a29e0…`) in plugin-store #436347358.
-- **Requirement ids to check before touching delivery:** R-019, R-083, R-174,
-  R-293, R-335, R-342.
-- **Working tree:** the context rebuild is uncommitted; verify with `git status`.
+- **Objective:** keep the project record trustworthy. There are now eight files in
+  `project-context/`, split by job, and each has a size budget.
+- **New in this cycle:** `PRODUCT.md` — the target scope (45 `S-x.y` feature rows,
+  6 `OUT` rows, append-only scope-change log). It answers "what must this product
+  do", which `CAPABILITIES.md` (today's reality) cannot answer.
+- **Scope discipline is now enforced** in `AGENTS.md` and the skill:
+  a feature the user asks for gets an `S-` row **in that turn**; a feature the user
+  cancels has its row **deleted** and one line appended to the scope-change log.
+- **Shipped:** app **v1.1.7** (Release #452554311, 191022574 B, `sha256 ec71d3a5…`,
+  public HEAD 200, `latest=v1.1.7`); plugin **chart 1.1.5** (387671 B,
+  `sha256 7d8a29e0…`) in plugin-store #436347358.
+- **Working tree:** the scope-layer change is uncommitted; verify with `git status`.
 
 ## In flight
 
 | When | Area | What changed | Status |
 | --- | --- | --- | --- |
-| 11-25 | docs | Rebuilt `project-context/` into seven layered files + `archive/` | **in-progress** |
-| 11-25 | docs | Optimised the `project-continuity` skill: three layers, worklog contract, budget rules | done |
-| 11-25 | tls | Bundled CA proven in-package; release gate added | done `c05430a` |
-| 11-25 | power | Keep-awake proven released on close | done `9102f6d` |
+| 11-25 | docs | Added `PRODUCT.md` with 45 scope rows and a scope-change log | **in-progress** |
+| 11-25 | docs | Add/cancel-feature rule written into skill, `AGENTS.md`, `templates.md` | done |
+| 11-25 | docs | `PRODUCT.md` wired into README order, report budget, validator | done |
+| 11-25 | docs | Context rebuilt into seven layers + `archive/` (earlier this session) | done `8148fd5` |
 
 ## Last verified
 
-- `make_dist.py --check --zip` passed, including the new in-bundle HTTPS probe
-  (`roots 121`, `https 200`) and the 5-cycle installer suite.
-- `acceptance_test --only local`: R-342 four checks pass; `ruff check .` clean.
-- Extracting the old ledger produced **340 entries, 0 unparsed, no duplicates**
-  (L-334/335/339 never existed in the source).
-- **What this did not prove:** the rebuilt files were not yet read back by a
-  fresh session, and no test asserts the new budgets.
+- `report_context.py`: README 43/60, PRODUCT 180/200, CAPABILITIES 70/120,
+  WORKLOG 38/45, LEDGER 145/150, DECISIONS 77/120, HANDOFF 60/100 — all inside
+  budget; `REQUIREMENTS.md` is a reference file with no cap.
+- `validate_context.py`: 672 defined ids, no duplicate ledger ids, no WORKLOG row
+  without a status, no duplicate headings in the snapshot files.
+- `PRODUCT.md`: 45 scope rows, no duplicate `S-` ids, 9 change-log rows.
+- **What this did not prove:** no test asserts the budgets or the scope rules —
+  they are enforced by instruction, not by a failing check.
 
 ## Open blockers
 
-- R-320 (dashboard refresh rate under load) — still ~5 batches/s, P95 ~249 ms.
-- L-327 — history reported lost before the retention cap; direct feed does not
-  reproduce it, so a real capture is still needed.
+- R-320 (dashboard refresh under load) — ~5 batches/s, P95 ~249 ms.
+- L-327 — history reported lost before the retention cap; needs a real capture.
 - R-331 — wrapped chart frames lose continuation fields.
-- R-332 — core-plugin recovery path not verified on a real upgrade.
+- R-332 — core-plugin recovery path unverified on a real upgrade.
+- 5 pre-existing dangling refs (`R-182`, `R-198`, `R-303`, `L-339`) are prose
+  mentions in the inherited text, not missing definitions.
 
 ## Environment facts (recheck on a new machine)
 
 - Portable runtime is CPython embeddable; `._pth` disables `site`, so user
-  `certifi` is invisible. That is why `assets/cacert.pem` must ship.
+  `certifi` is invisible — that is why `assets/cacert.pem` must ship (R-342).
+- `AGENTS.md` and `project-context/DECISIONS.md` are **CRLF**; the other
+  `project-context/*.md` files are **LF**. Writing with a Python `write_text`
+  silently converts CRLF to LF and produces a whole-file diff — write bytes.
 - `powercfg /requests` needs elevation; read keep-awake state back through
-  `SetThreadExecutionState` instead.
-- PowerShell 5.1 cannot write UTF-8 without BOM via `Set-Content`; write commit
-  messages from Python (`write_bytes`) and keep `project-context/*.md` as LF.
-- `dist/client-1.1.4/` and `.artifacts/plugin-bundle/` are stale 1.1.4 copies
-  without the CA file — do not test with them.
+  `SetThreadExecutionState`.
+- `dist/client-1.1.4/` and `.artifacts/plugin-bundle/` are stale 1.1.4 copies with
+  no CA file — do not test with them.
 
 ## Next safe check
 
-1. `python .artifacts/report_context.py` — expects every index file within its
-   budget and `CR 0` for the LF files.
-2. `git status --short` — expects only `project-context/` and the skill change.
-3. Commit, then confirm a fresh session can answer the five self-check questions
-   from `CAPABILITIES` + `WORKLOG` + `HANDOFF` alone.
+1. `python .artifacts/report_context.py` — every index file inside budget, `CR 0`
+   for the LF files.
+2. `python .artifacts/verify_scope_rule.py` — the scope rule is present in all
+   four places (skill, AGENTS, PRODUCT, templates).
+3. Commit, then confirm a fresh session can answer "what must this product do,
+   what does it do today, what is still open" from `PRODUCT` + `CAPABILITIES` +
+   `HANDOFF` alone.

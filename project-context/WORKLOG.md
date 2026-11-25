@@ -6,6 +6,9 @@ Keep the newest ~40 rows live; move older blocks to `archive/worklog-YYYY.md`.
 
 | When | Area | What changed | Status |
 | --- | --- | --- | --- |
+| 11-25 | docs | Added `PRODUCT.md`: scope tables (`S-1.1`..`S-9.4`, 45 rows), 6 `OUT` rows, scope-change log | done |
+| 11-25 | docs | Scope discipline written into skill + `AGENTS.md`: add a feature = new `S-` row with a criterion; cancel a feature = **delete the row** + one change-log line | done |
+| 11-25 | docs | `PRODUCT.md` wired into `README` read order, report budget (200), validator, and `templates.md` | done |
 | 11-25 | build | 记录 R-342 打包门禁与 1.1.7 重发 (R-342) | done |
 | 11-25 | tls | 把证书校验固化为打包门禁，并写入 AGENTS 约束 (R-342) | done |
 | 11-25 | power | 实测确认关闭软件后不残留常亮 (R-343) | done |
