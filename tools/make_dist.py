@@ -487,6 +487,79 @@ def build(target: Path, version: str) -> Path:
     return target
 
 
+def _verify_tls(target: Path) -> int:
+    """Prove the packaged runtime can verify HTTPS with its **own** CA file.
+    R-342: the embeddable runtime ships ``_ssl.pyd`` + ``libssl-3.dll`` but no
+    certificate store, and its ``._pth`` disables ``site`` so a user's
+    ``certifi`` is invisible.  On a machine whose system store lacks the roots
+    every HTTPS call fails with ``CERTIFICATE_VERIFY_FAILED`` - which is how the
+    update check broke on a fresh machine while working on the dev box.
+
+    This runs inside the *bundle*, so it fails here instead of at the user's
+    desk.  A certificate error is a hard failure; a plain network outage is only
+    a warning, because a build must still be possible offline (the roots are
+    verified from the file itself, which needs no network).
+    """
+    # Callers may pass a relative path (``dist/OmniCOM``); the child process
+    # runs with ``cwd=target``, so a relative ``sys.path`` entry would resolve
+    # inside the bundle and fail to import.  Pin it to an absolute path.
+    target = target.resolve()
+    ca = target / "assets" / "cacert.pem"
+    if not ca.is_file():
+        print(f"bundle is missing the CA file ({ca}) - HTTPS would fail on a "
+              f"machine without system roots (R-342)")
+        return 1
+    if ca.stat().st_size < 100_000:
+        print(f"bundle CA file looks truncated ({ca.stat().st_size} bytes)")
+        return 1
+    print(f"CA bundle present: {ca.name} ({ca.stat().st_size} bytes)")
+
+    script = (
+        "import ssl, sys\n"
+        "sys.path.insert(0, r'''" + str(target / f"{NAME}.pyz") + "''')\n"
+        "from omnicom import tls\n"
+        "bundle = tls.ca_bundle()\n"
+        "assert bundle, 'no CA bundle reachable from the packaged runtime'\n"
+        "stats = ssl.create_default_context(cafile=bundle).cert_store_stats()\n"
+        "roots = stats.get('x509_ca', 0)\n"
+        "assert roots > 50, 'bundle only holds %d roots' % roots\n"
+        "print('roots', roots)\n"
+        "tls.install()\n"
+        "import urllib.request, urllib.error\n"
+        "try:\n"
+        "    r = urllib.request.urlopen("
+        "'https://raw.githubusercontent.com/Fatmear/OmniCOM/main/plugins/catalog.json',\n"
+        "                            timeout=30)\n"
+        "    print('https', r.status, len(r.read()))\n"
+        "except Exception as error:\n"
+        "    print('https-error', type(error).__name__, error)\n"
+        "    raise SystemExit(3 if 'CERTIFICATE' in str(error) else 4)\n"
+    )
+    env = {key: value for key, value in os.environ.items()
+           if key not in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+                          "OMNICOM_DATA_DIR", "OMNICOM_SETTINGS_SUFFIX")}
+    result = subprocess.run(
+        [str(target / "runtime" / "python.exe"), "-X", "utf8", "-E", "-s",
+         "-c", script],
+        cwd=target, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=120, env=env)
+    output = ((result.stdout or "") + (result.stderr or "")).strip()
+    print(output[-800:] if output else "(no output)")
+    if result.returncode == 3:
+        print("packaged runtime CANNOT verify HTTPS (certificate failure, "
+              "R-342 regression) - this build must not be shipped")
+        return 1
+    if result.returncode == 4:
+        print("packaged runtime could not reach the network; the CA file "
+              "itself was verified, but run this build check again online")
+        return 0
+    if result.returncode != 0:
+        print("packaged TLS verification FAILED")
+        return 1
+    print("packaged runtime verifies HTTPS with its own CA bundle")
+    return 0
+
+
 def verify(target: Path) -> int:
     """Run the packaged selftest with the bundled runtime only."""
     # The core plugins are the console and the transfer page (R-218), so a
@@ -528,6 +601,10 @@ def verify(target: Path) -> int:
         print("packaged selftest FAILED")
         return result.returncode or 1
     print("packaged selftest OK (bundled runtime, no external packages)")
+    # R-342 gate: the packaged runtime has no certificate store of its own, so
+    # this proves the shipped CA file actually works before anything is zipped.
+    if _verify_tls(target) != 0:
+        return 1
     from make_plugins import verify_runtime
 
     if verify_runtime(target) != 0:

@@ -11,6 +11,20 @@ Rules
   Run from source: `start.cmd`, or `python run.py`, or `python run.py --demo` (虚拟串口).
   Package: `python tools/make_dist.py --check --zip` → `dist/OmniCOM/` + `dist/OmniCOM-<ver>-win64.zip`
   (bundled CPython runtime + trimmed Qt bindings, so the user installs nothing).
+- **The portable bundle must carry its own CA file (R-342).** The embeddable CPython runtime has
+  `_ssl.pyd` + `libssl-3.dll` but **no certificate store**, and its `python313._pth` disables
+  `site`, so a user's `certifi` is invisible. On a machine whose system store lacks the roots
+  (trimmed image, fresh VM, re-signing proxy) every HTTPS call dies with
+  `CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate`. Therefore:
+  `assets/cacert.pem` must exist, `omnicom/tls.py` must install it in **both** entry points
+  (`omnicom/ui/__init__.py` and `omnicom/cli.py`), and `make_pyz` must copy it into the bundle.
+  Never "fix" this by disabling verification. A certificate failure must be reported as a **trust**
+  problem (clock / proxy root), never as "network unavailable" (L-342).
+  **Check-update failures must never come back**: `make_dist.py --check` now runs `_verify_tls()`
+  inside the bundle (fails the build on a certificate error, so a broken package cannot be zipped);
+  `acceptance_test --only local` R-342 (4 checks) and `ui_selftest` R-343 must stay green.
+  After any change to packaging, `omnicom/tls.py`, or the CA file, re-run
+  `.artifacts/verify_zip_runtime.py` against the produced ZIP before publishing.
 - Verify commands: `python tools/protocol_selftest.py` (X/Y/ZMODEM loopback, 23 checks),
   `python tools/ui_selftest.py` (300+ GUI acceptance checks incl. DEMO port),
   `python tools/acceptance_test.py` (R-001..R-100 + `.artifacts/acceptance.json`),
