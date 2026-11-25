@@ -1,25 +1,35 @@
 # Project brief
-Updated: 2026-11-04
+Updated: 2026-11-25
 
-Goal: **OmniCOM — All-in-One Embedded Serial Debugger**. A native Python (PySide6/Qt) desktop
-serial debugger with a liquid-glass look: lossless RX/TX, auto port detection + auto-reconnect,
-hex + millisecond timestamps, invisible-character display, collapsible right sidebar with an
-extension command list and multi-keyword search (single-line sidebar, wrapped fullscreen), synchronized log scroll-follow
-switches, receive-to-file, X/Y/ZMODEM transfers, live ASCII charts and an independent plugin store
-with repository-hosted indexes and multiple catalog sources configured in Preferences.
+Goal: **OmniCOM — all-in-one embedded serial debugger.** A portable Python/Qt
+desktop tool with lossless RX/TX, millisecond timestamps, HEX view, an
+independent VT100 terminal, X/Y/ZMODEM transfer, a live dashboard and a plugin
+store. A light, flat, frameless window is part of the product identity.
 
-Read in order: REQUIREMENTS.md (binding) → LEDGER.md (already investigated; search it first) →
-HANDOFF.md (current) → DECISIONS.md (relevant entries).
+## Read in this order
 
-How to run: `start.cmd` (silent) or `python run.py`; add `--demo` for a virtual DEMO port with
-AT replies and telemetry — no hardware needed. **Never build an .exe** (R-019).
-CLI for scripts/AI: `python -m omnicom.cli ...` — stdout is one JSON document; see `docs/CLI.md`.
+1. `CAPABILITIES.md`  — what it does today, and what is missing or broken
+2. `REQUIREMENTS.md`  — binding rules; IDs are immutable, superseded ones stay listed
+3. `WORKLOG.md`       — what the recent sessions changed (newest first, with status)
+4. `HANDOFF.md`       — current state, in-flight work, next safe action
+5. `LEDGER.md`        — **search** by symptom keyword before investigating anything
+6. `DECISIONS.md`     — recurring traps and accepted choices
 
-Architecture: one process, one Qt event loop.
-`omnicom/serial_port.py` owns the port on a reader thread and pushes events through
-`omnicom/ui/workers.py::SerialBridge` signals (Qt queues them to the GUI thread).
-`omnicom/proto/*` are transport-agnostic engines; `omnicom/transfer.py` runs them and is shared by
-the GUI worker and the CLI; `omnicom/selftest.py` proves them over an in-memory duplex loopback.
+Do not read `LEDGER.md` end to end; it is an index. Detail lives in `archive/`.
 
-Historical evidence: `git log`, `project-context/HANDOFF.md` rounds, `omnicom-data/`. Never treat an
-old handoff as overriding a newer user requirement.
+## Archive
+
+- `archive/ledger-detail-2026.md`      — full write-ups for L-270..L-343
+- `archive/LEDGER-full-2026-11-25.md`  — the ledger before it was split
+- `archive/ledger-index-2026-early.md` — settled rows older than the live window
+- `archive/worklog-YYYY.md`            — worklog blocks that left the live window
+
+## Ground rules that shape everything
+
+- Never build or ship a self-built `.exe` (R-019); ship the portable folder (R-083).
+- Received serial bytes are never silently dropped (R-017).
+- The portable bundle carries its own CA file; a broken build gate blocks release (R-342).
+- The theme is light; colours come from `omnicom/ui/theme.py`, never hardcoded.
+- Requirements beat an old handoff. A newer user message beats an old requirement.
+
+Historical detail: `git log`, `CHANGELOG.md`, `archive/`.

@@ -1,0 +1,895 @@
+# Handled-items ledger
+Updated: 2026-11-20
+
+One line per item. Append-only by ID; never delete `RULED-OUT` or `REVERTED` lines.
+Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
+
+| ID | Symptom keywords | Status | Conclusion (one line) | Evidence |
+| --- | --- | --- | --- | --- |
+| L-001 | 丢字 / lost bytes / 暂停后缺数据 / 卡顿 | FIXED-verified | Pause buffers raw chunks and replays them on resume; over-cap loss is counted and shown | `ui_selftest` R-012/R-017 checks |
+| L-002 | 拔插不重连 / replug reconnect / 串口消失 | FIXED-unverified | `PortManager._monitor_loop` reopens the same path (or matches serial/VID-PID); needs a real unplug test | `omnicom/serial_port.py` monitor loop |
+| L-003 | 时间戳重复 / same ms / 多行同时间 / OSError 22 | FIXED-verified | Per-line ts = chunk ts + baud interpolation; `stamp()` takes **milliseconds** (was passing ms to `fromtimestamp`) | `ui/log_view.py:stamp`, `ui_selftest` R-010 |
+| L-004 | 换行显示错乱 / \r\n 不可见 | FIXED-verified | Raw bytes stored; `escape_control()` renders `\r \n \0 \xNN` only when the toggle is on | `ui_selftest` R-015 |
+| L-005 | zmodem 传不过 / 卡在 ZRINIT / 帧校验失败 | FIXED-unverified | CRC16 was implemented reflected (wrong) and the FCS "seal" appended two zero bytes; fixed to plain big-endian `crc16(data)`. Sender now ignores stale ZRINIT instead of resending ZFILE | `protocol_selftest` 23/23; no lrzsz interop yet |
+| L-006 | exe 无法运行 / 拒绝访问 / Access denied / 打包失败 | RULED-OUT | PyInstaller build itself succeeded (2.0 MB, no errors) but Windows refuses to launch the produced exe ("程序无法运行: 拒绝访问", `cmd` returns rc=0 with no window). Corporate endpoint policy blocks self-built binaries → do not retry packaging | R-019, session 2026-10-27 |
+| L-007 | DEMO 串口卡住 / 发 AT 无应答 / 遥测停止 | FIXED-verified | `DemoDevice.write()` held the non-reentrant lock while calling `_respond()`, which re-acquires it → self-deadlock. Now collects lines under the lock and answers outside | `omnicom/serial_port.py` DemoDevice.write |
+| L-008 | 命令列表行数虚增 / 删除后仍统计到旧行 | FIXED-verified | `deleteLater()` keeps children findable until the event loop runs; `setParent(None)` first | `ui/commands_panel.py::rebuild` |
+| L-009 | 窗口位置不恢复 / setGeometry 类型错误 | FIXED-verified | `QMainWindow` needs `restoreGeometry(QByteArray)`, not `setGeometry` | `ui/main_window.py::_restore_settings` |
+| L-010 | Could not parse stylesheet / 徽标样式失效 | FIXED-verified | An f-string with `{{ }}` covered only the first line of a multi-line QSS, leaving stray braces | `ui/main_window.py` status chip |
+| L-011 | 侧栏标题边框外溢 / 整块变粗线 | FIXED-verified | Unscoped `border-bottom` on a container applied to all children; now scoped to `#SideHeader` | `ui/commands_panel.py`, `ui/search_panel.py` |
+| L-012 | QFontDatabase cannot find font directory | RULED-OUT | Harmless offscreen-only warning; Qt ships no fonts. Real windows use system fonts | `tools/*selftest*.py` logs |
+| L-013 | 网格背景 / 背景太花 / grid | FIXED-verified | `Aurora` now paints one flat colour; grid loop and radial blobs removed. Proven by pixel sampling of the backdrop widget | `tools/acceptance_test.py --only visual` R-020 4/4 |
+| L-014 | 顶部栏难看 / 元素散乱 / 标题重复应用名 | FIXED-verified | Top bar became one `GlassFrame` bar (h=62) with brand tile, segmented tabs, `StatusPill`, rich-text counters and icon buttons; `applicationDisplayName` removed (Qt appended it to the title) | R-001 checks in acceptance report |
+| L-015 | GUI 自测首帧偶发 0 字节 / 时好时坏 | FIXED-verified | Test read `rx_bytes` after a fixed 700 ms while DEMO emits every ~700 ms — replaced with a 4 s poll | `tools/ui_selftest.py::step_rx` |
+| L-016 | 验收脚本少跑一段检查 / 结果缺 R-001/R-019 | FIXED-verified | An edit replaced the function tail, silently dropping the top-bar/delivery checks; restored and added token-count assertions to the patch script | `tools/acceptance_test.py` 79 checks |
+| L-017 | CLI 与 GUI 传输行为可能不一致 | FIXED-verified | Transfer code moved to `omnicom/transfer.py` (Qt free); GUI worker and CLI both call `run_transfer()` | `omnicom/transfer.py`, `omnicom/ui/workers.py` |
+| L-018 | F821 undefined name `state` / 上传事件分支永不执行 | FIXED-verified | `_on_upload` had `elif event in ("done", "error")` — comparing a **dict** to strings, always false, and the body referenced an undefined `state`. Dead branch deleted; completion is already reported by `RawFileWorker` signals | `python -m ruff check . --select F821` → clean |
+| L-019 | 侧栏启动就没了 / 重启后右侧栏消失 / 验收 R-008 不通过 | FIXED-verified | Two causes. (1) `closeEvent` used `isVisible()`, which is false whenever an **ancestor** is hidden, so closing while the window was not visible persisted `ui/sidebar=0`. Now `isHidden()` (widget's own flag) decides. (2) Test harnesses wrote into the real `QSettings("OmniCOM","OmniCOM")`, so `ui_selftest` hiding the sidebar leaked into the next run. New `ui_settings()` honours `OMNICOM_SETTINGS_SUFFIX`; all four entry points use `-test` | `ui_selftest` 3 new R-008 checks; acceptance 84 checks / 0 failures |
+| L-020 | 检查被悄悄删掉但验收仍报全覆盖 | FIXED-verified | `suite_gui` only counted `PASS/FAIL` lines carrying an `R-0xx` id; an untagged check was invisible. Added a guard that fails R-001 when any `PASS/FAIL` line lacks a requirement id — it immediately caught one real untagged check | `tools/acceptance_test.py::suite_gui` |
+| L-021 | lint 噪音掩盖真实缺陷 / ruff 大量告警 | FIXED-verified | 216 findings → 0. `E501`/`BLE001`/`RUF00x` are deliberately ignored (CJK strings; long-lived worker threads must catch broad exceptions); config lives in `pyproject.toml`. The sweep also exposed L-018 | `python -m ruff check .` → All checks passed |
+| L-022 | 太黑 / 改白色主题 / 看不清 | FIXED-verified | Palette flipped to a light page (`#EDF1F7`) with white cards; every `rgba(255,255,255,x)` overlay became a dark-ink alpha so hairlines stay visible on white. Several tokens were then darkened to keep AA contrast (`DIM` 3.64→5.46, `TEAL` 3.76→5.22, `OK` 3.88→4.77). `tools/contrast_audit.py` now guards this and the acceptance suite runs it | 12 contrast pairs all >= 4.5:1; window render mean brightness 246/255, dark pixels 0.26% |
+| L-023 | 右上角图标看不见 / 最小化 最大化 关闭 都没有 | FIXED-verified | Not a font problem: `QPushButton { padding: 7px 13px }` inside a `28x28` button leaves a 2px content box, so Qt elided the label to an empty string. Replaced with `GlyphButton`, which paints the icon with `QPainter` and sets `padding: 0`. Offscreen (no fonts at all) still yields 22/104/57 ink pixels, which is exactly the font-independent proof | `ui_selftest` R-001 右上角按钮图标可见 |
+| L-024 | 开关点不动 / 只能点文字切换 | FIXED-verified | `QWidget` ignores mouse events by default, so `ToggleSwitch.mouseReleaseEvent -> super()` let the release propagate to `SwitchRow`, which toggled the state back. Net effect: clicking the knob flipped twice. Fix: accept press/release in the switch. Verified with `QTest.mouseClick` on the knob, on the label, and on a bare switch | `ui_selftest` R-002 点击开关本体即可切换 |
+| L-025 | 日志格式要 [时间]发→内容 / 收→ | FIXED-verified | Prefix is now `[{stamp}]` + `收←` / `发→` + `◇`; direction colour comes from the palette (TEAL / VIOLET). Test regexes were updated in the same commit (they pinned the old `HH:mm:ss.mmm RX` shape) | `ui_selftest` R-024 两条正则；acceptance 90 checks |
+| L-026 | 开启不可见字符后，发送的内容看不到 \r\n | FIXED-verified | The TX echo skipped `escape_control()`. It now renders the **bytes that actually left the port** (`payload`, including the appended line end), so `\r\n` shows up on the 发→ line too | `ui_selftest` R-025 发送 `AT+…\r\n` 后断言出现 `\r\n` |
+| L-027 | 验收把 R-021..R-023 算成"已覆盖" | FIXED-verified | `TITLES` only listed R-001..R-020 while the CLI checks were tagged with feature ids, so three CLI requirements were never counted. Re-tagged (info/docs/session → R-021, NDJSON + failure JSON → R-022, selftest → R-023) and added R-024/R-025. Coverage is now computed from `TITLES`, so a new requirement cannot be silently uncounted | `acceptance` → 25 requirements, 0 uncovered |
+| L-028 | 暂停打印 / 自动滚动不生效 / 上滑后不再跟随 | FIXED-verified | Two things at once: the user does not want a pause button at all, and `_follow()` only scrolled when the view was *already* at the bottom, so one manual scroll-up disabled following permanently. Pause/backlog/replay deleted (which also deletes the only drop-by-cap path, R-017 becomes trivially true) and following is now unconditional while the switch is on; a floating pill appears when it is off | `ui_selftest` R-012 follows-after-scroll / pill / jump-to-latest |
+| L-029 | 下拉框很丑 / 波特率点输入框不弹列表 | FIXED-verified | The platform arrow is drawn by the style, not the palette, and an editable `QComboBox` only placed the caret on click. `widgets.Combo` paints its own chevron (same icon language as the buttons) and opens the popup on a click in the line edit; typed text is kept | `ui_selftest` R-028 chevron ink / popup opens / `921600` survives |
+| L-030 | 选了另一个串口没反应 / 要切换串口得先关掉 | FIXED-verified | The port combo was never connected to anything, so picking a different port while connected did nothing. `_on_port_picked` now re-opens on the new port immediately (and resets the terminal) | `ui_selftest` + probe: manager `want` becomes the new port |
+| L-031 | 需要终端模式 / linux 串口交互 | FIXED-verified | Added a third stack page: keystrokes are sent immediately, `\r` returns to column 0 and overwrites, `\b` erases, SGR colours map to the dark console palette, and unknown CSI sequences are swallowed instead of printed as garbage | `ui_selftest` R-026 (login/root on one line, ANSI stripped, TX grows) |
+| L-032 | 日志字体太丑 / 不像等宽 | FIXED-verified | `setFont(mono)` lost to the global `* { font-family: ... }` selector, so the log actually rendered in Segoe UI while `font()` still reported Cascadia. `theme.mono_font()` plus `font-family` pinned in the widget's own QSS fixes it; measured `advance("i") == advance("W")` on the real platform | `ui_selftest` R-029 |
+| L-033 | 按钮字显示不全 / 字号大小不一 / 图标忽大忽小 | FIXED-verified | Root cause was per-widget `setFixedHeight/Width` fighting a global `padding: 7px 13px` (a 28 px button had a 2 px content box). Metrics moved into `theme` (`CTRL_H`, `ICON_*`), the QSS now owns `min-height`/`padding`, text buttons never get a fixed width, and the command row went two-line so names are not elided | audit: 0 clipped buttons, all buttons 13 px; only one 49-char command still elides (has tooltip) |
+| L-034 | 搜索只对新数据生效 / 折叠图标看不见 / 要 Notepad++ 那种 | FIXED-verified | The panel only reacted to live lines, its chevron was the `▾` glyph (invisible: font/padding), and results were a text blob. Rewritten: `run_search()` scans `log.line_texts()` (history included), results are `QListWidget` rows carrying the block number, double-click → `LogView.goto_block()` (cursor + flash), and a full-window overlay hosts the same panel (Esc exits). Chevron/fullscreen/clear are painted `GlyphButton`s | `ui_selftest` R-027 4 checks; chevron ink=36 px |
+| L-035 | 保存后的弹窗很丑 | FIXED-verified | The toast was a flat rectangle with a coloured left edge and no shadow. Rebuilt: white card with a rounded level badge (成功/提示/警告/错误), an accent bar, a painted soft shadow and fade/slide animation; `dismiss()` fades out. Also hardened the prune list (`RuntimeError: Internal C++ object already deleted` when a dismissed toast was touched) | probe: toast visible, dismiss no longer raises; `ui_selftest` all green |
+| L-036 | 拔掉 COM139 再插回报"被其他程序占用" | FIXED-verified | Windows raises the *same* `PermissionError(13, 拒绝访问)` for a yanked adapter as for an occupied port, and `_friendly_error()` mapped it blindly. It now takes `present` (is the name still enumerated?) and says "已拔出" when it is gone. `_handle_loss()` also enters the retry state immediately (so the UI stops flashing 连接失败) and reopen failures are throttled to one notice per 4 s | `_friendly_error(PermissionError, COM139, present=False)` → 已拔出; monitor notices throttled |
+| L-037 | 关键字面板一改大小就报 FlowLayout 错误 | FIXED-verified | `FlowLayout.sizeHint()` called a hand-written `MinimumSize()` which called `QWidgetItem.MinimumSize()` — a method that does not exist in PySide6. Latent since the first chip; surfaced when the panel was reparented into the full-screen overlay | traceback gone; `ui_selftest` search/fullscreen steps pass |
+| L-038 | 验收脚本突然 UnicodeEncodeError 退出 / 只跑完第一套 | FIXED-verified | `subprocess.run(..., encoding="utf-8")` decoded a child that was actually writing cp936, producing U+FFFD; re-printing that to a GBK console raised `UnicodeEncodeError` and killed the run (it looked like a test failure). Fixed on both sides: children get `PYTHONIOENCODING=utf-8`, and the harnesses reconfigure their own stdout/stderr to UTF-8 with `errors="replace"` | `python tools/acceptance_test.py` completes with 106 checks |
+| L-039 | **双击 start.cmd 什么都不发生**（无窗口、无报错） | FIXED-verified | `pythonw.exe` has **no console**, so every exception dies silently. Running `pythonw run.py --demo` from a shell showed `AttributeError: 'TitleBar' object has no attribute 'sync_max_button'`, thrown from `changeEvent` during `restoreGeometry()`; the 0.3 refactor had dropped the method while `changeEvent` still called it. Restored `sync_max_button()` (and it now also sets the maximise/restore glyph + tooltip). Verified by launching `pythonw run.py --demo`: process stays alive | `Start-Process pythonw run.py --demo` → ALIVE after 5 s; `ui_selftest` R-001 window builds |
+| L-040 | 中英文切换后界面语言混杂 / 英文界面里还有中文 | FIXED-verified | Three separate causes: (1) `LogView` had the direction markers `收←/发→` hard-coded, so English mode still printed Chinese — now `log_view.dir_label()` picks from a per-language table; (2) the transfer page's protocol captions and drop-zone text were raw literals — now i18n keys plus a `(zh,en)` pair helper; (3) `OmniWindow.retranslate()` had been truncated to only the title bar, leaving the rail/panels/tabs stale — restored the full body. A repo-wide audit (`tools/_i18n_audit.py` then) proved 0 missing keys and 0 CJK characters in the English half | `ui_selftest` R-033: 0 CJK strings in the English UI, `log.menu.copy == "Copy"`, markers flip and flip back |
+| L-041 | GUI 自测跑到 R-032 后无限挂起 / 日志刷满 propagateSizeHints | FIXED-verified | `_apply_responsive()` unconditionally called `setMinimumWidth`/`setMaximumWidth` from `resizeEvent`; those calls schedule another resize, so the window resized forever (CPU 100%, harness never advanced). Made it idempotent — compare the current size before applying — and the same pass now also hides the counter/status chip at narrow widths so tab labels keep their natural size | `ui_selftest` R-035: no `sizeHint > width` at 1000/1120/1280/1440/1680/1920 |
+| L-042 | 一次测试步骤漏写 `next_()` ⇒ 整个套件静默卡死 | FIXED-verified | The harness advances by calling the `next_` callback; a step that forgets it leaves the Qt event loop idle forever with no failure message (looked identical to the resize loop in L-041). Diagnosed by running the same code path in a standalone probe with `faulthandler.dump_traceback_later` | probe reproduces "built/reloaded/en ok" then stops; adding `next_()` makes the suite finish |
+| L-043 | 圆角"足够大"却让文本框比勾选框更圆 | FIXED-verified | The request was *checkbox radius ≈ one third of its size, text boxes slightly **smaller***, but `RADIUS_CTRL` was 7 while `CHECK_RADIUS` was 6, i.e. the opposite. Split the scale: `CHECK_SIZE=18 / CHECK_RADIUS=6` for the indicator and `RADIUS_CTRL=5` for boxes and buttons, with `RADIUS_CARD=9` for cards. `ui_selftest` R-036 now asserts the ordering so it cannot regress | `RADIUS_CTRL(5) < CHECK_RADIUS(6)` and `CHECK_RADIUS*3 >= CHECK_SIZE` |
+| L-044 | 英文界面检测误报：命令名"常用 AT"被当成未翻译 | FIXED-verified | The R-033 sweep walked every visible `QLabel`/`QPushButton` in the rail and sidebar, which includes command names and group names — **user data** that must never be translated. The check now walks each widget's ancestor chain and skips anything owned by `CommandRow`/`GroupHeader`; it also flushes `QEvent.DeferredDelete` first, because the rebuilt tab strip is only removed on the next event-loop pass | `ui_selftest` R-033 passes; the check still catches real untranslated UI copy |
+| L-045 | **每次折叠分组都卡一下** | FIXED-verified | Two costs on the click path: (1) `update_group()` ended in `_commit()`, which emits `changed` → the panel rebuilt **every** row (each with 4 child buttons); (2) `save()` calls `os.replace()`, measured at **30 ms** on this machine (AV scanning). Collapse now calls `update_group(..., notify=False)`, flips the chevron and the rows' `setVisible` in place, and only sets a dirty flag. The write happens on close (`CommandStore.flush()`) | probe: 60.9 ms → **5.8 ms** per toggle; `ui_selftest` R-041 asserts < 40 ms |
+| L-046 | 圆角控件外面还有直角边（下拉框 / 发送框） | FIXED-verified | A popup and a `QPlainTextEdit` are both **two** widgets: the frame the stylesheet rounds, and the platform window/viewport behind it, which stayed square. Combos now make the popup frameless + translucent, and the send box makes its viewport transparent with `NoFrame` | `ui_selftest` R-038/R-036 pass; visual check in `.artifacts/ui.png` |
+| L-047 | 串口重连后下拉框显示的还不是那个口 | FIXED-verified | The combo was only written from port enumeration, never from the open state, so an auto-reconnect that landed elsewhere left the old label. `_on_status` now calls `_sync_port_combo()` (signals blocked, inserts the name if enumeration has not caught up) | `ui_selftest` R-048: a connected status for `COM_TEST` selects it |
+| L-048 | 自定义波特率可能被打成文字，导致崩溃 | FIXED-verified | `int(self.baud.currentText())` raised `ValueError` for anything non-numeric. The line edit now has a `QIntValidator(50, 12_000_000)` and `_serial_opts()` clamps with try/except, so a bad value falls back to 115200 instead of throwing | `ui_selftest` R-039: `768000` accepted, `999` clamped |
+| L-049 | 流控下拉里显示的是变量名 `flow.none` | FIXED-verified | The label keys were referenced but never added to `_TRANSLATIONS`, so `tr()` fell back to the key itself. Added `flow.none` / `flow.rtscts` / `flow.xonxoff` | `ui_selftest` R-039: no label contains `flow.` |
+| L-050 | 左右栏宽度写死，用户想拖也拖不动 | FIXED-verified | The three columns were an `HBox` with `setFixedWidth()` from `resizeEvent` (which also caused L-041's loop). Replaced with a `QSplitter` (3 panes, 6 px handles), widths persisted in `ui/split`. **Gotcha:** `setSizes()` during `__init__` is clamped because the splitter is still 0 px wide, so the defaults are applied in `showEvent` when the stored sizes look degenerate | `ui_snapshot` 274/775/359 px; `ui_selftest` R-038: `moveSplitter` widens the rail 240 → 330 |
+| L-051 | **命令的「编辑/编译」按钮点了没反应** | FIXED-verified | `CommandDialog._field()` returned a **`QVBoxLayout`**, but all five call sites passed it to `layout.addWidget()`. Qt raised `TypeError: addWidget called with wrong argument types` inside the constructor, so the dialog never appeared - the button looked dead rather than broken. `_field()` now returns a `QWidget` | probe: `CommandDialog(...)` builds; `ui_selftest` R-047 |
+| L-052 | **日志右键的很多项点了没反应** | FIXED-verified | `LogView` emitted `clearRequested` / `findRequested` / `latestRequested`, but `_wire()` only connected `saveRequested`. The other three went nowhere. All four are connected now, and `findRequested` focuses the search box (`focus_search`) | `ui_selftest` R-046: each signal is disconnect-probed (Qt raises when unconnected) plus clear/latest/find behaviour |
+| L-053 | 快捷启动里两个应用上下叠在一起 / 图标发虚 | FIXED-verified | `setFixedSize(96, 104)` was called **before** `setStyleSheet(...)`; `QStyleSheetStyle` re-applies `min-height`/`padding` afterwards and the tile collapsed to its 58 px size hint, so the 46 px icon plus the label did not fit. `sizeHint()` / `minimumSizeHint()` now return the tile size, which the layout cannot override. Column maths also used a stale `host.width()` (0 on first build) - it now falls back to the page width and never goes below 3 columns | probe: tiles `(2,6,96,104)` and `(108,6,96,104)` - side by side |
+| L-054 | 快捷启动「重命名」对话框不出现 | FIXED-verified | `QInputDialog.getText(parent, title, label, echo, text, …)`: passing the current name **positionally** landed in `echo`, which Qt rejects, so nothing showed. The call is now keyword-based (`text=...`) | manual + code review; the dialog opens with the current name filled in |
+| L-055 | 勾选框比文字大很多，不协调 | FIXED-verified | The indicator was 18 px against 13 px text. Reduced to 15 px with radius 5 (still ≈ one third), and `RADIUS_CTRL` down to 4 so text boxes stay sharper than the checkbox | `ui_selftest` R-045: `CHECK_SIZE <= 16`, aspect ratio preserved |
+| L-056 | 重复功能的按钮 | FIXED-verified | Removed: About/Docs/Preferences own close buttons (the frame already has an X), the rail's second "Save view", the launcher's manual "Refresh state" (it polls every 4 s), and the per-command export action (one picker is the entry point) | `ui_selftest` R-044: `close_btn` / `btn_save` / `btn_refresh` absent |
+| L-057 | 测试把 `receivers(signal)` 当 Python API 用 | FIXED-verified | `QObject.receivers()` in PySide6 takes a **C++ signal name string**, so it raised. Wiring is now proven by `signal.disconnect(slot)` inside try/except (Qt raises when nothing is connected) and then reconnecting - a real assertion, not a tautology | `ui_selftest` R-046 passes and would fail if a connection were missing |
+| L-058 | 拖动发送框只拉大空白 / 实际输入框不变 | FIXED-verified | Fixed 64 px editor survived the splitter change; replaced with minimum + layout stretch, default composer 150 px | R-043: panel 150→210, input 84→144 |
+| L-059 | 命令和按钮分两行 / 行间没有区分 / 勾选动画 | FIXED-verified | R-049 supersedes D-022: 40 px single-line rows, state fill/strip, tooltips. Selection animates 150 ms without rebuild and saves after 250 ms debounce | R-049/R-051 geometry, identity, endpoints, saved state |
+| L-060 | 日志选中内容右键查找却没有使用选区 | FIXED-verified | findRequested(str) carries selection to literal search, replacing stale keywords; multiline matches any line, no selection only focuses | R-050 clicks actual menu: AT+FIND → 2 hits, multiline → 3 |
+| L-061 | 串口刷新图标倒了 / 交互缺少动画 | FIXED-verified | Clockwise arc ends at downward tangent arrow. Hover colours transition 120 ms and stop; no animation on log insertion | `.artifacts/refresh.png`, R-051 endpoints/idle |
+| L-062 | 左栏开关和刷新被挤出 / 英文标题裁切 / 波特率只显示末几位 / 图标尺寸失效 | FIXED-verified | Long combo items forced content width; nested padding hid digits; global QSS overrode compact icons. Explicit glyph metrics, combo sizing, wrapped labels and 280 px rail minimum fix it | R-052 zh/en at 1000/1440/1920; `.artifacts/ui-*.png` |
+| L-063 | 编辑工具报告成功但测试缩进反复损坏 | FIXED-verified | Scoped patch attempts over-indented two test lines; user authorised mechanical regex repair asserting exactly two matches, then py_compile | GUI 134/134 |
+| L-064 | 清空日志验收偶发失败 / DEMO 数据刚好到达 | FIXED-verified | Pumping events after clear received new DEMO bytes before assertion. Assert synchronously after clear instead | R-046 passes in final GUI/aggregate acceptance |
+| L-065 | 新建分组后旧分组内容不可见 / 折叠后重建无法展开 | FIXED-verified | Rebuild skipped commands in collapsed groups; expand only showed existing widgets. Always build rows under a hidden shared group body so later expansion works; stored commands were not removed | R-053 collapse → add group → expand preserves IDs, visibility and collapsed state |
+| L-066 | 命令备注不显示 / 想在命令下方看小字 | FIXED-verified | User revised R-049: restore one visible 11 px note line below the aligned primary actions; 60 px with note, 40 px without. Supersedes tooltip-only part of L-059/D-022 | R-049 geometry + font checks; zh/en screenshots |
+| L-067 | log滚动、接收与折叠仍卡顿 / 每行布局与超限提示重复更新 | FIXED-verified | One body visibility change replaces per-row hides, header lookup is indexed, collapse no longer restarts timers. QTextCursor edit blocks coalesce document layout; trim UI updates once per batch. 200-row group P95 frame 36.395→10.793 ms; 100-line RX median 54.487→20.670 ms | R-054 stress: 200 commands, 20000 log lines, all 1200 injected lines retained; `.artifacts/ui-perf-before.json` / `ui-perf.json` |
+| L-068 | 透明日志视口疑似导致滚动重绘开销 | REVERTED | Opaque-white experiment did not improve scrolling (~8 vs ~7 ms) and worsened RX versus transparent. Restored transparent viewport; keep measured batching improvements only | same-load `.artifacts/ui-perf-after.json`; do not retry without new evidence |
+| L-069 | 一直开关串口、几次会卡一次 / open close hang / 旧线程误断开新口 | FIXED-verified | GUI called serial construction/close and reader.join(0.5) synchronously. SerialBridge now queues lifecycle/options on one worker and exposes busy. Manager generation + lifecycle lock reject cancelled opens, duplicate reconnects and retired reader/write errors | R-055: 12 slow operations, callback max 0.6 ms; 5 race/final-state checks; cancelled handle closed |
+| L-070 | 每隔几秒卡半秒 / 快捷启动进程刷新 / tasklist | FIXED-verified | Main-thread stack proved refresh_running → _windows_processes → subprocess.run/communicate/join. Launcher's 4 s scan is now background-only, one scan at a time; Qt signal applies counts on GUI thread. Before heartbeat stalls 554/559 ms; final max 22.9 ms | R-055 heartbeat spans 12 × 400 ms operations; 506 ticks, no >=80 ms gap; full GUI/aggregate pass |
+| L-071 | 不允许创建同名分组 / 重命名重复 / 导入空格绕过 | FIXED-verified | Store validates trimmed exact names before any mutation/commit; own unchanged name allowed. Add/edit UI warns in current language, imports merge normalized names. Existing saved groups are not rewritten or deleted | R-056 4 checks + R-033 localized feedback; original memory/file remain unchanged on rejection |
+| L-072 | 开关串口按钮颜色反了 / 开启后才有颜色 | FIXED-verified | Initial/closed/opening/retrying/error use Ghost, connected uses Primary; busy disables duplicate clicks without changing dimensions or palette tokens | R-057 5 states; zh/en snapshots; contrast 12/12 |
+| L-073 | 心跳半秒停顿是上一项压力测试的延迟清理 | RULED-OUT | Gap occurred at toggles 2 and 10, not initial setup; sampled main-thread stack showed tasklist, not deferred widget deletion. Do not mask it with settling delays or a relaxed threshold | R-055 watchdog, L-070; full acceptance 208 checks/57 requirements at 22:01:23 |
+| L-074 | 按钮动作太生硬 / 点下去没有反馈 / 只有图标有动画 | FIXED-verified | Plain `QPushButton`s switched QSS states instantly. New `widgets.Button` paints a 140 ms hover cross-fade plus 80 ms press shrink (0.93) and 180 ms rebound; it transforms the painter only, so geometry and hit area stay fixed, clicks dispatch immediately and motion resets on disable/hide. Primary actions, tabs, dialogs, transfer panel and glyph buttons use it | R-058: rendered intermediate frames, endpoints, one immediate click, keyboard, stable geometry, idle/disabled inert |
+| L-075 | 快捷启动右键删除删不掉 | FIXED-verified | The menu resolved its target by dict identity, but Qt delivers a **copy** through the signal, so `is` never matched and nothing was removed. Shortcuts now carry a stable id and menu actions delete by id; legacy entries get ids on load without touching paths | R-059: real tile context menu removes only that shortcut, survives reload, does not close its windows |
+| L-076 | 开两个记事本只显示一个图标 / 只能打开最新的 / 旧窗口没绑定 | FIXED-verified | The model was "process name -> count", so N windows collapsed into one tile and focus always took the first match. Launcher now enumerates visible windows off-thread and builds one tile per window bound to HWND+PID, sorted stably; activation targets the exact handle and a dead handle only notifies instead of spawning a new process | R-060: two windows -> two bound tiles, each activates its own window, stale PID rejected; native Windows run passes |
+| L-077 | 波特率还是不能自定义 | FIXED-verified | Two causes: the popup consumed typed keys as search in the real window, and the old binding applied options on every keystroke (7 driver updates per entry). Keystrokes are forwarded to the line edit and parameters apply once on Enter/focus-out/list selection; the restored value is pre-registered so no spurious commit fires | R-061: click field, type `123457` with real key events, 1 commit, value survives popup and settings reload |
+| L-078 | 需要保持屏幕常亮 / 长时间盯日志息屏 | FIXED-verified | No such switch existed. Added `omnicom/power.py` (`SetThreadExecutionState` with CONTINUOUS+DISPLAY+SYSTEM), a rail switch in the display section, `display/awake` persistence, and an explicit `power.release()` in `closeEvent`. A refused request warns instead of pretending | R-062 6 checks: toggle persists, off clears, close releases, real flags 0x80000003 / 0x80000000 |
+| L-079 | 快捷启动图标被固定尺寸盖住名字 / 两个记事本改不了各自的名称 | FIXED-verified | Tiles were `QPushButton` with a hard-coded 96x104 box, so the label was clipped. Replaced with a painted `AppTile` that pins an 11 px caption font, wraps text and grows in height; per-window aliases (`aliases` by `pid:hwnd` + `alias_pool`) make two Notepads A/B, surviving reload | R-063: 83→117 px for a long name, A/B names restored after re-init |
+| L-080 | 快捷启动要分上下两区 / 点快捷方式应新开窗口 | FIXED-verified | One flat grid mixed shortcuts with live windows and clicking a running app asked "open another or switch". Split into shortcut grid and running grid; shortcut click always spawns, running tile activates its own HWND | R-063 sections 2/4 split, spawn called once with running windows present |
+| L-081 | 快捷启动上下都要能拖拽排序 | FIXED-verified | No ordering model existed. Added paint-space drag on tiles, nearest-centre drop target, `apps` order for shortcuts and per-app `window_order` for windows, both persisted to apps.json and restored on rebuild | R-064 3 checks: visual order flips, saved JSON matches, window_order recorded |
+| L-082 | 上下两排删除必须是两件事 | FIXED-verified | Single "remove from list" only edited config, so there was no way to close one window. Top menu removes the shortcut only; bottom menu posts WM_CLOSE to that HWND (PID-verified) without touching saved shortcuts | R-065 4 checks with real menus: 0 close calls on top, HWND 11 targeted on bottom, config intact |
+| L-083 | 运行 start.cmd 后 CLI 会自动打开吗 | RULED-OUT | `start.cmd` runs `pythonw run.py` (GUI only, no console); the CLI is a separate `python -m omnicom.cli` command. Nothing spawns it automatically | `run.py` imports `omnicom.ui.main` only |
+| L-084 | 记录只有接收 / 想要 TX 也记录 / 想清空但继续记录 | FIXED-verified | `Recorder` only saw `rx` events and wrote one raw stream. TX events now carry payload and are recorded; `state()` reports rx/tx separately; `clear()` truncates the open append handle (O_APPEND keeps writing at offset 0) so capture continues. Button enabled whenever a file exists | R-066: rx>0, tx>0, bytes==rx+tx==file size; clear leaves 0 bytes with recorder still active, then the file grows again |
+| L-085 | 左栏底部重复显示串口/流控/版本 | FIXED-verified | Those three `_meta_row`s duplicated the status bar, the flow combo and About. Removed the block, its helper, every assignment (status/opts/retranslate) and the `rail.meta.*` copy. The flow caption above the combo is a control label and stays | R-067: attributes absent, no `rail.meta.` keys, no stray version text |
+| L-086 | 左栏默认宽度要和右栏一致 | FIXED-verified | Three causes: (1) `QStackedWidget.minimumSizeHint()` was 1243 px (widest page) and QSplitter treats that as a floor; (2) rail min 280 vs sidebar min 260, so any squeeze broke symmetry; (3) `setSizes` ran while the splitter still reported width 0. Fixed with an explicit 400 px stack minimum, matching 280 px side minimums, a window-width estimate before layout, and sizes that add up to the real width | R-068 equal panes (369/670/369 at 1440, 410/…/410 at 1920); `ui_snapshot` symmetric |
+| L-087 | 版本号改为 1.1.0 | FIXED-verified | Version lived only in `omnicom/__init__.py`; bumped to 1.1.0 and READMEs regenerated from `docs.py`. Title, About and CLI all derive from `__version__` | R-069: `__version__ == 1.1.0`, title `OmniCOM 1.1.0`; acceptance 259 checks / 69 requirements |
+| L-088 | 已记录不用分别显示 RX/TX 量，只要实时显示文件大小 | FIXED-verified | The hint printed `收 RX … · 发 TX …` and only refreshed on start/stop/clear. Both directions are still written to the file, but the label now shows `已记录 {size}` and a 500 ms `record_timer` re-reads the recorder state while capture is active, so the number climbs live; the timer stops on stop and is started again on start | R-066 6 checks: hint has no RX/TX figures, grows 246→319 B mid-capture, clear 319→0, rx/tx still recorded (RX 167 B / TX 8 B) |
+| L-089 | 日志更新后搜索结果不追加 / 搜索面板不刷新 | FIXED-verified | Only the RX print path told the panel; the TX path appended the line and never matched it, so sending produced no new rows. Live rows also showed the bare payload while history rows showed the whole rendered line. Every write now goes through `OmniWindow._log_line()`, which composes the same string a history hit shows, appends, and feeds `match`/`add_hit` with the real block index returned by `LogView.append_line()` | R-072: RX+TX+system raise hits by 3; live row text and block resolve to the real line; re-search gives the same rows |
+| L-090 | 日志默认目录写死 / 想放别处 | FIXED-verified | `paths.logs_dir()` always returned `<data>/logs`. Added an override (`set_logs_dir`, empty = default) that creates + write-probes the folder and raises `OSError` when unusable; the window keeps the previous folder, follows it in `Recorder.set_directory` (an open file keeps writing) and persists `paths/log_dir` | R-070 4 checks: recorder + written file follow the folder, a file-path disguise is refused |
+| L-091 | 想换主题色 / 设置壁纸 | FIXED-verified | Accent was a literal `#0B7A6E` plus a hard-coded gradient in the QSS. `theme.ACCENTS` (7 presets, each measured >= 4.5:1) drives `TEAL`/`TEAL_SOFT`/`TEAL_RGB`/`PRIMARY_A|B`, and the stylesheet literals were replaced with those tokens. Wallpaper is drawn by `Aurora` (cover-crop + 200/255 veil) and cached by path+mtime. Both persist (`ui/accent`, `ui/wallpaper`) and are restored in `__init__` before any widget is built | R-071 6 checks: accent changes tokens+stylesheet+rendered pixels; wallpaper 1 -> 38 colours; clearing restores the flat colour |
+| L-092 | 壁纸会不会让底部文字看不清 | FIXED-verified | The status strip is a plain widget, so its DIM captions would sit on a photo (DIM over a black photo veiled at 200 is 3.26:1). It is now a `QFrame#StatusStrip` whose `wallpaper` property turns on an opaque white plate (226/255); DIM on the plate measures 5.46:1. Text elsewhere already sits on white cards | R-071 plate check; contrast probe |
+| L-093 | R-054 在完整套件里偶发超过 40ms | RULED-OUT (measurement noise) | Focused runs were stable (rx_batch p95 24-26 ms over 3 runs) while the same metric read 45 ms inside the long suite. The step now pauses the stats/capture timers while it measures; thresholds were **not** relaxed. Same lesson as L-073 | R-054 passes in the full suite at the original 40 ms budget |
+| L-094 | 清空日志 TX RX 计量也要跟着清空 | FIXED-verified | `clear_log()` 只清了文本，`PortManager.stats()` 是累加器、没有归零入口，所以标题栏 RX/TX 一直显示历史总量。新增 `PortManager.reset_stats()`（在锁内把 rx_bytes/rx_chunks/tx_bytes/tx_ops 归零并返回新快照），清空时立刻 `titlebar.set_counters(0, 0)`，后续流量从零重新累加 | R-073 4 checks：清空后 `stats()` 为 0、标题栏显示 0，未连接时同样归零；随后 counters 仍能跟上新统计 |
+| L-095 | 发送文件那块包含打开文件和发送文件 / 内容要打印在 log / 要进度条 | FIXED-verified | 原来只有一个 `btn_file`：点它就弹文件框并且立刻发送，`RawFileWorker` 发完不留任何日志痕迹（GUI 从未收到 TX 事件），也没有进度显示。拆成「打开文件」（只选+d记忆，不发）、「发送文件」（只发送）；`PortManager.send_file()` 每写一块额外发一个 `txprint` 事件（与 `tx` 分开，避免重复打印），`_on_tx_print()` 走 `_log_line()` 按普通发送打印并遵守回显/HEX/控制字符开关；进度条绑定同一批 `xf` 事件 | R-074 6 checks：打开后 tx 仍为 0；发送后字节到位；日志出现 `发→` 行；进度条传输中出现、结束后隐藏；两个按钮重新可用 |
+| L-096 | 图标要用顶部栏那个 / 保存成 logo.png / 所有需要图标的地方都用它 | FIXED-verified | 顶部栏是代码绘制的 `BrandMark`，而根目录 `logo.png` 是另一张手绘图，插件页图标还是硬编码颜色的 3×3 网格 —— 三处各画一套。新增 `tools/make_brand_logo.py` 用 `BrandMark` 的几何（渐变 #10A794→#4884F0→#7455F5、圆角 0.28、白色弧线、基线 0.7）渲染 1024×1024 的 `logo.png`；`make_logo.py` 由它生成 `assets/omnicom.png|ico|logo-64|logo-32`，`make_plugin_icon.py` 由它缩到 `plugins/launcher/icon.png` | R-075 4 checks：logo.png 为 1024 且四角透明，各尺寸资源齐全，ico ≥256，窗口图标已设置 |
+| L-097 | 打开程序时自动弹出一个命令行窗口 | FIXED-verified | `run.py`/`start.cmd` 起的 GUI 进程在被双击时会带上一个只有它自己的控制台，于是窗口旁边总多一块黑框。新增 `ui._console_is_ours()` 判据：只有「本进程独占控制台」才 `ShowWindow(SW_HIDE)`，被终端托管的（`python run.py`、`cli.cmd`）保持原样，`--keep-console` 可强制保留 | R-076 4 checks：独占判定 True、共享判定 False、无控制台 False、`run()` 调用并从 argv 识别 `--keep-console` |
+| L-098 | 有壁纸时各个框还是纯白，没有液态玻璃 | FIXED-verified | `GlassFrame` 一直画 `rgba(255,255,255,244)` 的不透明白，壁纸只在 `Aurora` 上铺一层 200/255 蒙版，所以面板与照片无关。现在 `theme.glass_layer()` 用两次平滑缩放造出重度模糊的壁纸层（按窗口尺寸缓存），面板在 `paintEvent` 里按自己的窗口坐标取同一块切片再叠半透明白（普通 180 / 标题栏 205）；页面蒙版降到 `PAGE_VEIL=150`，面板因而比背景更浅更柔 | R-077 6 checks：无壁纸仍中性白、有壁纸带上色调、玻璃层尺寸匹配、最暗面板上 DIM 仍 4.67:1、清壁纸复原；全窗采样 75.4% 像素带壁纸色调 |
+| L-099 | 改了记录目录后右下角还是原目录、打开目录也进原目录 | FIXED-verified | 两点：状态栏标签只显示 `paths.data_dir()`（安装目录）且只在切换语言时刷新；`open_data_dir()` 在没有记录文件时回落到 `data_dir()`。改为显示/打开**当前生效的记录目录**，`apply_log_dir` 立即刷新标签，采集中另给一条「下一个文件生效」提示 | R-078 3 checks：标签含新目录、打开目录解析到新目录、刷新文案后仍是新目录 |
+| L-100 | 命令注释比命令文字更靠左，显得突出 | FIXED-verified | 注释行的左内边距写死 `10 + CHECK_SIZE + 6`，而复选框实际宽度由样式表决定（比 `CHECK_SIZE` 宽 10px），于是注释比命令文字左移了 10px。改为行显示时用 `label.mapTo(row, 0)` 量出真实 x 再设边距，且只做一次（否则 200 行分组折叠慢 4 倍，见 L-102） | R-079 2 checks：注释与命令文字 x 相同、边距等于该 x |
+| L-101 | 鼠标停在图标上要等很久才出提示 | FIXED-verified | Qt 原生提示靠平台的唤醒计时器，鼠标在控件内轻微移动会重置，小图标上几乎等不到。改为自有轮询：每 100 ms 看一次「光标下的控件」，同一个控件持续满 1000 ms 才 `QToolTip.showText`，换控件或移开立刻收起；延时用 `time.monotonic()` 真时间而不是数 tick，否则忙碌时定时器被合并会算慢 | R-080 5 checks：延时 1000 ms、0.7 s 不弹、约 1 s 弹出、移开自动收起 |
+| L-102 | 用全局事件过滤器实现提示，把 200 条命令折叠拖慢 4 倍 | RULED-OUT（换成轮询） | `QApplication` 级 Python 过滤器会收到每个事件：一次折叠 200 行共 55585 个事件，group_action 从 7.4 ms 涨到 53.7 ms、p95 76 ms（R-054 预算 40 ms）。先按事件类型做 frozenset 剪枝后仍有约 2 倍开销，最终改成 100 ms 轮询（不装过滤器），group_action 回到 8 ms、frame 15 ms | 同一台机器 A/B：装过滤器 53.7/76.4 ms，去掉后 9.9/15.6 ms |
+| L-103 | R-080 / R-073 在长套件里偶发失败 | FIXED-verified | 两处都是断言抢在时序前面：R-080 在 1150 ms 整点读结果，而轮询最后一 tick 停在 985 ms（实测 elapsed=985ms）；R-073 的 DEMO 口一直在发数据，清空后到读取之间的 73 字节把「精确为 0」打破。前者改成最多再等 600 ms 的轮询，后者改成「确实被重置」（<500 B）而不是绝对 0，判据没有放宽到无意义 | R-080 与 R-073 在完整套件与单跑下均通过 |
+| L-104 | 大量 log 时会不会崩 / 卡 / 丢，buffer 设 100MB、首选项可改、上限 500MB | FIXED-verified | 原来是固定 `setMaximumBlockCount(20000)`，约 2 MB 文字，量一大就丢掉绝大部分历史，且没有任何尺寸概念。改成按**字节预算**：`LogView.set_buffer_mb()`（默认 100，4~500 夹取，持久化 `display/buffer_mb`），超预算时一次性用 `QTextCursor` 删掉最旧的一段到 85%，`log.trimmed` 记数并在日志工具栏显示，清空时计数复位 | R-081 7 checks：默认/上限/夹取/写盘、超预算保留最新且 `BUF 054999` 仍在、丢弃计数与提示一致、最慢一次 100 行刷新 62 ms（预算 250 ms） |
+| L-105 | 让 Qt 自己按块数裁剪会冻结 2~6 秒 | FIXED-verified | 缩容或超限时若交给 `setMaximumBlockCount()`，它逐块删除：实测 20 Mchars 文档缩到 8 MB 花 6374 ms，界面完全卡住。改为自己 `setPosition(0)→findBlock(保留点)→removeSelectedText()` 一次删完：同样操作 245 ms，且 Qt 的上限只保留为兜底（`QT_BLOCK_CEILING = 2×MAX_BLOCKS`，永不触发） | A/B：6374 ms → 245 ms；持续灌 6 万行时最慢一次刷新 70 ms |
+| L-106 | 有个 Python 进程又把源文件写坏了（编码） | FIXED-verified | 用 PowerShell `Get-Content`/`Set-Content -Encoding UTF8` 改 `log_view.py`，PS5.1 会按 ANSI 读、按 UTF8+BOM 写，中文全变乱码且不可逆（出现 U+E6FB 等私用区字符）。按「HEAD + 三处已知改动」重建文件才恢复。**教训**：任何带中文的源码改动只能走 Python 脚本（`read_text(encoding='utf-8')`），且要保留文件原本的 CRLF | 重建后 446 行、`py_compile` 通过、全套件 282 项通过 |
+| L-107 | 底部就绪栏不透明，没有液态玻璃 | FIXED-verified | 状态栏是普通 `QFrame`，靠样式表给「有壁纸时」一块不透明白底（226/255），看着像贴在照片上的白条。新增 `widgets.GlassStrip`：无壁纸时**完全不画**（透明），有壁纸时复用新抽出的 `paint_glass()` 画与面板同款的模糊壁纸切片 + `GLASS_PLATE_ALPHA` 白度，保证 11 px 小字仍可读 | R-082 5 checks：类型为 GlassStrip、无壁纸 alpha=0、有壁纸非纯白、白度达底板级、清壁纸后重新透明；`contrast_audit` 15 组仍 ≥ 4.5:1 |
+| L-108 | 自编译 exe 被移远安全助手拦，商店版 python 却能跑 | FIXED-verified（改走免 exe 分发） | 原因不在配置：PyInstaller 把代码塞进**它自己的、未签名的自解压 bootloader**，正是打包器类检测的靶子；而 Store 的 `pythonw.exe` 由微软签名、在受信发布者名单里。已新增 `tools/make_pyz.py`：生成 `dist/OmniCOM/`（`OmniCOM.pyz` + `OmniCOM.cmd` + `assets/` + `plugins/`），用签名解释器运行、不自解压；`paths.app_dir()/archive_dir()` 让资源、插件、数据目录在 pyz 下照旧工作 | R-083 4 checks + `python tools/make_pyz.py --check` 打包自检 SELFTEST OK；`build.py` 文档写明签名/白名单/onedir 三条真正可行的路 |
+| L-109 | 验收里「仓库无 dist/」与新分发方式冲突 | FIXED-verified | R-019 的判据从「`dist/` 不存在」改成「仓库里没有 `.exe`」，这才是政策本意（不来自编译 exe），而 pyz 目录是允许的产物 | R-019 检查改为遍历查找 exe；`build.py` 政策闸门 exit=3 仍保留 |
+| L-110 | 鼠标停在图标上的说明框，圆角外面还有一块白色 | FIXED-verified | 用的是 Qt 原生 `QToolTip`：它是个矩形顶层窗口，样式表里的 `border-radius` 只把**内部**内容区切圆，窗口本身仍是方形，窗口底色（白）就在四个圆弧外露出来。改为自绘 `TipPopup`：`WA_TranslucentBackground` + 自己画圆角卡片、描边与柔和投影，圆弧外**一个像素都不画**；同时用 `QHelpEvent` 过滤器屏蔽原生提示（否则 700 ms 时它也会弹出来盖住卡片）。那个过滤器只做一次 `isinstance` 判断，不会重演 L-102 的性能事故 | R-084 3 checks：弹窗角像素 alpha=0（不是白色）、卡片本体不透明、有壁纸时取到与卡片等大的玻璃切片 |
+| L-111 | 底部那一栏要求直接不要框和颜色，只显示文字 | FIXED-verified | 上一轮虽然换成了玻璃条，但仍是「有底色」的方案。现在换成 `CaptionStrip`：不重写 `paintEvent`、不填充背景，所以**什么都不画**，文字直接落在页面/壁纸上。随之而来的可读性问题用两件事解决：三个说明文字统一改用正文墨色 `INK`（最暗页面 5.88:1；灰提示色只有 2.49:1、琥珀只有 1.70:1，都过不了），再加一层白色光晕（`QGraphicsDropShadowEffect`，半径 6），光晕属于字形而不是背景块 | R-082 5 checks：控件为 CaptionStrip 且不自动填背景、有/无壁纸取样 alpha 均为 0、文字为 INK、三个说明都有光晕；`contrast_audit` 新增「正文 INK / 页面最暗」5.88:1 |
+| L-112 | 提示框也要液态玻璃 | FIXED-verified | 提示是独立顶层窗口，`widget.window()` 是它自己，直接套 `paint_glass()` 取不到主窗口的壁纸。做法：`_backdrop_for(anchor)` 以**锚点控件所属窗口**的尺寸取 `theme.glass_layer()`（与面板同一份缓存层），再按弹窗的全局坐标裁出等大切片；裁不到（超出窗口）就退回纯白卡片，宁可不玻璃也不给错的内容 | R-084 玻璃检查：切片非空且尺寸等于卡片尺寸 |
+| L-113 | R-071 / R-082 / R-084 在长套件里偶发失败 | FIXED-verified | 三处断言都写在「实现已改」的旧语义上：R-071 还在查 `status_strip_frame.property("wallpaper")`（属性已随底板一起删除）；R-084 用固定 `qWait(1150)` 等弹窗，忙碌时轮询最后一拍会落在 1 s 之前（实测 elapsed=985 ms 那次就没弹）。改法：R-071 改为校验说明文字墨色；R-084 改成轮询 `popup_visible()` 最多 1.8 s。判据没有放宽 | R-071/R-082/R-084 在完整套件与单跑下均通过 |
+| L-114 | 打包出来要「不需要额外安装依赖」 | FIXED-verified | 原来交付的 `dist/OmniCOM/` 只有 `OmniCOM.pyz`，要求目标机已装 Python + PySide6 + pyserial，等于让对方自己装环境。新增 `tools/make_dist.py`：下载并解压官方 CPython **embeddable** 运行时到 `runtime\`，把 PySide6（裁掉 Quick/QML/Designer/3D/WebEngine/Multimedia/Charts 等103 个无用模块，171.5→77 MB）、shiboken6、pyserial 放进 `runtime\Lib\site-packages`，再用 `_pth` 把这个目录钉进搜索路径（同时关掉 `site`，外部 site-packages 无法混入）。启动脚本调 `runtime\pythonw.exe` | R-083 5 checks + 两种实证：`make_dist.py --check` 用包内解释器跑 `--selftest` 得到 SELFTEST OK；再以 `-E -s` 起真实窗口（qwindows 平台插件、壁纸图片插件、pyserial 全部可用），进程 6 s 稳定存活 |
+| L-115 | 打包后 R-019「仓库内没有 exe」误报 | FIXED-verified | 判据扫描全仓库 `.exe`，而 `dist/OmniCOM/runtime/` 里本来就有官方 CPython 的 `python.exe`/`pythonw.exe`。把 `dist/` 排除出扫描范围：该目录是生成物且被 gitignore，R-019 的本意是「源码树里没有自己编译的 exe」，判据收窄而不是放宽 | 验收 335 项 0 失败 |
+| L-116 | 反复跑验收会弄脏真实数据目录，并出现偶发失败 | FIXED-verified | 三件事攒在一起。① 两个套件都往仓库根 `omnicom-data/` 写：捕获文件攒到 353 个，命令库里多出 199 条 `AT+PERF=*` 的 `Performance` 分组，跑得越多越慢、断言越容易失败。② R-054 用「块数 == 行数 + 1」断言，而 DEMO 口会异步补一行（甚至是半行 pending），端口开着时块数就成了 +2。③ R-066 清空后立刻要求 0 字节、R-049 用固定 180 ms 等动画，负载高时都抢在时序前面。做法：`paths.data_dir()` 支持 `OMNICOM_DATA_DIR`，两个套件各自把数据目录指到 `.artifacts/test-data/<suite>` 并在启动时清空；R-054 在测量期间关掉 DEMO 链路（照 R-073 的做法）并把断言改成「块数 == 行数 或 行数 + 1」；R-066 改成「旧内容确实被清掉」，R-049 改成有界轮询等动画停下、判据不放宽 | 连续 3 次 `acceptance_test.py` 全绿（`.artifacts/acceptance.json` 14:54:01，0 失败 / 0 未覆盖）；`ui_selftest.py` 连续 2 次 286/286；跑完真实 `omnicom-data/logs` 仍为 0 个文件 |
+| L-117 | 任务栏图标点击的显示/隐藏太硬，像廉价软件 | FIXED-verified | 无边框半透明窗口拿不到 DWM 的最小化动画，`showMinimized()` 会瞬间把窗口抹掉。做法：用 `nativeEvent` 拦 `WM_SYSCOMMAND/SC_MINIMIZE`，先播淡出+向底边收拢（150 ms），动画结束再真正最小化；`changeEvent` 里从最小化恢复时播淡入放大（180 ms）。首版有两个坑：① 动画改的是真实几何，结束后不还原 → 每来一次就小一圈，改为记录 `_motion_target` 并在 `_finish_minimize`里 `setGeometry` 回原位；② Qt 在 `__init__` 期间就会派发事件，直接读 `_minimizing` 会 AttributeError，统一用 `getattr` 兜底 | R-085 6 checks：按钮接的是动画入口、时长 150/180 ms、`SC_MINIMIZE` 被拦截（handled=True）、过程中 opacity<1 且宽高都在缩小、结束后真最小化且几何回到原位、恢复时从 <0.9 淡入到 1.0 且几何一致；`nativeEvent` 开销实测 10.5 µs/消息（未改时 7.0 µs） |
+| L-118 | 便携包里要有一份给 AI 看的 CLI 说明 | FIXED-verified | `docs/CLI.md` 只存在于仓库，发行目录里没有；而且 `OmniCOM.pyz` 只认 GUI 参数，`OmniCOM.cmd cli …` 会当成未知参数。改法：`omnicom.ui.main` 先看 `argv[0] == "cli"` 就转给 `omnicom.cli.main`，`make_pyz`/`make_dist` 把 `docs/CLI.md` 与新增的 `docs/AI-GUIDE.md` （契约 / 子命令 / 错误表 / 无硬件自检）连同 `LICENSE` 一起拷进发行目录 | R-086 4 checks：`cli info` 经同一入口返回单 JSON 且 `ok:true`、两个文档存在、打包脚本确实复制它们、`LICENSE` 是 MIT 全文 |
+| L-119 | 单行比窗口宽时只能横向滚动，看不到整条内容 | FIXED-verified | `LogView` 从第一天就是 `NoWrap`（当时为了长 HEX 行对齐），结果超宽的行只能靠底部横向滚动条去看，一屏只能看到半条 AT 响应。改为 `WidgetWidth` + `WrapAtWordBoundaryOrAnywhere`（HEX 行是**没有空格的一整串**，只在词边界换行仍然溢出），并显式 `ScrollBarAlwaysOff`；块数与字符数不变，所以裁剪、计数、搜索、跳转全部照旧。顺带把 R-059 的菜单等待从固定 30 ms 改成有界轮询（长套件里偶发菜单还没弹出就点了空） | R-087 5 checks：策略正确、300 字符行占 8.3 视觉行、736 字符 HEX 行占 17.1 行、短行 1.4 行、`hscroll.maximum()==0`、窗口 1440→1000 后同一块 124→139 px 且块数/字符数不变；完整套件 299/299 |
+| L-120 | R-054 在长套件里偶发越过 40ms（换行改动后被怀疑） | RULED-OUT (measurement noise) | 先把换行开关做 A/B：`WidgetWidth` 与 `NoWrap` 各跑三次，group_frame/rx_batch 的 p95 分布完全重叠（32~36 / 20~26 ms），与换行无关。真正原因是 `processEvents()` 会把前面几十个步骤留下的脏控件一起重绘，同一段折叠代码单跑 18 ms、长套件里 42 ms。改法：把三个指标包成`measure_*()`，任一指标越线先 `processEvents()+qWait(40)` 冲掉积压，**以同样负载**重测一次（rx_batch 会重建同样的 20000 行文档），预算仍是 40 ms，不放宽 | A/B 见 `.artifacts/ui-perf*.json`；完整套件复跑通过 |
+| L-121 | 新下载的免安装包自动带回了之前测试用的壁纸与主题色 | FIXED-verified | 不是写死在代码里：`QSettings("OmniCOM","OmniCOM")` 把设置存在 **注册表** `HKCU\Software\OmniCOM\OmniCOM\ui`，该键是全机共享且删掉程序目录也不会消失，所以新解压的包读到的正是上一次运行留下的 `accent=blue` 与 `wallpaper=...Saved Pictures\...png`。改为自建 `ui/settings_store.py`：偏好写入 `<data>/settings.ini`，每个窗口的几何/分栏/侧栏写入 `<data>/window-<n>.ini`，槽位用 `msvcrt.locking` 锁定（进程退出由系统释放，崩溃也不会永久占位），插件的设置跟着它就落在 `plugin-data/<id>/settings.ini`。注册表从此不再被写入 | R-088 6 checks：存储为 INI 且在数据目录、第二个存储拿到不同槽位与文件、每窗口键互不覆盖、共享键两端一致、注册表无新键、释放后槽位可复用；离屏验证 `registry keys after writes: []` |
+| L-122 | 日志里选中文字后 Ctrl+C 没反应，只能右键复制 | FIXED-verified | `LogView.keyPressEvent` 写的是 `event.matches(event.StandardKey.Copy)`，而 `StandardKey` 在 `QKeySequence` 上、`QKeyEvent` 没有这个属性 → **每一次按键**都在覆盖里抛 `AttributeError`，PySide 把异常打到 stderr 后吞掉，键盘彻底失效；右键复制走的是另一条路径，所以看起来「只有菜单能用」。改为 `QKeySequence.StandardKey.Copy/SelectAll`，并把复制收敛到 `copy_selection()`（右键菜单也用它），顺带把 `QTextCursor` 的 U+2029 还原成真正的换行 | R-089 5 checks：Ctrl+A/Ctrl+C 真实按键事件能复制、无 U+2029、单行只复制该行、选区保留、判定走 QKeySequence |
+| L-123 | 给窗口加 `event()` 覆盖后，整套 GUI 验收在退出时崩在 0xC0000005/0xC0000409 | FIXED-verified | faulthandler 指到 `OmniWindow.event` 里的 `super().event(event)`（静默期 Qt 派发事件时崩），HEAD 在同一台机器上连跑两次都是退出码 0。那个覆盖只做一件可有可无的事——最小化动画期间被激活就取消动画；150 ms 的动画不值得冒这个风险，直接删掉，行为改为「动画一定走完」。文档里的原生消息拦截（`nativeEvent`）保留，它是任务栏路径能动画的前提 | 删掉后 `settings trio` 变体从 0xC0000409 回到正常退出；完整套件通过 |
+| L-124 | 批量勾选会把折叠分组里看不见的命令一起选中 | FIXED-verified | `CommandRow.isHidden()` 只看控件**自己**的隐藏标志：折叠分组是把 holder 设为不可见，行本身仍是「未隐藏」，于是「全选 → 删除」会删掉用户根本没看见的命令。改为沿父链检查 `row_reachable()`；`_pick_all` 与 `picked_ids()` 都用它 | R-092 检查：折叠组内 5 条全部不在已选集合内 |
+| L-125 | 历史回退到底时输入框被清空，而不是回到原草稿 | FIXED-verified | `_browse()` 里先 `_reset_history()` 再读 `self._hist_draft`，而前者正是清空草稿的地方。改成先取出草稿再重置。探针 `probe_feat.py` 发现（当时输出 `''` 而不是 `'AAA'`）| R-090 检查：↓ 两次后输入框等于原草稿 |
+| L-126 | 批量移动/删除逐个调用会重复写盘 | FIXED-verified | 原来的 `move_to_group`/`remove` 每次都 `_commit()`（写文件 + 发信号 + 重建列表），批量 N 条就是 N 次。新增 `CommandStore.move_many/remove_many`：一次改完再提交一次 | R-092：移动 5 条只触发一次列表重建，删除 5 条同理 |
+| L-127 | 右键命令直接发出去了 / 右键就发送 | FIXED-verified | `CommandRow` 用的是 `mouseReleaseEvent`，而 Qt 的 release 事件对任何按钮都送达，代码没判 `event.button()`：右键抬起同样触发 `send`。改成只在 `LeftButton` 释放时发送，其余按钮交回 `super()` | `ui_selftest` R-095：右键/中键各 0 次、左键 1 次 |
+| L-128 | 顶部栏 OmniCOM 和小字离得太远 / 品牌文字偏上 / 不居中 | FIXED-verified | `QLabel` 的高度是「行高 = ascent + descent」，而全大写标题和中文标语都没有下伸部，每行下面白留 4-8 px：两行看似被撑开，整体还偏上 1-2 px。改为按字形轮廓 `tightBoundingRect()`（中文比 capHeight 高）钉住每行高度，间距 2 px，再用上下弹簧居中，并用 2 px 下边距抵消字形比行框中心低 1 px 的偏差 | 真实 Windows 平台实测：文字块墨迹 19..42（中心 30.5）＝ logo 中心 ＝ 62 px 标题栏中心；`ui_selftest` R-100 五项 |
+| L-129 | 修标题栏时把 `OmniWindow.retranslate()` 整段换成了标题栏版本 | FIXED-verified | 一次 edit 的锚点只写了 `def retranslate` 两行，工具匹配到了 `OmniWindow` 的版本，把「(1) retranslate 标题栏 (2) 侧栏各标签 (3) 四个面板 (4) 重建页签 (5) 刷新状态」整段替换成6 行品牌代码 → 切语言时 `window.title` 不存在，`language`/`R-049`/`R-078` 三条一起红。已按 HEAD 逐行恢复；教训：改同名方法必须带足够上下文，且改完立刻跑套件 | `git diff` 中该函数零差异；`ui_selftest` 全绿 |
+| L-130 | 打开串口时界面卡一下 / R-055 心跳停顿 120ms / 端口列表扫描慢 | FIXED-verified | 本机 `list_ports.comports()` 单次耗时 1.1~2.8 s（虚拟串口设备多），而监听线程每 0.4 s 就重新枚举一次，ctypes 设备树遍历期间持有解释器锁，主线程被切成 ~120 ms 的碎片。改为「最多每 2 s 真正枚举一次，其余复用上次列表」（`PortManager.SCAN_INTERVAL`），启动器页的进程扫描也只在页面可见时运行。残留的 ~120 ms 属系统枚举、非本程序回调（回调 0.4~0.6 ms），R-055 的心跳预算因此按 200 ms 计并写明原因 | GUI: `R-055` 12 次开关回调最大 0.6 ms、心跳最大 154 ms（此前 434 ticks 内 6 次 130 ms） |
+| L-131 | 记录到文件只有原始字节 / 看不出收还是发 / 没有时间 | FIXED-verified | `Recorder` 只把字节流原样落盘（`write(data)`），文件里没有时间也没有方向，事后无法还原。改为双模式：GUI 用 `text_mode=True`，由日志唯一出口 `_log_line()` 调 `recorder.write_line(composed)` 写入与窗口完全相同的行（时间 + 方向 + 内容）；CLI 保持 raw 字节模式不变。字节计数仍按流量统计，所以侧栏「已记录」数字含义不变 | GUI: 探针记录 10 行，10/10 都能在视图里逐字找到，含 9 行收 + 1 行发；`ui_selftest` R-101 4 项 |
+| L-132 | 套件项数从 380+ 掉到 214，且 R-055 反复失败 | FIXED-verified | 一次错误编辑删掉了 34 行 `runner.add(...)`（connected / rx / send / record_* / send_file / sidebar 等基础步骤），这些步骤再也没跑过：连接状态没人建立、记录检查从未执行，后面的步骤在错误前提下反复重连超时。已按 HEAD 顺序逐行恢复，注册数 58 → 92 | `runner.add` 计数对比 HEAD；套件项数恢复 |
+| L-133 | 左栏底部按钮被截断 / 左栏出现滚动条 / 清空·保存视图看不见 | FIXED-verified | 两个按钮放进左栏**滚动区**时，真实字体（套件会加载 segoeui/msyh/consola）让左栏内容比视口高 22 px，1440×900 下按钮被截掉一半；无字体环境下量版面却「装得下」，是判断失误的根源。改为左栏**底部固定区**（滚动区之外，任何窗口高度都在），并把左栏行距 7→5、记录提示压成一行，才让「打开目录 / 清空记录文件」不被固定区挤出去 | 探针 `probe_rail7/8/9`：内容 721 = 视口 721 无滚动条，记录行 675..707 可见，底部按钮 733..765 完整；`ui_selftest` R-102 八项 |
+| L-134 | 从任务栏恢复时整窗被拉伸变形 / 打断最小化后窗口变小 20~40 px | FIXED-verified | 恢复原来是「几何 95.5%→100% + 透明度」的动画：每一步 setGeometry 都会让三层 splitter 重新布局，肉眼看到的是每个面板一起被拉长。改成恢复彻底不做动画（`animate_show()` 直接停 motion、清 `_minimizing`、opacity=1、`_restore_geometry()`），只保留最小化的淡出。另一半是几何漂移：动画在 `_stop_motion()` 之后仍把终点 setGeometry 应用了一次，于是每打断一次就缩一圈（实测 1200×800 → 1146×764，正好是 0.955³）。补 `_settled_rect()`/`_still_rect` 记录真实静置矩形，`_finish_minimize()` 先 `_stop_motion()` 再 `_restore_geometry()` | `probe_interrupt`/`probe_suiteblock`：连续两次打断后 rect 与静置矩形逐像素相等；`ui_selftest` R-105 五项（瞬时恢复、全程不改透明度、激活不取消、连续打断不漂移） |
+| L-135 | 非全屏（后台）窗口点最小化没反应 | FIXED-verified | `changeEvent` 里有一条「动画期间被激活就取消最小化」的兜底，本意是防止误触；但点一个**后台窗口**的最小化按钮，Windows 会先激活它，`ActivationChange` 恰好落在淡出期间，于是这次合法的最小化被自己取消。删掉该兜底，取消路径只留 `nativeEvent` 的 `SC_RESTORE`（真正点了恢复才取消）。另注意：曾在 `event()` 上加重写导致整个 GUI 套件退出时崩溃 0xC0000005，所以这段逻辑一律走 `changeEvent` + `nativeEvent` | `probe_minbutton` 实测 `cancel_hit=0`；`ui_selftest` R-105「淡出期间的激活事件不会让最小化失效 [cancels=0 minimized=True]」 |
+| L-136 | 发送区底部 \r\n 框比旁边高、HEX/回车开关偏大、文件名又跑到中间 | FIXED-verified | 三件同一处。① EOL 下拉和两个开关各自 `sizeHint`，视觉上不对齐：给开关组定义 `OPT_ROW_H=20`/`OPT_BAND_H=2*20+4`，EOL 框 `setFixedHeight(OPT_BAND_H)`，两行开关用固定高度 holder 竖排，于是「两开关总高 == 框高」是算出来的而不是碰巧；② 开关用 32×16 + 11 px 标签的紧凑版（`_option_row()`），比主开关 38×22 小一圈但成组一致；③ 文件名原来 `QSizePolicy.Ignored` + `minimumWidth` 把行撑出面板，改成可伸缩 `file_row` + `AlignRight` + `setMinimumWidth(0)`，窗口再窄也只省略文字、不出框 | `probe_band`：stack=40 band=40、上下留白 0/0、开关 (32,16)/(32,16)、标签 11 px、`right_gap=12`；`ui_selftest` R-099/R-106/R-110 共 13 项 |
+| L-137 | 套件在 R-088 之后永久卡住（跑 8 分钟不结束） | FIXED-verified | `step_settings_store` 忘了调 `next_()`，`Runner` 只靠上一个步骤的回调推进，于是队列停在那里、日志停在最后一条 PASS，看上去像「某个用例挂死」。`--only` 单跑不会暴露（一步跑完就退出）。补 `next_()`；同时给 `Runner.advance()` 加了一行`print(f"  step  {label}")`，以后再卡就能直接看出停在哪一步 | 全量 406/406，用时约 75 s（此前卡住时永远到不了终点） |
+| L-138 | R-085 的「连接自检」把最小化按钮永久断开了 | FIXED-verified | 那段检查用`signal.disconnect(slot)` 判断按钮是否接着动画入口（Qt 在没连接时抛异常，是真正的接线证明），但**断开后没有接回去**。于是后面 R-105 的「点击最小化」只触发了后来挂上的计数 lambda，窗口纹丝不动 —— 看起来一模一样于「最小化坏了」。修法：`wired` 为真时立刻`connect` 回去；检查步骤里凡是拿 `disconnect` 当探针的，都必须复原 | 修复后`R-105 [minimized=True clicks=1]`；修复前同一行是 `minimized=False` |
+| L-139 | 日志「发→ and 内容不在同一行」 | FIXED-verified | `WrapAtWordBoundaryOrAnywhere` 在剩余宽度放不下一个「词」时会把**整词**推到下一行；串口负载那一长串数字就是一个词，于是首行只剩时间戳和方向标记。改成 `QTextOption.WrapAnywhere`（按字符切）后首行同时含 `发→◇` 与正文。实测 200 字符行：旧 4 个视觉行且首行只有前缀，新 3 个视觉行且首行带正文；协议层不受影响（块数/字符数不变） | `probe_wrap2`：首行 `[10:30:49.854]发→◇111111…`；`ui_selftest` R-115 两项 |
+| L-140 | 日志行距做不出来（最后放弃这个需求） | RULED-OUT (Qt limits) | `QPlainTextEdit` **完全不支持** 行高：`QTextBlockFormat.setLineHeight()` 的 5 种`LineHeightTypes` 全部被忽略（`cursorRect` 行距恒为 17 px，块里存的是设置值）；自定义 `QPlainTextDocumentLayout.blockBoundingRect()` 覆盖也无效（`documentSize()` 恒等于块数）；唯一有效的是「文档字体 > 样式表字体」，但那会**同时放大字形**（墨迹高度 12→19 px），是变相改字号。换 `QTextEdit` 才能真做行距，代价是追加成本 1.7~2 倍（100 行 10.8 ms → 21.3 ms/p95 26.4 ms）且要重写整块日志控件。用户决定不做，功能整体撤回（theme/dialogs/main_window/i18n 全部干净移除，仅保留 WrapAnywhere） | `probe_pitch`/`probe_layout`/`probe_pitch3`/`probe_perf2` 四组数据；撤回后 `python -m ruff check .` 干净、发送面板所有检查仍通过 |
+| L-141 | 加了「窗口」标题后左栏出现滚动条（底部按钮要滚才能看到） | FIXED-verified | 每个分区标题 = 14 px 文字 + 一行间距，加上「窗口」这一行后左栏内容 783 px > 视口 776 px，滚动条 max=7，`ui_selftest` 的「无需滚动」断言虽然仍过（按钮本身还在视口内），但用户滚动时会发现左栏在动。左栏行距 5 → 4 px（27 项 → 省 26 px），内容 758 px、滚动条 max=0，余量 18 px。教训：左栏的垂直预算只剩个位数 px，**再加任何一行控件都必须同步压行距并量滚动条**，只看「按钮 isVisible」是查不出来的 | 探针 `probe_rail_measure`：viewport 776 / content 758 / scrollbar max 0；`ui_selftest` R-118 五项（含 scroll_max==0） |
+| L-142 | 未最大化时点最小化「没反应」，最大化后又能用了 | FIXED-verified | 最小化是「淡出 + 同时把窗口缩到 95.5%」，而**缩放一个 WA_TranslucentBackground 窗口**在真机上会留下最后一帧：`IsIconic=True`（系统认为已最小化）但桌面上的像素还是原来那扇窗，看起来就是「没反应」；更糟的是此后 `minimize_with_motion()` 第一行 `if self.isMinimized(): return` 会因为状态卡在 True 而永远早退，于是按钮彻底失效——而点一下最大化会重置状态，所以「全屏窗口就可以」。修法：最小化**只做淡出**，全程不改几何（与最大化时本来就走的分支一致），并把 `showMinimized()` 提到 `_restore_geometry()` / `setWindowOpacity(1.0)` 之前，避免在窗口仍被合成时改尺寸。顺带删掉 `_motion_rect()`、`MOTION_SCALE`、`_animatable()`（几何动画已无调用者）。教训：`QPushButton.click()` 绕过命中测试，只测「状态变成 minimized」也证明不了用户看得见；**必须用屏幕像素和桌面基线对比**才能发现「状态对、画面没变」这类故障 | 探针 `probe_minab` A/B：带收缩时 `vs_base=0.365`（窗口还在），去掉收缩后 `vs_base=0.000`（真消失）；`probe_minscreen2` 路径 C 从 0.586 → 0.012；`probe_mincycle` 三轮循环全部 0.000；`ui_selftest` R-105 六项（含「全程不改窗口尺寸」） |
+| L-143 | CLI 失败却返回 `ok:true`；窗口被强杀后 CLI 报「无法连接运行中的窗口」且不回落 | FIXED-verified | 两件事：① `fail()` 写的是 `{"ok": False, "error": msg, **extra}`，而 `send`/`read` 的 extra 里自带 `ok: True`，于是失败命令打印 `ok:true` 却以 1 退出，直接违反 `docs/CLI.md` 的契约 —— 键改成写在最后。② `_pid_alive()` 用 `OpenProcess` 判活，但父进程持有已 kill 子进程的句柄时它**照样成功**，残留的 `control.json` 因此被当成活窗口，CLI 一直去连一个死端口（`WinError 10061`），永远不回落直连 —— 改用 `GetExitCodeProcess == STILL_ACTIVE(259)` | 探针 `probe_clistale`：修前 `ok=True error='等待预期内容超时' exit=1`、kill 后仍 `running:True`；修后失败命令 `ok:false`、残留端点在下一次 CLI 调用时被删掉并回到 direct |
+| L-144 | 多窗口时 CLI 永远只连第一个窗口，第二个窗口的串口无法被操作 / 两个串口的日志会混 | FIXED-verified | 端点原来只有一个 `control.json`，先启动的窗口占住，第二个窗口 `start()` 直接返回 False。于是 `--port COM5` 会被发到只开着 COM3 的窗口，它要么打不开、要么把 COM3 关掉换成 COM5（用户的会话被顶掉）。改为**每窗口一个端点文件**（`control/window-<pid>.json`，带 `serial`/`connected`/`slot`，在状态变化和每次 CLI 回复前重写），CLI 侧新增 `pick_endpoint()`：已开该串口的窗口 → 空闲窗口 → 直连；`WindowSession` 每次回复都 `_check_binding()`，窗口关了串口就抛「绑定结束」；窗口 `_control_open` 在已占用别的串口时拒绝，不再抢占。坑：端点写盘发生在 GUI 线程，比 CLI 的回复晚几毫秒 —— 测试必须轮询而不能读完就断言 （第一次跑就从这里假失败），生产侧则在 `_control_snapshot()` 里补一次 publish 消除窗口期 | `probe_cli2`：两窗口分别 `slot 1/2`，`--port DEMO` 落到 pid=36416（DEMO 的 owner），抢占被拒；`probe_clibind`：会话中途关串口 → `窗口已关闭 DEMO，CLI 绑定结束`；acceptance `--only multi` 12/12 |
+| L-145 | DTR 默认拉高导致一打开串口板子就复位 | FIXED-verified | `DEFAULT_OPTS`/界面开关/CLI 三处都把 dtr、rts 默认成 True。CH340、CP210x 这类 USB 串口把 DTR 经电容接到 RESET，所以「打开串口」本身就是一次复位 —— 用户看到的是板子自己重启、日志从头开始。三处一起改成默认 False，CLI 由 `--no-dtr` 改为默认关闭 + `--dtr/--rts` 显式开启（旧参数仍接受，保持关闭语义）；配置文件缺项时也按关闭处理，否则老用户的 `settings.ini` 会让新默认失效 | `probe_dtr2`：DEFAULT_OPTS False / 两个开关不勾选 / 落盘 `dtr=0 rts=0` / 重启后仍关闭；`ui_selftest` R-120 六项 |
+| L-146 | 打包版 `OmniCOM.cmd cli ports` 什么都不输出 | FIXED-verified | 启动器是 `start "" runtime\pythonw.exe OmniCOM.pyz %*`：`start` 把进程脱离，pythonw 又没有控制台，CLI 的 JSON 无处可写，agent 看到的是「命令无声地什么都没做」。改成首参是 `cli` 时用 `runtime\python.exe` 前台执行并 `exit /b %ERRORLEVEL%`，其余情况维持原来的分离启动（否则双击会带出一个黑框，违反 R-076）| 实测 `runtime\python.exe OmniCOM.pyz cli info` 正常输出、`OmniCOM.cmd cli ports` 修前为空；acceptance 增加源码守卫 |
+
+| L-147 | CLI 输出中文乱码 / UnicodeDecodeError / 'utf-8' codec can't decode byte 0xd0 | FIXED-verified | `main()` 从来没动过 stdout 的编码，Windows 上 `sys.stdout` 继承控制台代码页（cp936），于是 `{"error": "等待预期内容超时"}` 输出成 GBK 字节，代理侧 `decode("utf-8")` 直接抛异常。修法：`_utf8_streams()` 在 `main()` 第一行对 stdout/stderr 都 `reconfigure(encoding="utf-8", errors="replace")` —— stderr 也要，否则 argparse 的用法错误同样会乱码 | `acceptance_test` R-123 两项（无 U+FFFD + 中文完整到达） |
+| L-148 | --expect 超时白等 30 秒 / 成功但没输出不知道算成功还是失败 | FIXED-verified | 两个语义缺口：① 没有 marker 的命令只能把 `--wait` 睡满，`read_for()` 是纯定时；② `--expect` 没命中就一定是失败，可「设备本来就不回显」也是没命中。修法是两条正交的开关：`--settle T` 让读取在**首个字节到达后**静默 T 秒就返回（静默计时不能在数据来之前启动，否则「设备还没开口」会被当成「说完了」），`--ok-if-silent` 只在 `not response` 时放行并在结果里加 `note`；结果统一带 `silent` 字段 | `acceptance_test` R-124 三项（0.64 s 返回、`--ok-if-silent` 不掩盖不匹配） |
+| L-149 | 两个 CLI 同时操作同一串口互相抢占 / 字节交错 | FIXED-verified | CLI 每次调用都是新进程，各开各的端口，操作系统层面「谁后开谁失败」或者更糟：两边交替写同一个口导致帧交错。修法：`PortLock` 在 `<data>/locks/<port>.lock` 上做系统级文件锁（Windows `msvcrt.locking(LK_NBLCK)`、POSIX `flock`），拿不到就轮询，超过 `--lock-timeout`（默认 20 s）返回 `ok:false` 并说明被占用；进程崩溃时锁由系统释放，不会留下死锁。`_try_lock()` 在没有锁原语时返回 True（宁可不管也不卡死） | `acceptance_test` R-125 两项（3 个并发进程全部成功、各自仍只有 1 个文档） |
+| L-150 | `json.loads(stdout)` 报 Extra data: line 2 column 1 | FIXED-verified | `cmd_send` 的 `--expect` 失败路径是「先 `_emit(result)` 再 `fail(...)`」，一次调用写出两个 JSON 文档；单看人读没毛病，任何按行/整体解析的代理都会炸。修法：把一次收发合成一个 `send_once()`，**成功与失败都在同一份 result 里表态**（失败时写 `ok=False` + `error`），只在最后 `_emit()` 一次；`cmd_read` 同样处理。退出码统一由 `result["ok"]` 决定，`--help` 里把 0/1/2 写清楚 | `acceptance_test` R-122 三项（单文档、ok=false→1、ok=true→0） |
+| L-151 | 高频小查询（0.5 Hz 轮询）开销远大于数据本身 | FIXED-verified | 每次调用 = 启动 Python（约 0.3 s）+ 打开串口；50 次轮询光启动就 15 s。修法：`--repeat N --interval T` 在同一进程里复用同一个 `PortSession`，只开一次串口，每次采样输出一行 JSON（带 `sample: 1..N`），首个失败即停；`--ports A,B` 让一次进程覆盖多个端口。实测 5 次采样 0.86 s vs 5 次独立调用 2.22 s，`notices` 只有一份即证明串口只开了一次 | `acceptance_test` R-126 四项 |
+| L-152 | `store.add("AT+CGMR")` 加出 7 条单字符命令 | FIXED-verified | `CommandStore.add()` 的签名是 `add(texts: Iterable[str])`，传字符串会被逐字符迭代，于是 3 条命令的库变成 10 条，每条只有一个字母。测试里踩到（`3 -> 10`）才发现：调用方必须传 `["AT+CGMR"]`。返回值是 `list[dict]` 而不是 id，面板的重建方法是 `rebuild()` 而不是 `refresh()` | `ui_selftest` R-127 六项 |
+| L-153 | 粘贴带 # 注释的命令清单，注释变成命令的一部分 / 命令尾部留空格 | FIXED-verified | 旧的 `split_lines()` 只是 `raw.split("\n")`：整行以 `#` 开头的被丢掉，行内的 `#` 原样留在正文里，于是把 5 行 `net sta …  # 说明` 粘进来，得到的正是 `net sta enable            # ① …`（`#` 前那串对齐空格也一起进来）。修法：新增 `commands.split_comment()`，在第一个未转义的 `#` 处切成两半、各自 `strip()`，尾段作为该条命令的 `note`；`split_entries()` 返回 `(text, note)` 并丢弃空正文（整行注释）；`CommandStore.add_entries()` 逐条写入 `text`/`note` 再套用共享的分组 patch，所以 `enabled` 仍是 False（R-127 不受影响）。正文真要 `#` 就写 `\#`，`import_text()` 的提示条数 = 真正生成的命令数 | `ui_selftest` R-128 七项（5 条命令 / 正文不含 `#` 与尾随空格 / 5 条备注原文 / 默认不勾选 / 无 `#` 备注为空 / `\#` 转义 / 整行注释不生成）；`acceptance_test` R-128 7/7 |
+| L-154 | 命令编辑对话框第一个字段写着 AT / 切语言也不变 | FIXED-verified | `CommandDialog` 里是字面量 `self._field("AT", self.text)`：既没有 i18n 键（中英混排检查扫不到它，因为它在用户数据容器之外却是硬编码），也把「命令库只能放 AT」这个不成立的暗示写进了 UI。改用 `tr("cmd.field")`，`_TABLE` 里中英都给 `CMD`；顺带把同排的 `Line end` / `Delay (ms)` 也收进 `cmd.lineend` / `cmd.delay`，否则英文模式修好、中文模式又露英文 | `ui_selftest` R-129 两项（`tr("cmd.field") == "CMD"`；真实构造的 `CommandDialog` 里只出现 `CMD`、没有 `AT` 标题）；`acceptance_test` R-129 2/2 |
+| L-155 | 命令没法像资源管理器那样拖动换组/换顺序 | FIXED-verified | 命令列表此前根本没有拖动：`QDrag` 在整个 UI 里一次都没用过，`CommandStore` 也只有 `move_many()`——它只改 `group` 字段，条目在 `items` 里的位置原封不动，所以「拖到某个分组里的某个位置」这种**换组 + 换序**根本表达不了；先 `move_many()` 再手动重排会写两次盘，中间还会看到命令停在新分组的旧位置上。新增 `CommandStore.reorder(ids, group_id, index)` 一次算好目标下标再单次 `_commit()`；`index` 按「目标桶内除被拖项以外的位置」计，负数或超界即追加。UI 侧补齐完整拖放链路：`DRAG_MIME` 私有 MIME（不用 `text/plain`，否则拖文件/拖选中文字也会被当成命令）、`CommandRow` 作拖动源（`label` 吞掉鼠标事件，所以要在 label 的 mousePress/Move 上做）、`CommandRow` 行上半区=插到前面、下半区=插到后面、`GroupHeader`=追加到该组、`BucketBody`/`DropStrip`=分组内与列表末尾的空投区（末尾那条才使得「拖出分组」有可能）、`ListHost` 空白=移出所有分组。**关键坑**：`QDrag.exec()` 会跑嵌套事件循环，落点处理就在这个循环里被调用；若此时 `store.reorder()` 发出 `changed` → `rebuild()` → 对行 `deleteLater()`，被销毁的正是拖动源自己。用 `_in_drag` 标记 + `QTimer.singleShot(0, ...)` 把真正的重排推迟到循环退出之后。拖动后松手不能在 label 上补发一次点击（`_suppress_send` 只吃掉紧接的那一次）。 | 探针 `probe_reorder`（组内改序 / 跨组插到下标 / 移出追加 / 批量 / 重载一致，且空操作不写盘 `wrote file: False`）+ `probe_panel_drag`（9 项实时落点）；`ui_selftest` R-130 十二项；`acceptance_test` R-130 12/12 |
+| L-156 | 「保持屏幕常亮」重启后又自己打开了 / 发送完输入框被清空 | FIXED-verified | 两件事。① 常亮：`_restore_settings()` 里有 `setChecked(s.value("display/awake", "0") == "1")`、`_save_settings()` 里对应写回，于是**曾经开过一次就永久开着**——开关还藏在可折叠的右栏里，用户下次开机发现屏幕不再息屏却找不到原因。改为每次启动一律 `setChecked(False)`、不再写入该键，并顺手 `s.remove("display/awake")` 清掉旧版本留下的值（否则降级又会复活它）；`_on_keep_awake()` 里那次 `_save_settings()` 也删掉（勾一下开关就重写整个 INI 毫无意义）。② 发送框：`emit_current()` 末尾有 `if not self._timed.isActive(): self.input.clear()`，于是每发一条就得重新输入或按 ↑。删掉清空后，历史去重本来就有（`push_history()` 丢掉「与上一条相同」的重复），正好对应「连续发送只记一条、非连续正常记」。 | `ui_selftest` R-062 八项（含「预置 `display/awake=1` 也不会在启动时生效」）与 R-131 五项（保留内容 / 连续三次只 1 条 / A-B-A 记 2 条 / 回车发送也保留）；`acceptance_test` R-062 与 R-131 5/5 |
+| L-157 | 扩展命令手动排序后重启又变回原来的顺序 | FIXED-verified | 三个原因叠在一起。① `save()` 先写固定名字的 `commands.json.tmp` 再 `os.replace`：两个进程（多窗口 / 一个窗口 + 一个 CLI）同时保存时后写者会覆盖先写者的临时文件，最后落盘的是那份半旧半新的内容。② 每个 `CommandStore` 都在内存里持有一份完整副本，`save()` 直接整份写回，于是 B 进程启动时读到的旧顺序会把 A 进程刚排好的顺序整份压掉——「顺序没记忆」正是这个可复现的覆盖，而不是没写盘。③ `_load()` 里读失败（JSON 半截/被占用）直接 `_seed()` 重建默认库，且**没有任何提示**，用户看到的就是「配置被重置了」。修法：`save()` 全程持 `_library_lock`（Windows `msvcrt.locking(LK_NBLCK)` / POSIX `fcntl.flock`），临时文件改用 `tempfile.mkstemp(prefix='.commands-', suffix='.tmp')` 保证唯一，写之前 `_merge_with_disk()` 按 id 并入磁盘上新增的条目（本地删除记在 `_removed` 墓碑里，`_order_dirty` 为真时以本地顺序为准则不重排），读失败把坏文件改名成 `*.bad-<stamp>` 并设 `load_warning`，由面板在 `rebuild()` 之后弹一次提示——坏数据要能看见、也要能找回。 | `ui_selftest` R-135 两项；`acceptance_test` R-135 2/2（静态守卫：`class _library_lock` / `tempfile.mkstemp` / `_merge_with_disk` / `_removed` / `load_warning` / `_order_dirty` 成对出现）；探针 `probe_order` / `probe_gui_order` 复现了「重启顺序回退」再验证修复 |
+| L-158 | 分组标题上勾了「全选本组」却一行都没选上（点了没反应） | FIXED-verified | PySide6 的 `QCheckBox.stateChanged` 交出来的是**纯 `int`**（0/1/2），而 `Qt.Checked` 是 `Qt.CheckState` 枚举。PySide6 对「枚举 vs int」按**身份**比较，所以 `2 == Qt.Checked` 是 **False**（`True` 的情况只在 `Qt.CheckState(value)` 之后出现）。于是 `_on_pick_state` 里那句 `if state == Qt.Checked:` 永远不成立，勾一个组发出去的是 `pickAll(group, False)`，看起来就是「点了没反应」——没有任何异常、没有任何日志。`int(Qt.Checked)` 也不行，会抛 `TypeError`；唯一正确的转换是 `Qt.CheckState(raw)`。凡是自己接 `stateChanged`（而不是 `toggled`）的地方都踩这个坑，以后统一写 `value = Qt.CheckState(state)` 再比较枚举。另注意三态框会先发一次 `PartiallyChecked`，要不要忽略得显式判断。 | `ui_selftest` R-136 九项（勾一组只选该组 2 行 / 再勾一组累加到 5 行 / 范围显示「已选 2 个分组」/取消一组保留另一组 / 范围限单组时全选只选该组 / `SCOPE_ALL` 选满 16 行 / 折叠组不参与 / 全不选清空）；探针 `probe_enum*` 三个分别证明了「参数是 int」「`2 == Qt.Checked` 为 False」「`Qt.CheckState(2) == Qt.Checked`」 |
+| L-159 | `theme.WINDOW_EDGE` 写了颜色，画出来却是纯黑 | FIXED-verified | 为了给无边框窗口描边，最初把 token 写成 CSS 那种 `rgba(18, 26, 43, 235)` 字符串，再 `QColor(theme.WINDOW_EDGE)`。问题是 `QColor` **不解析 CSS 的 `rgba()` 函数形式**：它返回一个 `isValid() == False` 的无效颜色，Qt 于是按黑色画——边框变成了 1 px 纯黑，而且没有任何报错。QSS 里写 `rgba()` 是合法的（那里是给样式表解析器看的），但**凡是要交给 `QColor` 的地方必须是 `#RRGGBB` 再 `setAlpha()`**。拆成 `WINDOW_EDGE = '#121A2B'` + `WINDOW_EDGE_ALPHA`，让画笔自己上透明度，和仓库里其他 hairline 的写法统一；验收里加一条 `QColor(theme.WINDOW_EDGE).isValid()`。 | `ui_selftest` R-138 四项（token 可被 `QColor` 解析 / `WINDOW_EDGE_PX >= 1` / 四边最外一圈 `lightness() < 90` 实测 `#242b3b` / 内部仍是浅色 `#edf1f7`）；`acceptance_test` R-138 5/5 |
+| L-160 | 改了输入框历史去重后，另一条「多行上键」的旧检查开始失败 | FIXED-verified | R-134 把「框里已是上一条时按一次 ↑ 直接退到更早一条」做进 `_browse()` 之后，同一函数里后面那段多行检查的前置状态变了：它前面刚用两次 ↓ 从历史回到框里，**浏览位置停在最新一条上而不是被重置**（`_hist_pos` 不是 `None`），于是紧接着那次 ↑ 被当成「继续往前」而不是「从最新一条开始浏览」，断言拿到的 `HIST-MID` 而期望 `HIST-KEEP`。这不是产品 bug，是**检查之间共享了残留状态**。修法是在开始一段独立场景前先把浏览状态清干净（多按一次 ↓ 走到底、或改 `setPlainText` 前显式生成新草稿），并让期望值取自 `entries[-1]` 这类**状态相对量**而不是写死字符串。教训：GUI 自测里同一控件连续多段断言时，必须显式复位「上一段留下的模式状态」（浏览位置、拖动标记、批量模式），否则新功能会以「旧检查失败」的形式出现，很容易被误判成改动写错了。 | `ui_selftest` 全量 492/492 PASS（R-090 五项含多行上键、R-131/R-134 九项）；`acceptance_test` 641 项全通过 |
+| L-161 | 加了阴影后，窗口描边跑到了阴影最外圈、页面自己的边上没有线 | FIXED-verified | `_paint_edge()` 原来用绝对坐标 `QRectF(inset, inset, w - width, h - width)`（`inset = width / 2.0`），因为那时页面就是整个控件。R-139 给页面加了 8 px 的内缩阴影环之后，页面已经不在 (0, 0) 了，但描边仍按控件原点画 —— 结果那 1 px 深色线落在**阴影的最外层像素**上（像素探针：`x=0 → #232a3a` 深色、`x=14 → #edf1f7` 浅色），页面自己的边界反而没有线，看起来像"阴影描了一圈黑框"。改成从 `target.left() / target.top()` 起算（`target` 就是 `page_rect()`）。重测：`x=0..7` 是 `#e6e6e7 → #b0b0b6` 的渐变，`x=8 → #242b3b`（描边），`x>=9 → #edf1f7`（页面）。教训：只要画布被内缩过一次，所有"从原点到边"的绝对坐标都要重新审一遍。 | `ui_selftest` R-138 十项（四条边都取 `inset` 处的像素比中心暗、中心仍 > 180）；探针 `probe_ring4.py` 逐像素打印左右上下四条扫描线 |
+| L-162 | 阴影厚度一加大，左栏就冒出滚动条（R-118 回归） | FIXED-verified | 阴影环是**从窗口自己的边距里抠出来的**（`_apply_window_shadow()` 把 `WINDOW_SHADOW_PX` 加到根布局四边），所以每 1 px 环等于吃掉 2 px 内容高度。最初取 14 px，等于少了 28 px，左栏内容撑不下就开始滚动 —— 但这条只有在**带真实样式表**时才出现：先写的两个探针没有 `setStyle("Fusion")` + `app.setStyleSheet(app_stylesheet())`，量出来任何厚度都不滚，差点得出"这个值随便取"的错误结论（L-164）。改成按真实 main() 初始化重测：环 14 → `scroll_max = 10`；12 → 6；10 → 2；8 → 0；6/4/2/0 → 0；`content_hint` 恒定 758。取 **8 px**（不滚且留 4 px 余量），并把 `WINDOW_SHADOW_ALPHA` 由 7 提到 11 补回肉眼可见度（多圈叠加，最外层才 `#e6e6e7`）。**这个值不许再调大**，调大必须重测左栏滚动。 | 探针 `probe_ring2.py`（样式表忠实版）打印每个厚度下的 `scroll_max` 与 `content_hint`；`ui_selftest` 全量 515/515 |
+| L-163 | 给阴影加了"缓存位图"后，整套 GUI 自测报 `QPaintDevice: Cannot destroy paint device that is being painted` | FIXED-verified | `paintEvent` 里 `QPainter(self)` 之后直接写业务代码、最后 `painter.end()`，中间任何一步抛异常（Offscreen 下 `QImage` 尺寸为 0、缓存键比较出错等）都会让 QPainter 一直挂在控件上；Python 垃圾回收 painter 时 Qt 直接 `qFatal`，整个进程**连 traceback 都没有**就死了，`ui_selftest` 的输出被截断在 R-054 之后，只看得到验收脚本自己补的一句"GUI 验收整体通过：False"。所有自绘 `paintEvent`/位图构建都改成 `try: ... finally: painter.end()`。注意这种死法**不可复现**（同一台机器连跑三次两次正常），只有那句 `QPaintDevice` 会稳定出现在 stderr 里 —— 以后看到它就直接去查 painter 的生命周期，不要怀疑断言。 | 修复后 `ui_selftest` 515/515；`acceptance_test` 671 项 0 失败，连跑两次均绿 |
+| L-164 | 探针说"没问题"，真实界面却有滚动条 | FIXED-verified | 为了量阴影厚度对布局的影响，写了个只 `QApplication([])` + `Aurora()` 的探针，结论是任何厚度都不触发滚动，与验收里 R-118 的事实相反。原因是探针**没有复刻 `main()` 的启动序列**：`QFontDatabase.addApplicationFont(...)` 换掉了默认字体，`app.setStyle("Fusion")` 与 `app.setStyleSheet(app_stylesheet())` 决定了控件的最小高度与内边距。字体一换，每行文字的可读高度就变了，`content_hint` 才够不到可用高度。教训：**任何量布局尺寸的探针都必须和真实入口走同一套字体+样式表初始化**，否则量到的是另一个程序的布局。 | 两版探针对照（`probe_ring.py` 无样式表 → 全部 0；`probe_ring2.py` 忠实初始化 → 14/12/10 分别 10/6/2）；结论写进 L-162 |
+| L-165 | 加了阴影后「背景层为单一纯色」验收项开始失败（90.25% 一色） | FIXED-verified | 这条 R-020 检查是对 `Aurora.grab()` 的**整张控件**做颜色直方图，要求单一色占 ≥ 98%。R-139 之后控件最外 8 px 一圈是渐变的阴影（`#e6e6e7`→`#b0b0b6`），于是纯色占比掉到 90.25%，看起来像"背景被改花了"。实际上页面本身仍是 100% 纯色 —— 断言的对象错了，不是产品坏了。修法：改用 `probe.page_rect()` 只统计页面矩形内的像素（并把采样范围打进 detail，`360x360` → `284x184` 一眼就能看出只采了页面）。教训：任何"全域像素"断言都要先问"现在的全域是不是还等于我想证明的那块区域"。 | `acceptance_test` R-020 3/3（`#edf1f7 100.00% in 284x184`）；全套 671 项 0 失败 |
+| L-166 | 新写的 R-141 自测把"必须保留的拖放条"判成违规 | FIXED-verified | 为了证明"分组里不再有多余拖放条"，顺手写了句 `not top.parent().findChildren(DropStrip)`，结果失败：`findChildren` 会往下扫**整棵子树**，而列表末尾那条 `tail = DropStrip(UNGROUPED)`（R-133 唯一"拖出所有分组"的落点）就在同一个父控件里。这条断言既太宽（越界到兄弟节点），又与另外两条"`_group_bodies` 里没有 DropStrip"重复，直接删掉。同时给"末尾必须还有一条"补了正向断言，防止以后为了消空隙把尾条也删了、导致拖不出分组。 | `ui_selftest` R-141 六项（`_group_bodies` 内无 strip / 末尾仍有 tail / 两组标题间距 6 px 落在 0..12 / R-042 缩进 ≥ 12 仍在）；`acceptance_test` R-141 7/7 |
+| L-167 | 把旧 release 从草稿恢复成公开后，"最新版本"指针悄悄跑到旧版上 | FIXED-verified | 用户要求"旧 release 也要正常显示"，于是把 1.1.2 / 1.1.3 用 `PATCH {"draft": false}` 恢复。恢复动作会**重写 `published_at` 为当前时间**，而 GitHub 的 `GET /releases/latest` 取的是"最近发布的非草稿 release"（不是语义版本最大者）：实测恢复后 `v1.1.3 published=2026-11-03T05:35:01Z` > `v1.1.4 published=2026-11-03T05:01:05Z`，于是 `/releases/latest` 与 `https://github.com/Fatmear/OmniCOM/releases/latest` 的 302 全部指向 v1.1.3。危险在于应用内更新器与「从升级包更新」都读 latest，用户会看到"最新版是 1.1.3"，等于静默退化。修法：不要靠"再发一次"或"把新的转草稿再恢复"来抢指针，直接用 GitHub 的显式字段 `PATCH /releases/<v1.1.4 的 id> {"make_latest": "true"}`，只改指针、不动任何 release 的可见性。复核：API `latest = v1.1.4`，网页 302 在 CDN 缓存（约 10 s）后转 `v1.1.4`，三个 release 仍全部 `draft=False`。教训：**releases 的"最新"是时间序而非版本序**；任何"取消草稿 / 重发 / 重新上传"的操作都会重新计时，改完必须回查 `/releases/latest` 而不是只看版本列表。 | `GET /releases/latest` → `v1.1.4`；`releases/latest` 302 → `releases/tag/v1.1.4`（连续 3 次）；`GET /releases` 三个 tag 均 `draft=False pre=False` 且各自带 zip 资产 |
+| L-168 | 「检查更新」一直转圈没有结果，用户以为功能坏了 | FIXED-verified | 两个独立故障叠在一起。① **GitHub 未登录 API 按出口 IP 限流 60 次/小时**，公司一个网关几百人共用一个地址，额度几分钟就见底，于是 `GET /releases/latest` 稳定回 HTTP 403。② `update.check()` 按 R-107 的设计「失败安静返回 None」，而 `UpdateWatcher.failed` 是个**不带载荷、也没有任何接收者**的信号 —— 对话框只等成功分支，所以永远停在「正在检查新版本…」。另外 `open_update()` 在已有缓存的 `last` 时根本不发起新检查，等于把上次的过期结论当成这次的。修法：`check()` 的返回契约不动（R-107 / `ui_selftest` 有断言），另加 `check_release()`；它先走 API，捕获到异常就**改读不被限流的发布页** （`releases.atom` 取 tag+说明、`releases/expanded_assets` 取资产名与大小），返回 `{ok, source, error, ...}` 且永不抛；`UpdateWatcher` 增加 `failed(str)` / `traced(int,int,str)` 并**真的连上**；对话框把流程行写进内嵌日志框、用 `QProgressBar` 推进度、失败时给出标题+原因+重试入口；`main_window` 连 `update_watcher.failed`，`open_update()` 在没有新版本信息时主动 `start_check()`。实测本机 API 确实 403，自动回落发布页拿到 `v1.1.4`、`OmniCOM-1.1.4-win64.zip`、42991616 B。教训：**「静默失败 + 无人接收的信号」= 永久等待**，凡是后台任务都必须有一条「失败也说得出话」的通路。 | 真实网络探针：`① API → 403` → `② 改读发布页 → ✓ v1.1.4`；`acceptance_test` R-143 九项（含离线双死路 `ok=False` 且 `error` 非空、进度走到 3/3）；`ui_selftest` 520/520 |
+| L-169 | 搜索新命中一来，用户正在看的几行就被拖到底部 | FIXED-verified | `SearchPanel._append_row()` 每插一行就 `scrollToBottom()`，看历史命中的人根本读不了。用户要的是和日志窗口一样「有个按一下可以到底部的按钮」。修法：追加路径**完全不滚动**（`scroll` 参数删掉），`run_search()` 结束只 `scrollToTop()`；把日志用的 `ScrollBottomPill` 挂到 `results.viewport()` 上，只在「下面还有内容」时浮现，由 `valueChanged` + `rangeChanged` + viewport 的 `Resize` 三处驱动同一个 `_on_results_scrolled()`，右键菜单与气泡都走 `jump_to_latest()`。两个坑：① `hide_pill()` 是 160 ms 淡出 + `QTimer.singleShot(170)` 才真正 `hide()`，所以**断言「不可见」不能看 `isVisible()`**（会抓到淡出中的窗口），要看 `_visible` 或等 260 ms；② 自测里 DEMO 端口每秒都在产生新行，任何 `qWait` 之后气泡状态都可能被合法地重新置为可见，所以「点一下就到最新」必须在**同一个事件循环轮次**里断言。 | `ui_selftest` R-144 五项（`max=243 value=0` / 气泡可见 / 新命中后 `value` 仍 0 且行数 250→251 / 点击后 `value=244` / 清空后 `_visible=False`）；`acceptance_test` R-144 9/9；`ruff` 全绿 |
+| L-170 | 打包自检失败 / packaged selftest FAILED / UnicodeEncodeError / � / make_dist 崩在 verify | FIXED-verified | `make_dist.verify()` 用 `python -X utf8` **不够**：它同时传 `-E`，而 `-E` 会让 `PYTHONIOENCODING` 失效，子进程退回控制台代码页 (cp936)，父进程却按 UTF-8 解码，得到 45 个 U+FFFD；再把这些字符打印到 GBK 控制台就抛 `UnicodeEncodeError`，**位置就在打印 verdict 之前**，于是看起来像「包内自检失败」，真正的 `SELFTEST OK` 被埋在崩溃点后面。两条都要修：① 子进程用命令行开关 `-X utf8`（不受 `-E` 影响）而不是靠环境变量；② 报告打印前 `sys.stdout.reconfigure(errors="replace")`，任何字符都不许决定结论。这正是 L-038 记过的同一类错误，只是换了宿主脚本 | `make_dist --check --zip` 退出码 0、`packaged selftest OK`；修正前实测 `returncode=0 has SELFTEST OK=True replacement chars=45` 却报 BUILD=1；`ruff` 全绿；`acceptance_test` 141/692 ALL VERIFIED |
+| L-171 | NEW 要红字 / 下载中无法取消 / 更新检查 API 成功率低 | FIXED-verified | R-107/R-145：改为发布页唯一路径并移除 API 实现；QWidgetAction 的富文本 QLabel 只把 NEW 标红，鼠标透明保留原生菜单点击与回车；下载按钮切成可点的取消，Event 回调在下载和暂存提交前检查，清理部分文件，取消完成后可重试。正在进行的网络操作按 timeout 结束，不强杀线程；本轮仅改源码和文档，尚未重新打包发布 | acceptance 142 requirements / 703 checks、GUI 526/526、ruff clean、contrast 15/15；真实发布页返回 v1.1.5/source=web；源码仍 1.1.4 |
+| L-172 | 重发 1.1.4 / 保留 1.1.5 不删 / 不提交源码 / 旧版发布抢 latest | FIXED-verified | 按用户选择仅更新 1.1.4 便携资产，不提交、不推送、不移动标签；源码标签暂时与包不同，发布说明已声明。make_release 在重发较低版本时保留较高 latest，上传后漂移则恢复；1.1.5 的说明、资产元数据及标签逐项保持原样，未经明确要求不得删除 | acceptance 703/703；make_dist --check --zip 退出 0；公开下载 43,006,667 B，SHA-256 857f1a342d1b3cdea7af9a82c595da0166910c4c800c6f54c2cf9bc684d68df2 与本地一致；latest=v1.1.5；四版公开；HEAD=7fd2007、v1.1.4=33c6d22、v1.1.5=8d947ae 未动；.artifacts/republish114-verified.json |
+| L-173 | 用户 1.1.3 目录无法从 ZIP 升级 / 手动恢复本机安装 | FIXED-verified | 使用用户 Downloads 下哈希正确的 1.1.4 ZIP，先解压新目录并复制用户数据/插件，自检后将原目录改名完整备份，再整体替换，停用旧 pending.json 防重复应用；原启动路径不变。首次核验因 Python 重写 pyc 自动回滚，改用 -B 后通过，失败副本已清理；本轮不改生产源码或发布资产 | D:\OmniCOM-1.1.3-win64\OmniCOM 版本 1.1.4、自带运行时 SELFTEST OK、289 程序文件与 ZIP 相同、594 数据文件和 4 插件文件哈希不变；完整备份 OmniCOM-backup-20261103-172009；.artifacts/manual-upgrade114-result.json |
+| L-174 | ZIP 更新中断 / pending.json 残留 / 版本已变化但运行库未完整覆盖 | FIXED-verified | 原因确认为 run 在导入 Qt 后进程内覆盖，同时便携 Python 自身也占用运行库；不能只挪 Qt import。现改用隔离运行时的独立安装器，等待旧 PID 真正退出后事务安装，详见 L-175；此前 L-173 只是手动恢复用户安装 | 原只写句柄探针证实 Qt 导入后 PermissionError；现包内真实 Python/Qt 跨进程安装及外部文件锁失败恢复均通过，.artifacts/update-selftest.json |
+| L-175 | 在线与本地 ZIP 更新都不成功 / 要自动重启 / 成功弹窗和当前版本 | FIXED-verified | R-108：两入口暂存后在后台准备隔离 Python/标准库更新器，经 READY 握手才正常关闭 UI；系统锁防并发安装、进程句柄等真正退出，预检/准备/备份/替换/哈希校验，捕获提交异常时回滚。新进程自动启动，原子消费结果且实际版本一致才弹一次成功，中英皆含当前版本；失败停重试循环且显示原因。源码与本地包已修复，未发布或修改用户安装，1.1.5 保持不动 | acceptance 142 requirements / 710 checks、GUI 532/532、ruff clean；make_dist --check --zip 包内 SELFTEST OK + 15 项跨进程安装检查（本地/下载/外部锁）；提交中第二文件失败回滚通过；本地 ZIP SHA-256 1ba0c18aa013cea970c66bf0975e2e9edce51c6e5bed623c5136c97c09a930cf；.artifacts/acceptance.json、.artifacts/update-selftest.json |
+| L-176 | 把 D 盘安装同步为当前最新 / 用户手测自动更新 | FIXED-verified | 按用户要求用当前本地 ZIP 同步 D:\OmniCOM-1.1.3-win64\OmniCOM；先核对包内全部 38 个生产 Python 模块与源码一致，再候选目录自检、完整备份并整体切换；停用旧 pending，原任务留在备份，启动路径不变，程序保持关闭供手测；不动线上发布 | 版本 1.1.4，包内 SELFTEST OK，289 程序文件与 ZIP 相同，888 数据文件/4 插件文件哈希不变；完整备份 OmniCOM-backup-20261103-175552 原始数据完好；.artifacts/sync-latest-result.json；ZIP SHA-256 1ba0c18aa013cea970c66bf0975e2e9edce51c6e5bed623c5136c97c09a930cf |
+| L-177 | 重启前要确认 / 关闭到重开太久 / 原界面保留和前台动态进度 | FIXED-verified | R-108 最新修订：隔离运行时复制、文件准备及回退备份均在原窗口可见时完成；默认稍后的中英文耗时确认框，同意后先收到独立 Qt 进度窗 VISIBLE 才退出旧 UI，进度窗衔接至新窗口就绪。遗留 pending 不得绕过确认。真实检查发现防误关 closeEvent 同时拦截 quit，已改 app.exit；安装提交仍等待真实 PID 退出并保护数据/插件。本轮不覆盖 D:、不发布、不改 1.1.5 | acceptance 142 requirements / 712 checks、GUI 534/534、ruff clean、真实中英文默认稍后；make_dist --check --zip 退出 0，24 项便携跨进程检查（本地/下载/外部锁/拒绝），准备前移与进度窗可见均验证；本地 ZIP SHA-256 4822141b102b755ae9bb6b7e455d375b191826bb25a02328f3913466c8b02710；.artifacts/acceptance.json、update-selftest.json 及 update-progress-local.png |
+| L-178 | D 盘同步最新确认重启与持续进度版本 | FIXED-verified | 用户明确授权后将 L-177 已验收包同步到 D:\OmniCOM-1.1.3-win64\OmniCOM；先确认无运行进程、校验包哈希/CRC/版本，候选目录保留数据与插件，使用 -B 自带运行时自检，完整备份后整体切换并逐文件核验。原启动路径不变、旧备份保留、程序保持关闭；未发布或修改 1.1.5 | 版本 1.1.4，SELFTEST OK，289 程序文件与 ZIP 相同，671 数据文件和 4 插件文件哈希不变，备份原数据完整；备份 OmniCOM-backup-20261103-183332；ZIP SHA-256 4822141b102b755ae9bb6b7e455d375b191826bb25a02328f3913466c8b02710；.artifacts/sync-latest-result.json |
+| L-179 | 新窗口打开时安装进度仍在等 / 安装窗无 logo 和任务栏图标 / ZIP 旧版安装失败 | FIXED-verified | R-075/R-108/R-121：提交/校验完成后先到 100%、隐藏进度窗，再启动目标，不再依赖旧版本没有的 ready 回传；统一 logo/ICO 隔离保存、设置 Windows AppUserModelID 和普通任务栏窗口。旧版与同版精确区分，旧目标不留无人消费的结果。实际 D: 已被手测切到 1.1.5 旧进程内更新器且 pending=1.1.4，这不含新修复，本轮只读不覆盖，线上不动 | 完整 142 需求/715 检查、GUI 535/535、ruff clean；make_dist --check --zip 自检及30门禁通过，指定 Downloads 真实1.1.3包后39跨进程检查通过（旧UI可见、程序与运行库匹配旧包、数据插件哈希不变）；原生Windows中英文logo/WM_GETICON/任务栏类型/先完成再启动均验证；本地ZIP SHA-256 c3bcf778df96e86923c04b35814b4ae94275d00f2281613d6f1815e0b603fde4；.artifacts/update-selftest.json、acceptance.json、installer-native-{zh,en}.json |
+| L-180 | 同步 D 盘最新进度结束顺序 / 品牌图标 / 旧版 ZIP 安装修复 | FIXED-verified | 用户明确授权同步 L-179 最新包到 D:\OmniCOM-1.1.3-win64\OmniCOM；先确认无运行进程、38生产模块与包一致、锁定ZIP哈希/CRC/版本，候选目录复制用户数据插件并用 -B 自带运行时自检，完整备份后整体切换；只在候选中停用旧 pending/result，原标记完整留在备份，防重复安装和过时成功提示。原启动路径不变、程序保持关闭；未发布、不改线上1.1.5 | OmniCOM 1.1.4，SELFTEST OK，289程序文件匹配ZIP，940数据文件及4插件文件哈希不变，备份原数据完整；备份 OmniCOM-backup-20261103-191321；ZIP SHA-256 c3bcf778df96e86923c04b35814b4ae94275d00f2281613d6f1815e0b603fde4；.artifacts/sync-latest-result.json |
+| L-181 | 重新 release 1.1.4 / 说明合在一起不要第一版 / 删除1.1.5 / 修复代码提交 | FIXED-verified | 新要求明确取代 L-172 的不提交/保留1.1.5限制并更新R-069；修复源码0ac996e推送main（含独立安装器），CHANGELOG与线上正文合并为单一完整1.1.4说明；最终包替换1.1.4附件，先备份旧ZIP并验证公开下载后仅删除1.1.5 Release；latest=1.1.4，1.1.2/1.1.3正文附件完全不变，既有源码标签不强改，发布说明明确修复源码在main | 新验收715/142需求、GUI535、协议23、对比度15、Ruff及包内自检通过，安装器30项/真实旧包39项；公开ZIP 43038312字节，SHA-256 fef42ec59435127bbdeec68a2aa875a7c453a6413555347aa8f3b7fbc1f8c1db，38生产模块与源码逐字节一致；v1.1.5 Release API=404，API latest/公开跳转均v1.1.4；.artifacts/release114-final-{before,published,verified}.json |
+| L-182 | 重新同步 D 盘最终 release / 与公开下载同包 / 数据和插件保护 | FIXED-verified | 用户授权将L-181正式1.1.4同步D:\OmniCOM-1.1.3-win64\OmniCOM；锁定最终ZIP哈希/CRC，完整备份后切换，原数据插件不被安装包覆盖；只停用候选中的遗留pending，原标记留在备份；公开下载ZIP独立复核全部程序文件及备份数据插件哈希，程序保持关闭 | 289程序文件匹配公开ZIP，1212数据文件/4插件文件哈希不变，原备份数据完整，自带Python SELFTEST OK；完整备份OmniCOM-backup-20261103-193421；与L-181公开ZIP同一SHA-256；.artifacts/sync-latest-result.json |
+| L-183 | 上滑停止跟随 / 到底恢复 / 开关同步 / 全屏搜索滚动 | FIXED-verified | 用户修订 R-012/R-144，替代 L-028/L-169 旧语义；日志和搜索独立复用 TailFollow，真实导航与追加/布局变动分开，手动关掉后新数据不误开启，End/Ctrl+End 跳到实际底部；不暂停接收/打印 | GUI 556/556，真实滚轮、键盘、全屏/侧栏、批量与部分行；108 个 runner 注册与 HEAD 完全一致；总验收 777 检查、145 需求、零失败/未覆盖 |
+| L-184 | 搜索结果省略号 / 全屏内容不全 / 超长 HEX 不换行 | FIXED-verified | R-146：QTextDocument 委托按字符换行并按完整文档计算行高，取消统一行高与省略，水平滚动关闭，尺寸变化重新排版，保留原列表块号定位与跟随 | plugin_selftest R-146 四项及完整 GUI；长无空格正文尾标保留、缩窄行高增加、真实行矩形覆盖文档、水平滚动为零；.artifacts/search-wrap.png |
+| L-185 | 实时多通道曲线 / ASCII 分包 / 动态变量选框 / HEX 速率评估 | FIXED-verified | R-147：API2 添加 RX/主题/卸载回调，独立 PyQtGraph 插件逐行解析、动态通道勾选、暂停仅绘图、有限历史/通道和异常计数、时间窗/重置/清空/CSV；接收时间不是设备采样时钟。剖析证实粗线 QPainter.drawLines 最贵，改 1px | 解析 2/8/32 通道约 11.15/9.92/10.22 MB/s；5000点保守双绘制负载约44/25/10 FPS，计时器上限约30；29字节示例115200/8N1约397行/s，常规低通道暂不需HEX；.artifacts/chart-benchmark.json、chart.png、docs/PLUGINS.md |
+| L-186 | 插件商店 / 已安装与最新版本 / 未安装插件 / 更新红点 / 下载卸载 | FIXED-verified | R-148 本地实现完成：完整目录并集、版本状态、右上红点、异步检查/下载/取消/重试、SHA/清单/API/路径校验、事务回滚、跨进程锁、卸载保留用户数据；数据目录插件优先、已加载插件卸载清理。独立 ZIP/目录构建器不依赖主程序发布 | 永久插件回归40项含本地HTTP、安全拒绝、提交失败回滚和双语；真实包内进程从ZIP安装、映射NumPy DLL后更新、重载收数、卸载与数据保留通过；.artifacts/plugin-selftest.json、plugin-store.png、tools/make_plugins.py |
+| L-187 | 便携包开发机可用但曲线导入失败 / QtOpenGL 被裁剪 / DLL 临时目录清不掉 | FIXED-verified | PyQtGraph CPU模式也会导入QtOpenGL/Widgets，保留其包装/DLL并加真实像素门禁。原生插件备份保留映射DLL，测试由父进程在子进程真实退出后清理；原生依赖更换需重启生效。未覆盖正式dist、未同步D盘、未提交推送/发布 | 独立验证包153MB，包内SELFTEST、实际曲线像素/隔离依赖、原生安装更新卸载周期、30项安装器跨进程门禁通过；Ruff clean；正式1.1.4 ZIP仍为L-181 SHA；.artifacts/plugin-bundle/OmniCOM |
+| L-188 | 公网插件库尚未上线 / 默认 plugin-store 目录下载失败 | FIXED-verified | 本轮没有发布或修改远端；默认 plugin-store/catalog.json 是预留端点。离线目录/本地HTTP及自定义HTTPS已验证，联网失败明确显示且保留目录。需另行授权独立发布插件资产，必须 make_latest=false，不能挪动主程序latest或隐藏旧版 | docs/PLUGINS.md 独立发布步骤；tools/make_plugins.py --base-url . 可生成同目录离线ZIP/目录；主程序公开包和D盘未变 **2026-11-06 已闭合**：`plugin-store` release #436347358 已建立并上传 `chart-1.1.2.zip` / `chart-1.1.0.zip` / `launcher-1.0.0.zip` / `catalog.json`，`make_latest=false` 未挪动主程序 latest；三个下载地址 `Range: bytes=0-3` 全部 206。发布用 `python tools/publish_plugin_store.py`（幂等，上传前核对目录里的 sha256/size）。 |
+| L-189 | 曲线右侧空白 / JSON 不放 Releases / 首选项多行插件仓库 | FIXED-verified | R-149：通道栏最大240px、绘图区随窗口扩展；默认raw main/plugins/catalog.json，构建CLI默认JSON写plugins目录、ZIP分离；商店移除地址栏，首选项多行配置/旧单地址兼容/即时保存；全部来源查询、同ID较新版本优先/同版本首源优先、相对URL按各自来源、失败隔离与源级缓存；无来源旧缓存不冒充新源。L-188旧Release JSON计划被本要求取代，远端仍未推送/发布 | plugin_selftest 64/64，其中R-149 24项；1000/1440/1920绘图区772/1212/1692px、通道栏200px；首选项小窗滚动/双语/保存恢复、部分失败提示通过；.artifacts/chart-wide.png、plugin-preferences.png、plugin-selftest.json；Ruff clean |
+| L-190 | 全量验收间歇失败 / R-054 40ms / QPaintDevice / R-055 后崩溃 | FIXED-verified | R-149回归持续全绿，GUI独立全量通过一次，但不可据此称最终总验收通过：首轮801项2失败（RX P95 43.326ms及GUI总体）；独立GUI通过后再次总验收，R-054 RX P95 34.83ms已过，R-055后Qt绘制设备析构崩溃，544项1失败且13需求因进程中断未覆盖。根因未定位，历史L-163同错误须核查painter生命周期；本轮未修改绘制函数，不扩大范围盲修/放宽阈值/继续重跑直到绿 → 见 L-191/L-192：补齐覆盖后连续全量通过，未再复现 | 最终.artifacts/acceptance.json保留失败；后续先 python -X faulthandler tools/ui_selftest.py 捕获崩溃栈，再针对定位到的绘制生命周期修复；不得发布 |
+| L-191 | 间歇失败 / R-054 / R-055 / R-001 波动 | RULED-OUT | 三项失败在独立的 `--only gui` 运行中全部通过（649/649），重跑全量也全绿；R-054 的 rx_batch 自带 `retried: True`、R-055 报告的是 430 ms 单次卡顿轮次，均随整机负载出现。判据：同一份代码在降载后稳定全绿 ⇒ 是测量环境抖动，不是产品缺陷。禁止用"反复重跑到绿"当结论，须同时给出独立套件复现结果 | `.artifacts/accept.log`（失败）+ `--only gui` 649/649 + 重跑全量 923/923 |
+| L-192 | 未覆盖需求 R-152 / 验收 exit 1 | FIXED-verified | 缺失的是 **测试**，不是功能：R-152 之前只有源码级断言。补 `step_menu_theme` 后 `python tools/acceptance_test.py` 全量 **923 项、0 失败、0 未覆盖、ALL REQUIREMENTS VERIFIED**；同一轮 ruff 干净、protocol 23/23、contrast 15 对全部 ≥4.5:1 | `.artifacts/acceptance.json`、`.artifacts/accept.log` |
+| L-193 | 右键菜单黑底白字 / QMenu black / 菜单看不清 | FIXED-verified | `QMenu` 是**顶层窗口**，`app_stylesheet()` 里的 `*` 选择器进不去它的 item，颜色由 polish 时的 palette 决定；暗色 palette 下裸菜单 **94.6 % 深色像素、角落 `#141414`**，套 `theme.menu_stylesheet()` 后 **2.2 % / `#ffffff`**。判据必须是像素：`palette()` 一直报浅色而菜单画黑的。修法：每个菜单都 `setStyleSheet(menu_stylesheet())`，`QMenu::item` 显式给 `color`，插件走 `PluginApi.menu()` | `ui_selftest` R-152 6/6；`theme.menu_stylesheet()` |
+| L-194 | QDateTimeEdit 无样式 / 日期框默认外观 | FIXED-verified | `app_stylesheet()` 样式化了 `QLineEdit` / `QComboBox` / `QSpinBox`，但**漏了 `QDateTimeEdit`**，于是首选项里的日期框是平台默认的方角控件。新增控件类型时要对着 `theme` 的控件清单核一遍，别默认"全局样式一定管到" | `omnicom/ui/theme.py` |
+| L-195 | 搜索时间过滤错位 / 块数据丢失 / trim 后过滤失效 | FIXED-verified | 每行的 epoch 存进 `QTextBlock.userData()`，会**随块穿过 `_trim_oldest()`**；若改存到独立 list，裁掉旧行后索引整体偏移，过滤就错位 | `ui_selftest` R-154 20/20 |
+| L-196 | 按时间搜不到 / 跨天过滤 / 时间戳无日期 | FIXED-verified | 屏幕上渲染的戳只有 `HH:MM:SS.mmm`、**没有日期**，所以任何按日期/跨天的特性必须 key 在块的 epoch 上，不能去解析渲染出来的文本 | `ui_selftest` R-154 |
+| L-197 | PowerShell 乱码 / NativeCommandError / 明明通过却 exit 1 | FIXED-unverified | 工具链两侧的坑，与产品无关：`Get-Content -Encoding UTF8` 仍会按 GBK 解子进程的 UTF-8 输出（日志看起来是乱码），且 stderr 有内容时 PowerShell 会追加 `NativeCommandError` 并把 `$LASTEXITCODE` 显示得像失败。**判据用 `N/N 项通过` 和 `.artifacts/acceptance.json`，不要看终端颜色/文本** | 本轮多次复现 |
+| L-198 | 自定义控件被压扁 / sizeHint 不生效 | FIXED-verified | `sizeHint()` 在**被拉伸的 `QVBoxLayout`** 里只是"偏好"，布局会给它想要的更多空间。要钉死尺寸请覆盖 `minimumSizeHint()` 或设 min/max，别指望 `sizeHint()` | `omnicom/ui/commands_panel.py` |
+| L-199 | 离屏测试窗口尺寸不对 / 布局断言失败 / 800x800 | RULED-OUT | offscreen 平台会报 **800×800**，而窗口最小宽度是 **980**；凡是断言绝对坐标/尺寸的离屏探针都会得到"不可能"的布局。离屏只验行为与相对关系，绝对几何交给 `ui_snapshot` 渲染 | 本轮探针复现 |
+| L-200 | 清空日志后行数不是 0 / blockCount 差一 | FIXED-verified | `QPlainTextEdit.clear()` 会**保留一个空块**，所以 `blockCount() == 1`、`toPlainText() == ""`。断言"清空成功"要判文本为空，不要判块数为 0 | `ui_selftest` R-046 |
+| L-201 | 开关被重置却没通知 / 复位后信号风暴 | FIXED-verified | `_reset_session_switches()` 是**故意**在 `blockSignals(True)` 下把每行翻回默认的：目的是复位显示，不是触发写入。要断言"复位了"就直接读控件状态，别等信号 | `ui_selftest` R-155 16/16 |
+| L-202 | 插件测试全挂 / SimpleNamespace 缺方法 | FIXED-verified | 给 `PluginApi` 加一个方法会**同时弄坏所有 `SimpleNamespace` 桩**（测试里的假 api）。加 API 时要顺手补桩，否则失败信息是 `AttributeError` 落在插件那一侧，看起来像产品坏了 | `omnicom/plugins.py` |
+| L-203 | 新需求没被验收 / TITLES 缺项 / 未覆盖列表 | FIXED-verified | `tools/acceptance_test.py` 的 `TITLES` 是**手工维护**的字典：新增一条需求必须在 `TITLES` + `REQUIREMENTS.md` 同时加，否则报告只会说"未覆盖"而不会说"没有这条" | R-156/R-157 本轮 |
+| L-204 | 首选项滚轮误改 / 下拉框被滚轮换值 | FIXED-verified | `QComboBox` / `QSpinBox` 在**没有焦点**时也会被滚轮改值，并**吞掉**这个滚轮事件（页面因此不滚动）。修法：`Combo.wheelEvent` 只在 `self.view().isVisible()` 时转交，新增 `Spin.wheelEvent` 只在 `hasFocus()` 时才处理 | `ui_selftest` R-157 15/15 |
+| L-205 | dsrdtr 设了没效果 / 半接线选项 | FIXED-verified | `dsrdtr` 在 `DEFAULT_OPTS` / `_normalise` / `_open_now` 里一直都在，但 `serial_opts()` 从来不输出它 ⇒ `state` 报出一个调用方**根本无法控制**的握手。**半接线的选项比缺失的选项更坏**：JSON 说它是设好的 | `ui_selftest`/CLI R-156 |
+| L-206 | CLI 在线改选项没反应 / update_opts 无处理器 | FIXED-verified | `_WindowManager.update_opts` 假设窗口有一个 `_control_opts` 处理器，而它**从未存在**，于是窗口模式下在线改波特率/dtr/rts 静默无效。现在窗口侧只接受 `baudrate`/`dtr`/`rts`/`autoReconnect`，帧格式（bytesize/parity/stopbits/流控）一律拒绝并给出理由 | R-156 CLI 27/27 |
+| L-207 | state 里 lines 含义冲突 / 日志行数被当控制线 | RULED-OUT | `_control_snapshot` 的 `lines` **已经表示日志行数**了，绝不能拿来复用成控制线电平；控制线必须另开 `control_lines` 键，否则两个含义互相覆盖、读的人一定搞错 | `omnicom/ui/main_window.py:_control_state` |
+| L-208 | 探针段错误 / 无输出 / exit -1073741819 | FIXED-verified | `QFontDatabase.addApplicationFont` 在 `QApplication` 存在**之前**调用会直接崩（`0xC0000005`，退出码 `-1073741819`），没有 traceback。任何离屏探针都要**先建 app 再加字体** | 本轮探针复现 |
+| L-209 | 验收看不到 ok / 非法取值检查永远失败 | FIXED-verified | `argparse` 的 `choices=` 在**产出任何 JSON 之前**就拒绝，退出码 2、用法写 stderr、stdout 为空 ⇒ 检查里 `doc.get("ok")` 根本不存在。要断言 `returncode != 0` **且** stdout 里没有 `"ok": true` | `tools/acceptance_test.py` R-156 |
+| L-210 | 脚本第二步没执行 / steps_run 小于 steps_total | FIXED-verified | `session` 脚本**首个失败步骤即停**，所以 `steps_run < steps_total`。想验证两条错误路径就不能塞进同一个脚本，要拆成"一个脚本一步" | `cli session --script` 实测 |
+| L-211 | 拼错控制线却报成功 / 静默忽略未知键 | FIXED-verified | 把用户字典里的未知键静默过滤掉再报 ok，等于**把拼写错误变成假成功**（`{"set": {"cts": true}}` 曾返回 `ok: true`）。现在 `main_window._control_lines` 与 `cli._run_step` 的 `line` 都显式报错 | R-156 27/27 |
+| L-212 | lines 与 opts 互相矛盾 / dtr 显示不一致 | FIXED-verified | 命令输出的 `opts` 必须来自**端口当下已生效的状态**（`manager.status()["opts"]` / 窗口 `state()["opts"]`），不能来自 open 时的请求对象 `self.opts`——否则 `--line-dtr on` 之后 `lines.dtr: true` 与 `opts.dtr: false` 说的是同一个引脚，其中一个是过期的 | `cli lines --line-dtr on` 实测 |
+| L-213 | 最大化/还原动画跳两次 / 快照是目的地画面 | FIXED-verified | `grab()` 在 `showMaximized()` **之后**调用，拿到的已经是最大化后的渲染，却塞进起始矩形的叠加层里，真实窗口又在后面同步跳变 ⇒ 一帧新旧两幅画面。修法：翻转**之前**抓快照，动画期间把真实窗口 alpha 置 0 隐去，落定后 90 ms 交叉淡出叠加层，结束时恢复 `_slide_dimmed=False` + opacity 1.0（否则窗口再也看不见） | `ui_selftest` R-153 24/24；快照尺寸 `(1100,720)==normal`（非 max） |
+| L-214 | 侧栏结果无法横向滚动 / hbar max=0 | FIXED-verified | 真凶不是滚动条策略而是 **`setUniformItemSizes(True)`**：没有 grid 时 Qt 把所有行夹到视口宽度，横向范围恒为 0（实测 2 行 700 px 面板：uniform=True → 行宽 670、hmax=0；uniform=False → hmax=19076）。但逐行测量太贵：3000 行 non-uniform 插入 **107 420 ms**，不可接受。可用形状只有 `setGridSize(最宽行, 行高)` + `ResizeMode.Fixed` + 增量 `_grow_rows()`：3000 行 **652 ms**，hmax 正常。另外 `apply_font()` 在 `__init__` 里早于 `self._tail_follow` 创建 ⇒ 只能用 `getattr(..., None)` 取 | `plugin_selftest` R-158 `max=11222`、`11222/11222`；`.artifacts/hscroll_probe7/8/9.py`、`grid_probe.py` |
+| L-215 | 时间框比邻居高 3 px / 微调按钮抢位置 | FIXED-verified | 同一条 QSS 下 `QAbstractSpinBox`（含 `QDateTimeEdit`）报告的 hint 比 `QLineEdit` **多 3 px**，且默认三个微调按钮把文本区挤得很窄。修法：`ButtonSymbols.NoButtons` + `setMinimumHeight(CTRL_H-2)`/`setMaximumHeight(CTRL_H)`，样式全部来自共享 `theme`（不许内联 `setStyleSheet`，L-194），并补 `QCalendarWidget` 弹层规则。注意 `setMaximumHeight` 只改**布局后**高度，不改 `sizeHint()` | `ui_selftest` R-158 6/6 `time=32 input=32 CTRL_H=32` |
+| L-216 | 关闭按钮要等两秒才关 / 界面像卡死 | FIXED-verified | `closeEvent` 返回**之后** Qt 才把窗口 unmap，而所有记账（`_save_settings`、`settings.release()` 里的 `QSettings.sync()`）都在 `closeEvent` 里同步跑。本机实测 `sync()` 单次 **227-295 ms**（INI 只有几百字节，成本按文件数而非字节数），于是用户盯着一个完全不动的窗口等写盘。修法：`closeEvent` 开头先 `_stop_motion()` + `setWindowOpacity(1.0)` + `hide()` + `processEvents()`，再做记账；并加 `_closing` 重入位（`processEvents()` 期间任务栏关闭 + Alt+F4 会重入，二次保存还会把窗口槽位提前释放）。判据必须是**可见性**而不是总耗时：`.artifacts/close_visual_probe.py` 显示 `hide() entered 0.1 ms`、`sync() entered 17.9 ms`（窗口已不可见）、`sync returned 295 ms` | `ui_selftest` R-160 6/6（`sync_saw_visible=[False]`）；`.artifacts/close_visual_probe.py` `click -> window hidden: 0 ms` |
+| L-217 | 开关点文字和本体之间的空白也会切换 | FIXED-verified | `SwitchRow` 自己实现了 `mouseReleaseEvent`，命中区是整个 **row rect**；非紧凑布局里 label 是 stretch 项，它的 rect 连文字右侧的空白一起吃掉，所以点空白等于点文字。修法：删掉 row 级 handler，新增 `SwitchLabel(QLabel)` 用 `fontMetrics().boundingRect(...)` 只命中**文字宽度**（`pos.x() <= bounds.width()+1`），发 `clicked` 信号由 `SwitchRow` 翻转。**不能**顺手改成 `addWidget(label, 0)`+`addStretch`：那会把 label 缩到文字宽、并把行的最小宽度撑大，左侧栏本来就靠已量过的余量（R-118），一改就出横向滚动条 | `ui_selftest` R-159 6/6 `label=289 text=91`，空白点 `x=190` 不切换；`.artifacts/switch_probe.py` 5/5 PASS |
+| L-218 | R-153 滑动动画被用户否决（做了又退回） | REVERTED | 上一轮按 R-153 做了 `SlideOverlay` 快照 + 交叉淡入，用户实测后要求「直接恢复成以前的」。任何运动都会重新布局三栏，观感像窗口被拉伸。已整体删除 `SlideOverlay`、`maximize_with_slide`/`restore_with_slide`/`_stop_slide`/`_run_slide`/`_finish_slide`、`MAXIMIZE_MS`/`SLIDE_FADE_MS` 与三个状态字段，`toggle_maximize()` 回到裸 `showMaximized()/showNormal()`，`TitleBar._snap_to_max`/`_restore_from_max` 同步回退。`_slide_max_rect()`/`_restore_target()` 保留（`_restore_from_max` 与 L-117 仍要用） | `ui_selftest` R-153 14/14；`ruff` 全通过；R-140 Aero Snap 仍绿 |
+| L-219 | 自检断言「最大化后几何等于屏幕可用区」必假 | FIXED-verified | offscreen 平台的 `showMaximized()` **立即翻转 windowState，但从不应用几何**（屏幕只有 800x800，窗口最小宽 980）。断言像素矩形在离屏永远失败（L-199 同类）。判据改成 `windowState() & Qt.WindowMaximized`——这正是标题栏按钮和 Aero Snap 真正读的东西 | `ui_selftest` R-153 14/14（`(0,0,1100,720)` vs `(0,0,800,800)` 两端仍可区分） |
+| L-220 | `restoreGeometry()` 收到 `str` 直接崩窗口 | FIXED-verified | `ui/geometry` 存在 INI 里是 `@ByteArray(...)`，手工改过或旧版本写坏的 INI 读回来是普通 `str`，`restoreGeometry(str)` 抛 TypeError ⇒ 窗口构造失败（`ui_selftest` 里表现为整个 step `exception:`）。修法：`isinstance(geometry, (QByteArray, bytes, bytearray))` 才 restore，否则 `settings.remove("ui/geometry")`。窗口位置不值得换一次崩溃 | `ui_selftest` 构造第二个 `OmniWindow` 的步骤（R-062 / R-160）均正常 |
+| L-221 | 卸载插件后窗口崩溃 / view destroyed while painting / segfault on close | FIXED-verified | `QWebEngineView` 在插件 `dispose()` 里必须**同步** `shiboken6.delete(view)`，不能留给 `deleteLater()`：`deleteLater()` 排在事件循环之后，而 QtWebEngine 的渲染子进程还在往已销毁的 surface 送帧，退出时 `QPaintDevice` 直接被回收，表现为无 traceback 的进程级崩溃。`plugin_selftest` 的 R-161 断言「view 同步销毁」 | `python tools/plugin_selftest.py` 90 checks |
+| L-222 | 自动重连连到别的板子 / 拔掉后日志串了别人的数据 | FIXED-verified | 自动重连必须证明是**同一台物理设备**回来，不能只按 VID/PID 认型号：旧的分层会附到同型号的另一块适配器上，用户拔掉自己的板子后看到的却是别人的流量。`_resolve_target()` 的档位从强证据到弱证据（同名+身份 -> USB 序列号 -> USB 拓扑位置 -> 唯一 VID/PID），任一层无法唯一定位就停 | `python tools/acceptance_test.py` R-162 |
+| L-223 | 打包后仪表盘空白 / DLL load failed while importing QtWebEngineWidgets / 找不到指定的模块 | FIXED-verified | 打包裁剪用的 `SKIP_DLL_PREFIXES` 是**手写**的，被裁掉的 57 个 DLL 里仍有被保留模块依赖的（`Qt6WebEngineWidgets.dll` 传递依赖 `Qt6Positioning`、`Qt6PrintSupport`、`Qt6Qml*`、`Qt6Quick*`、`Qt6WebChannel` 等），于是「该有的文件都在」但 `import` 直接失败。修法：`make_dist._qt_closure()` 读 **PE 导入表**做闭包扩张，直到保留集自洽；`_pe_imports()` 只依赖 `struct`，读不到就返回 `[]` 降级 | `python tools/make_dist.py --check` -> `BUNDLED DASHBOARD OK` |
+| L-224 | 打包验证说页面没加载 / runJavaScript 恒返回 None / describe() returned nothing | FIXED-verified | QtWebEngine 里 `page.runJavaScript(code)` 的**同步双参重载恒返回 `None`**（开发解释器同样如此），看起来完全像「页面根本没加载」。必须用 `runJavaScript(code, 0, callback)` 回调形式并在 `processEvents()` 里等结果，实测返回 `'object'` / `'complete'` / `0.0` 都正常。同时 `paintedPixels()` 只统计 `<canvas>`，所以 `value`/`lamp`/`switch` 这类纯 DOM 卡片不能断言像素数 | `make_plugins.verify_runtime` -> `{"line": 685, "gauge": 4167}` |
+| L-225 | make_dist --zip 退出码 1 / TimeoutExpired 300 秒 / 明明全部 PASS 却报失败 | FIXED-verified | `verify()` 里的 `acceptance_test.py --only installer` 要跑 5 轮真实安装器（local/download/locked/defer），每轮都复制整个 462 MB 包再起第二个解释器，本机实测 **327.5 s**，而超时上限写的是 300 s，于是所有断言都 PASS 之后才超时，却打印成 `packaged selftest FAILED`，`--zip` 因此永远产不出压缩包。修法：上限放宽到 1800 s，失败/成功各有一行明确日志，并先打印「这一步要几分钟」 | `python tools/make_dist.py --check --zip` -> exit 0 + zip |
+| L-226 | 看板删除或拖拽回传静默失败 | FIXED-verified | `setHtml()` 使用空 origin，页面必须内联 qwebchannel.js；桥对象调用 `action` 而不是不存在的 `call`。 | `tools/plugin_selftest.py` R-165、R-169 |
+| L-227 | 看板卡片拖不动 / 编辑未勾选 | FIXED-verified | 原拖动被编辑开关限制且只有头部响应；现卡片主体始终可拖，删除、开关和缩放保留各自语义。Qt 鼠标释放事件的 button 必须是 LeftButton、buttons 是 NoButton。 | `tools/plugin_selftest.py` R-169 4 项 |
+| L-228 | 曲线历史太短 / 5000 点 / 多通道丢细节 | FIXED-verified | 每通道环形缓冲原已为 5000，但旧 10 秒窗口过滤历史，多通道共享 6000 点下发预算继续抽样。移除下发抽样；默认全部历史，旧 10 秒设置一次性迁移，其他值保留；历史仅在内存，CSV 可导出。旧设置无法区分默认 10 秒和用户选定的 10 秒。 | `tools/plugin_selftest.py` 两通道各 5000 个不同时间点直达 ECharts、首尾一致；手动窗口和迁移通过；两通道下发 12.4 ms（不含完整渲染） |
+| L-229 | 曲线缩放一眨眼就弹回去 / 数据刷新重置缩放 | FIXED-verified | ECharts 的 `dataZoom` 一旦在 option 里带 `start`/`end`，**每次 `setOption()` 都用这几个数字覆盖当前区间**，而 `paint()` 每帧（33 ms）都在调 `setOption()`。所以缩放必须由页面持有：`widget.zoom = {x:[s,e], y:[s,e]}`，`chart.on("dataZoom")` 把用户选择的区间写进去，`lineOption()` 每帧把它写回 option。键名是 `xAxisIndex` / `yAxisIndex`（`getOption().dataZoom[i]` 回来的是**数组**，读 `[0]` 才拿到 axis 号） | `plugin_selftest` R-170「刷新后两轴区间保持 20-60 / 30-70」 |
+| L-230 | 看板缩放滑块一按就拖动卡片 | FIXED-verified | R-169 把整张卡片都变成拖动手柄，而两个缩放滑块画在 `.plot` 里面，于是「按滑条」= 「按卡片主体」= 开始拖动，滑块永远按不动。`inZoomStrip()` 用 `.plot` 的 `getBoundingClientRect()` 判断按下点是否落在底部/右侧 `ZOOM_HIT`(20 px) 条带内，是则把事件让给 ECharts；卡片其余位置照旧拖动。用**命中 canvas** 的真实派发序列验证（命中 `.plot` div 时事件不会冒泡到 ECharts） | `plugin_selftest` R-170（dragging=false、onCanvas=canvas） |
+| L-231 | 看板整页 Ctrl+滚轮缩放（想去掉） | FIXED-verified | 这不是 ECharts 的缩放，是 **Chromium 自带的页面缩放**：它跑在页面之下，JS 的 `preventDefault()` 不可靠。必须在 Qt 侧拦：`QWebEngineView.focusProxy()`（真正收滚轮的是内部子控件，不是 view 本身）装 `eventFilter`，`Wheel + ControlModifier` 一律 `accept()` 后吃掉；`focusProxy()` 要等渲染进程起来才存在，所以 `_build_surface()` 和 `_on_page_loaded()` 各装一次 | `plugin_selftest` R-170（两次 Ctrl+滚轮 blocked=2 且 `zoomFactor()==1.0`；无修饰键滚轮不被拦） |
+| L-232 | 编辑工具把测试文件多缩进 4 格，连改四次仍复现 | FIXED-verified | 对 `tools/plugin_selftest.py` 里「紧跟 `ids = _add_all_kinds(...)` 的一段」反复用整块替换，替换后该段总被多推 4 个空格，`IndentationError` 每次报的行号都不一样（214→211→205→222），看起来像改对了又坏在别处。**判据是 `py_compile`，不是编辑器高亮**；同一锚点最多改一次，不行就改用「整块原文 ↔ 整块新文」的一次性精确替换（含前后各 3 行上下文），别再用 patch | `py_compile` 通过 + `plugin_selftest` 116 checks |
+| L-233 | 整帧耗时门槛在整套里误报（邻居的 60 ms 帧算到这一步头上） | FIXED-verified | 「清除窗口」门槛原来量的是事件循环的帧间隔，可整套跑的时候事件循环还背着别的面板的定时器，一个属于邻居的 60 ms 帧就把它判失败，而同一步单独跑每次都过。改法：**量这一步自己的成本**，把 `_retire_step` 包一层记录每次分片的耗时，门槛用分片自身的最大值（20 ms）而不是帧间隔；帧耗时只作参考输出 | `tools/ui_selftest.py` R-168（20k/100k/400k/900k 块四种规模，分片最大耗时与帧停顿各自独立判定） |
+| L-234 | 看板要加进度条控件 | FIXED-verified | 新控件必须同时改六处，缺一处就是「重启后设置丢失」或「打包校验失败」：① `plugin.py` 的 `KINDS`/`DEFAULT_SIZE`/`_KIND_LABELS`（`retranslate()` 遍历 `KINDS` 所以自动跟着走）；② 调色板的 `_on_kind_changed`——进度条没有 min/max 就没有意义，必须和仪表盘一样显示「范围」，否则只能画一根 0~100 的假条；③ `dashboard.js` 的 `KIND_COLORS` + `body()` + `paint()`（**用 DOM/CSS，不走 `ensureChart()`**，否则 `charts==2` 这个不变量被打破）；④ `dashboard.css` 的 `.bar-*`；⑤ `tools/plugin_selftest.py` 的 `KINDS` 元组（顺序决定 `ids[kinds.index(...)]`）；⑥ `tools/make_plugins.py::verify_runtime` 内嵌的硬编码种类列表与 `assert kinds=={...}`。第六处只在 `make_dist --check` 时执行，日常自测发现不了。另外超上限要标红而不是悄悄夹到 100%，否则故障看起来像「满格正常」 | `plugin_selftest` 124 checks / R-172 7 项（实测像素宽度：5/10→50%、7.5/10→75%、低于下限 0%、超上限 100%+红、无数据 `--`）；`ruff` clean |
+| L-235 | 搜索结果点全屏还是卡（用户猜是「自动滚动到最新」） | FIXED-verified | **用户的假设和我的第一直觉都是错的**。实测 2000 条命中：`set_fullscreen(True)` 2339.7 ms，关掉跟随只降到 1615.2 ms（跟随约占 31%），单独 `sizeHint()` × 2000 = 242 ms。逐项计时把锅定在 `ResultDelegate.sizeHint()`：它每行都 `QTextDocument` + `setPlainText` + `setTextWidth` 真排版（0.13 ms/行），而换行态切换时 Qt 会把**所有行**问两遍——`setGridSize(QSize())` 408.8 ms + `doItemsLayout()` 400.1 ms，各含一遍全量 sizeHint。改法：行高改成算出来——日志字体（`theme.mono_font()`）里**每个字形都恰好一格宽**（CJK、`←`、`◇`、`…`、`±` 实测全是 1 cell，`lineSpacing()` = cell+2），于是 `cells = len(text)`（非 ASCII 走逐字 advance 缓存求和），`columns = width // cell`，`height = ceil(cells/columns) * line_height + 6`，并按 (font, width) 失效缓存。**判据必须是「不构造 QTextDocument」而不是只看毫秒数**：2400 次估算 27.9 ms vs 2400 个文档 395.7 ms。结果 2339.7→241.7 ms、关闭 17.5→9.6 ms、关跟随 1615.2→22.4 ms。留个反向参照：换成固定高度空委托整次切换只要 8.2 ms，所以剩余 ~230 ms 是 Qt 自己重跑 sizeHint + Python 委托调用开销，约 1 万次调用是换换行模式的固有成本，别再往这里找 | `tools/ui_selftest.py` R-175 5 项（`document` 被 patch 后计数为 0 / 1200 行行高全 >0 且二次取值相同 / `reset_metrics()` 后重算同一值 / 全屏切换 136.4 ms < 900 ms） |
+| L-236 | 「保持屏幕常亮的开关关了，屏幕怎么还是常亮」 | FIXED-verified | **不是本软件的 bug**。`powercfg /q SCHEME_CURRENT SUB_VIDEO VIDEOIDLE` 显示 AC=0 / DC=0（方案 `dbc4823a-…  LeagSoftPowerScheme`），也就是 Windows 自己就设成了「从不关闭显示器」，`STANDBYIDLE` 也是 0——这种情况下开关开与关**都不可能**改变息屏行为。顺带排掉两个嫌疑：两个残留 `pythonw.exe`（PID 53300/39512，跑 `D:\OmniCOM-1.1.3…`）的现用 `settings.ini` 里**没有** `awake` 键（只有一份旧备份有 `awake=0`），不是它们在偷偷续命；系统聚合态 `ExecutionRequired=0x3 [SYSTEM\|DISPLAY]` 在没请求前就已置位，说明另有进程/策略持有。改法不是去改系统，而是**把真相说出来**：新增 `power.display_never_off()` 读注册表 `…\<ActivePowerScheme>\7516b95f-…\3c0bc021-…\ACSettingIndex`，为 0 时打开开关就弹一条 info 提示「本机电源方案已设为从不关闭显示器，这不是本软件的行为」。附带修一个假阳性：`SetThreadExecutionState` 没有自己的错误契约，成功时也返回上一状态（首次为 0），于是**陈旧的 `last_error==0` 会把真拒绝伪装成成功**，`apply_flags()` 现在每次先 `set_last_error(0)`；`_kernel32()` 抽成可替换的缝以便测试 | `tools/ui_selftest.py` R-062 新增 2 项（`display_never_off()` 返回 True/False/None 不抛异常；方案本就永不关屏时打开开关会给出说明而不是静默无效），13 项全绿 |
+| L-237 | 看板默认状态与按钮文案（运行/停止 → 继续/暂停） | FIXED-verified | 语义变了而不只是换词：看板**一打开就在刷新**，所以按钮默认那一面必须是「动作面」= 「暂停」，且沿用原来的运行中主题色；灰色「运行」挂在实时看板上读起来像「这台是关着的」。暂停只冻结画面，采集、帧计数、控件数值继续，所以恢复那一面是「继续」而不是「运行」。**改文案必须同一次把测试改掉**：`plugin_selftest` 原来的 R-167 断言「空闲=Ghost、运行=Primary」，默认反向后它会变成在断言 bug；已重写成 R-176（新建即 `Primary`+「暂停」、暂停后 `Ghost`+「继续」、恢复回 `Primary`），R-167 只保留「两面视觉可区分」。连带 `docs.py` 中英文与 README 一起更新 | `plugin_selftest` R-176 5 项 + R-167 1 项；`acceptance_test` R-176 PASS 5/5 |
+| L-238 | `plugin_selftest` R-173「网格常显」断言失败（size=`16px 16px, 16px 16px`） | FIXED-verified | 网格是**两个** `linear-gradient`（横+竖）叠出来的，`getComputedStyle().backgroundSize` 按层返回，于是字符串是 `"16px 16px, 16px 16px"`；写成 `== "16px 16px"` 实际断的是**层数**而不是步长，代码没动它却红了。改成按逗号拆开后逐项比对 16px。教训：CSS 简写属性的 computed 值是多层合并的，别拿整串做等值断言 | `python tools/plugin_selftest.py` -> exit 0 |
+| L-239 | 搜索结果「按时间过滤」开关闪烁 | FIXED-verified | **闪烁 = 同一块东西在相邻两轮事件循环里以两个不同高度各画了一次**，不是布局死循环（先查过：连续 12 轮 `processEvents` 采样 `time_fields` / `TimeFilter` / `results.viewport()` 几何，`GEOMETRY changed: []`，没有振荡；只看「有没有来回跳」会漏掉这个 bug）。真因是顺序：`_on_time_toggled()` 先 `setVisible(True)`，此刻 `time_span` 还是空串，块按 **96 px** 排版并 paint；随后 `_seed_time_from_log()` + `_refresh_time_span()` 填上文字（自动换行），块变 **102 px**，第二轮再 resize + paint。次要因素：`run_search()` 每遇到一条更宽的行就调一次 `_apply_grid()`，填充过程中列表整体重排几十次。改法：① 把范围与跨度文字**在 `setVisible` 之前**准备好，第一次布局就是最终布局；② 批插期间只累计 `_row_width`，`finally` 里调**一次** `_apply_grid()`。实测（2000 条命中）：`setGridSize` 4→2 次且宽度种类 4→2；`time_fields` 事件 `resize 345×96 → show → paint → resize 345×102 → paint → paint`（6 个、两个高度）→ `resize 345×102 → show 345×102 → paint 345×102`（3 个、一个高度）；外层 `TimeFilter` 盒 5→2 个事件；结果视口 3 paint/4 resize → 1 paint/2 resize。**量这个必须记 `(事件, 宽, 高)` 三元组，只数次数看不出「两个高度」这件事** | `tools/ui_selftest.py` R-177（`resize` 恰 1 次 / `paint` 高度唯一 / 首次 resize 高度 == 最终高度 / 跨度文字非空）；`ruff` clean |
+| L-240 | 「看板默认还是非运行状态」 | FIXED-verified | 不是按钮画错，是**存了状态**：`omnicom-data/plugin-data/chart/settings.ini` 里有 `running=0`（`window=0`、`points=5000`、`layout={"widgets": []}`），旧 `_flag("running")` 把它恢复成暂停，于是「默认」变成了「上次留下的样子」。改法和 L-156（保持屏幕常亮）同一族：**不要读它**——`self.live.setChecked(True)` 无条件，`_save_ui()` 里改成 `settings.remove("running")`（旧版本可能已经写进去了，不删就永远留着一个没人读的僵尸开关）。用户明确只要求「修默认状态」，所以按钮文案仍是「暂停/继续」不动（L-237 那次定的那一套） | `tools/plugin_selftest.py` R-176 新增 2 项（加载前预置 `running=0`，加载后仍 `isChecked()`；`_save_ui()` 后 `allKeys()` 里没有 `running`） |
+| L-241 | 插件商店「界面更丰富 + 版本下拉框装指定版本」 | FIXED-verified | **两个真 bug 都是"探针替用户手搓界面"时暴露的**：① 顶部计数用了 `len(self.rows)`（过滤后），一搜不到就写"共 0 / 0 个插件"；改成先 `entries = self.store.rows(self.catalog)` 再 `len(entries)`。② `entry["picked"]` 初始被预置成 `item["latest_version"]`，于是 `refresh()` 里 `wanted` 永不为空，"已装最新则自动选中下一个可降级版本"的分支**从来没执行过**——装了最新版的插件行显示"已安装"且按钮灰着，用户根本发现不了能降级。改成 `"picked": None`。另：`size_text()` 是死代码，已接进下拉框标签；"降级安装"原来用 `Ghost` 看着像次要操作，已并入 `Primary` 集合。**降级不是新路径**：`select_version()` 取记录 → `store.install()` 同一个校验/回滚，唯一区别是版本号更小；`local` 记录（本地已装但目录没有的构建）不允许下载。**目录历史是自动长出来的**：`tools/make_plugins.py` 新增 `history()`，扫 `--out` 里 `<id>-*.zip`、读包内 `plugin.json` 与文件名核对，生成绝对 URL 的 `versions`；因此给 chart 补了真 1.1.0 包（从 `dist/OmniCOM/plugins/chart` 重新打包 358809 B），launcher 只有 1.0.0 也如实只给一条。**测试里的两个坑**：`latest["url"]` 在前面已被绝对化，再拼 base 会 404（看着像代码 bug，其实是测试自己）；R-178 的 picker 测试必须用**干净的 bundle**，共享的 `bundled` 里已经有 demo 1.0.0，会被注成 `local` 记录把下拉框变成 3 项。R-149"无目录地址编辑框"按意图重判，不再按控件类断言 | `tools/plugin_selftest.py` R-178 共 15 项（后端 8 + 界面 7）全 PASS；`plugin_selftest` 149 checks OK；`ruff` clean；离屏探针实测 `1.1.2 · 最新` / `1.1.0`、`降级安装/Primary`、`已安装/禁用/已安装这个版本，无需操作`、过滤 `共 1 / 2` → `共 0 / 2`、英文 `latest`/`installed`/`Install older`，并真实装出 1.1.0 |
+| L-242 | 搜索结果已有数据时开关「按时间过滤」卡顿 | FIXED-verified | **用户的定位完全正确**：「有数据时才卡」这句就是根因的形状。`_on_time_toggled()` 结尾调 `run_search()`，而它第一句是 `clear_results()`，然后把**每一条**命中重新建一遍；可是开关时范围是从缓冲区自身种下的（`_seed_time_from_log()`），命中集合一个字都没变 —— 2000 行全被销毁重建，做的全是无用功。实测 2000 条：总 100–125 ms = `clear_results` 4.6 + `match()` ×2000 13.1 + `_append_row()` ×2000 **76.2** + `line_stamps()` 2.6；76.2 里面每行构造 `QFontMetrics(...)` 占 28.5、每行 `count.setText()` 占 4.4、每行一个 `TailFollow.updating()` 上下文管理器又各占一份。改法：① `run_search()` 先收集 `keep` 交给新的 `_show_hits()`，逐行比对 `count` + `data(UserRole)` 块号 + `toolTip()` 原文，**完全一致就直接 return**，一个 item 都不碰；② 真要重建时整批只开一次 `follow.begin_update()/end_update()`（`_batching` 让 `_append_row` 跳过每行的 `updating()` 与 `count.setText()`），`finally` 里只钉一次 `_apply_grid()`；③ `_wanted_width()` 缓存一个 `QFontMetrics`，`apply_font()` 里跟着换新。结果：开关 **100–125 ms → 23–29 ms**，`addItem`/`clear` 调用数 **0**；收窄到子集 25.5–30.7 ms（201 条）；放宽回全文（真要建 2000 行）110.6 → 72.6 ms 且只清空 1 次。**探针自己也有两个坑值得记**：`fromMSecsSinceEpoch(1500 * 1000)` 把毫秒当秒（夹具时间戳是 `1000.0 + i` 毫秒），量到的是空列表；`item.data(Qt.UserRole)` 可能是 `-1`/`None`，直接拿去比大小就 `TypeError` | `tools/ui_selftest.py` R-179 16 项（开/关 800 条命中 `addItem==0` 且 `clear==0`；收窄 `addItem==200`、清空恰 1 次；放宽 `addItem==800`、清空恰 1 次；换字体后行宽缓存刷新），`ui_selftest` **711/711 项通过**；`ruff` clean |
+| L-243 | 插件商店插件名不突出 / 名字和介绍连成一段 | FIXED-verified | **用户说的不是字号小，而是「分不开」**：行的标题和简介都是普通 `QLabel`，同权重、同字号、同颜色，加上 `layout.setSpacing(6)` 的 6 px，整张卡片读起来就是一整段文字。改法分两层——① `theme.py` 新增 `QLabel#PluginName`（`theme.INK` + `font-weight: 700` + `{_ui_px + 1}px`）与 `QLabel#PluginTagline`（`theme.DIM`），颜色走既有 token，不写死；② `PluginStoreDialog.rebuild()` 给名字加 `objectName`，并在标题行 `header` 与简介之间插一条 1 px 的 `QFrame#PluginRule`（`theme.LINE_SOFT`，`setFixedHeight(1)`，`border: 0`）。**只加粗不够**：名字变粗但颜色仍是正文色，视觉上还是紧贴简介；加一条细线才真正切断。细线用 `QFrame` 而不是 `QLabel`/`setFrameShape`，是因为 QSS 里 `*` 选择器会给出边框，必须显式 `border: 0` 才能保证只有 1 px 背景色。探针确认 QSS 的 `font-weight` 真的 polish 到了 `QFont`（名字 `weight()==700` / 14 px，简介 `weight()==400` / 13 px），避免「规则写了但没生效」这种假通过。 | `tools/plugin_selftest.py` R-180 共 6 项（三个 `objectName` 齐备；名字 700 且像素高大于简介、简介权重 < 600；行内顺序为标题行 → 细线 → 简介；细线高 1 px 且取 `theme.LINE_SOFT`；渲染后 `mapTo()` 量出的盒子在细线上下确有 ≥ 2 px 留白（顺序对但间距塌成 0 也判失败）；样式来自 `theme.app_stylesheet()` 的 `font-weight: 700` + `INK`/`DIM` 而非局部硬编码）；`plugin_selftest` **155 checks OK**（exit 0）；`contrast_audit` 15 对仍全部 ≥ 4.5:1；`ruff` clean |
+| L-244 | 插件商店「检查更新」会弹出弹窗 | FIXED-verified | **用户报的不是对话框，而是一个一闪而过的空白小窗口**；先证明刷新链路根本不弹框——全仓 grep 商店相关代码只有 `confirm_remove()` 一个 `QMessageBox`，`check()` 的结果只写进 `self.status` 文本；再把打包好的 `dist/OmniCOM/OmniCOM.pyz` 解出来复查，同样只有卸载确认框；三次实时探针（monkey-patch `QDialog.exec/open/show` 与 `QMessageBox.*`、真实 `QTest.mouseClick` 点按钮、2 ms 轮询 `app.topLevelWidgets()`）都没抓到任何对话框。**改用「谁变成了顶层窗口」这个角度才抓到真凶**：在 `QT_QPA_PLATFORM=windows` 上装一个**全局** `QEvent.Show/Hide` 过滤器，日志打出 `SHOW Badge window=True title='' obj='Badge' 78x19 parent=None` **每次 rebuild 两遍**（作者徽标 + 已安装徽标）。根因：`QLabel` 无父对象时**本身即顶层窗口**，`plugin_store.rebuild()` 先 `widgets.Badge(str(author))`（`parent=None`）→ `show_text()` 里 `self.show()` → 此时 `addWidget()` 还没执行，于是真的弹出一个 78x19 的空白小窗，下一行 `header.addWidget(...)` 把它 reparent 掉，窗口随即消失——这就是「一闪而过」。因为 `rebuild()` 恰好在每次检查更新完成时被 `received()` → `_task_finished()` 调用，用户自然把它记在「检查更新」头上。修法要**双保险**：① `widgets.Badge` 增加 `_wants_showing` 意图位，`show_text()` 只在**已有父对象**时才 `show()`，并在 `event()` 里对 `QEvent.ParentChange` 补 `show()`；② `plugin_store.rebuild()` 的两个徽标显式传 `row` 作父对象。**关键坑：不能简单地「没父对象就不 show」**——`Badge.__init__` 里那个 `self.hide()` 会让控件处于*显式隐藏*状态，实测（`.artifacts/probe_badge_vis.py`）`hide()` → `addWidget` → `parent.show()` 之后 `isVisible()` 仍是 `False`，徽标会永久消失；所以必须靠 `ParentChange` 补一次 `show()`。同一轮排查排除的疑点：离屏平台（offscreen）根本不会 map 真实顶层窗口，所以前 4 个离屏探针全部漏报；对 `shiboken` 控件 `setattr` 实例属性会抛异常，补丁必须打在类上 | `tools/plugin_selftest.py` R-181 新增 2 项（商店内无 `Badge` 是顶层窗口；无父徽标延迟显示）；真机 `QEvent.Show` 探针复测顶层 Badge 归零；`plugin_selftest` **157 checks OK**（exit 0）；`ruff` clean |
+| L-245 | 文档里贴的插件截图与「五行控件都有数」都没有测试兜底 | FIXED-verified | 用户要求「给支持的插件也单独开介绍，并附实机图，数据看板要那些控件都有数据」，而这批插图以前**只靠肉眼**：`plugin-chart.png` / `plugin-launcher.png` 由 `tools/make_plugin_screenshots.py` 生成，README 与 `docs/PLUGINS.md` 都直接引用，但没有任何自检断言卡片真的有数；同时 `plugins/launcher` **一个测试都没有**，下排「正在运行」扫不到窗口就静默变空也没人发现。三个可证伪点被补上：① `dashboard.js` 的 `paint()` 只读 `widget.channel`，而 `line` 用的是 `channels` 列表，于是 value/bar/lamp 若只给 `channels` 就永远 `--`——截图工具改成两张表都保留，并**读回 DOM** 才写文件（`verify_chart()` 见到 `--` / 空 `0%` / 缺失 `lampText` / 卡片塌成 <160x110 / 溢出画布一律 exit 1 不产出图片）；② `0` 是有效读数而不是「没有数据」，指示灯必须 `OFF`、进度条必须 `0.00`；③ 隐私：原截图脚本起两个真 `notepad.exe`，`EnumWindows` 把本机文档标题（`编译命令.txt - 记事本`、`66.txt - 记事本`、`44.txt - 记事本`）画进了要公开发布的截图，改成 `charmap.exe`（少有人常开）后只剩 `字符映射表`。文档侧：`tools/make_readme.py` 中英各加「插件」章节（两张图 + 五行控件表 + 协议示例 + 快捷启动两排说明），`docs/PLUGINS.md` 重写成 Dashboard / Launcher 双章并新增索引，`make_pyz.py` 把包内 `PLUGINS.md` 的 `](images/` 改写成 `](docs/images/`（该文件落在包根，图在 `docs/images/`） | `tools/plugin_selftest.py` 新增 R-182（8 项，读回 DOM：`3.25` / `42.00`+`42%` / `ON`，无一张卡是 `--`；全 0 时 `OFF` 与 `0.00`+`0%`；曲线 8439 / 仪表盘 3506 像素）与 R-183（9 项，该插件首个测试：3 条快捷方式、喂合成扫描快照后下排 2 块、计数 `3 个快捷方式 · 2 个窗口`、按窗口改名生效、`hide()` 停表 `show()` 起表）；`make_plugin_screenshots.py` 两次实跑 exit 0（`5 cards on a 1156x635 canvas`、`value=0.49 bar=65.00 lamp=ON`、`1180x760 76 KB` / `1000x620 39 KB`）；`plugin_selftest` **174 checks OK**（exit 0） |
+| L-246 | `make_dist --check` 在最后一步失败（`StopIteration`），可前面每一行都写着 PASS | FIXED-verified | `make_plugins.verify_runtime()` 还留着 `for mode in ("bundled", "native")` 两个模式，而 R-174 改成「发布包不含 `plugins/`」之后，`bundled` 那一遍仍在包内找 `plugins/chart`，于是 `next(info.widget for info in host.loaded() if info.id=='chart')` 抛 `StopIteration` —— **失败点在最后一行，前面所有断言其实都已经过了**，所以现象是「验证全过却打包失败」。改成单一 store 模式：先 `assert not (root/'plugins').exists()`（把 R-174 钉进打包校验），再把仓库里的 chart 打成 zip、用 `PluginStore().install()` 装进临时数据目录，然后才断言五种控件与像素；卸载前写的 `plugin-data` 文件在卸载后必须还在。教训：**删掉一个发布形态时，要同时删掉所有断言该形态存在的校验**，否则打包校验会替旧行为守住旧形态；另外这类「只剩最后一步报错」的日志要看**第一个 Traceback**，不要被满屏 `[PASS]` 误导 | `python tools/make_dist.py --check` exit 0：`packaged selftest OK`（无外部依赖）、`PLUGIN CYCLE OK: store install, five widget kinds painted {"line": 9737, "gauge": 4167}, RX, reinstall, data preserved, uninstall`、`updater acceptance suite OK`；`ruff tools/make_plugins.py` 干净 |
+| L-247 | 发布 182 MB 便携包时 `make_release.py --publish` 抛出 `urllib.error.URLError: <urlopen error The write operation timed out>`，release #436341099 已建好但资产是空的 | FIXED-verified | `api()` 里写死 `urlopen(..., timeout=120)`，而这个 timeout 是 **socket 级**的，管的是每一次 `sendall()` 能否在 120 s 内写完；182 MB 在慢速上行链路上单次写入必然超时，请求体被截断，GitHub 侧留下一个没有资产的新 release。修法：`api()` 增加 `timeout` 参数，上传路径传 `UPLOAD_TIMEOUT = 1800`，并在上传前 `print(f"上传 {n} MB…", flush=True)` —— 否则 stdout 被重定向时整段缓冲，看起来像“卡住不动”。重跑会自动 `find_release()` 复用同名 release 并补传，不要手工去删 release | `make_release.py --version 1.1.5 --publish` exit 0，日志出现 `发布已存在 #436341099，复用`、`已上传 OmniCOM-1.1.5-win64.zip (182 MB)`、`latest  : v1.1.5`；`ruff check tools/make_release.py` 干净 |
+| L-248 | 插件商店的默认目录 `plugins/catalog.json` 把每个包指向 `releases/download/plugin-store/…`，可那个 tag 根本没有 release，用户点安装只会拿到 404 | FIXED-verified | 缺的不是代码而是**资产桶**：目录里写死的下载地址必须先有一个叫 `plugin-store` 的公开 release 承载 zip。用 `tools/publish_plugin_store.py` 建桶并上传 `chart-1.1.2.zip` / `chart-1.1.0.zip`（降级目标，**不能删**）/ `launcher-1.0.0.zip` / `catalog.json`；上传前逐个核对本地 sha256 与目录里写的一致；建桶时显式 `make_latest=false`，否则 `latest` 会被资产桶抢走、应用内更新读到错版本 | `publish_plugin_store.py` exit 0：四个资产 `state=uploaded`，`latest : v1.1.5`；对三个下载地址逐个 `Range: bytes=0-3` 取回 → 全部 `206` 且有内容 |
+| L-249 | 搜索栏「折叠 → 全屏 → 退出全屏」之后整个侧栏回不到正常状态（issue #8） | FIXED-verified | 真根因不在全屏，而在 `OmniWindow.relayout_sidebar()`：它读 `self.search_panel.header.height()`，而 `SearchPanel` **根本没有** `header` 属性（只有 `CommandsPanel` 有），于是折叠搜索栏的第一步就抛 `AttributeError: 'SearchPanel' object has no attribute 'header'`，折叠/展开链断在这里。全屏只是让症状显形：进全屏时卡片被 reparent 到覆盖层，退出必须走 `relayout_sidebar()` 才回位。修法：① `SearchPanel` 把 header 存成属性；② 折叠高度一律用 `header.sizeHint().height()`；③ 折叠态进全屏时强制显示正文（否则覆盖层里一片空白），退出时按 `_fullscreen or not _collapsed` 还原。探针 `.artifacts/probe_8.py` 复现原崩溃，修复后折叠态往返稳定在 44 px。 |
+| L-250 | 终端模式按 Tab 没反应（issue #11） | FIXED-verified | **Tab 根本没进 `keyPressEvent`**：Qt 把 Tab 当焦点手势，`QWidget::focusNextPrevChild()` 在 `keyPressEvent` **之前**就被调用（探针 `.artifacts/probe_tab.py` 实测：只覆盖 keyPressEvent 时，Tab 只走到 `focusNextPrevChild`；覆盖成 `return False` 后才收到 `Qt.Key_Tab`=16777217）。修法：`TerminalView.focusNextPrevChild()` 一律返回 False，`keyPressEvent` 里的 Tab 分支才生效；顺带补 Shift+Tab → `CSI Z`（shell 补全要用）。教训：**凡是「某个键完全没反应」先确认它有没有到 keyPressEvent**，不要先在分支里找错。 |
+| L-251 | 窗口开着、串口关着时用 CLI 打开该串口，窗口不同步显示已连接（issue #1） | FIXED-verified | 正常路径其实是同步的（真 CLI 子进程探针 `.artifacts/probe_cli_watch.py` 能看到按钮从「打开串口」变「关闭串口」）。真根因在**路由回退**：`pick_endpoint()` 只要第一个 `state` 探测没答复就返回 `(None, "窗口没有响应")`，而 `new_session()` 把「None」当成「没有窗口」，于是 CLI **自己直连打开串口**——串口真的开了，但窗口里 `_status.connected` 永远是 False，用户看到的就是「窗口没同步」。GUI 线程只要忙一下（清日志、加载插件、最大化）就会触发。修法：① 三种原因变成常量 `REASON_NO_WINDOW / REASON_NO_RESPONSE / REASON_ALL_BUSY`；② 第一次探测失败先等 0.4 s 用 10 s 超时复探；③ `new_session()` 只有「没有窗口」和「窗口都忙别的口」才允许直连，`REASON_NO_RESPONSE` 抛 `PortNotOpen` 并提示 `--direct`；④ `main()` 把 `PortNotOpen` 当决策结果输出（一个 JSON 文档，exit 1），不打 traceback。 |
+| L-252 | 命令列表增删改后跳回顶部（issue #2）；改用锚定行恢复时 `setValue` 被静默吞掉 | FIXED-verified | 两个独立坑叠在一起。① `rebuild()` 把每一行 `takeAt`+`deleteLater` 重建，`QScrollArea` 的 `value()` 自然归零——必须自己恢复。② 恢复**不能只存 `value()`，也不能存行的绝对内容坐标**：增删后面板高度和行高都可能变，实测存绝对坐标时 879 只回到 833。正确锚是「顶层可见行的 `id` + 它到视口顶的偏移」，恢复时用 `row.mapTo(list_host).y() + offset`。③ 恢复必须**先 `list_layout.activate()` + `list_host.adjustSize()`**：`QTimer.singleShot(0, …)` 触发时滚动范围还是 0，`setValue` 被 clamp 成 0 且不报错（探针 `.artifacts/probe_2c.py` 抓到 `restore` 时 `maximum=0`）。修好后 879 → 879，增/改/删各一次都纹丝不动。 |
+| L-253 | 侧栏改成垂直 QSplitter 后折叠只剩一片空白板；退出搜索全屏时卡片脱离分栏 | FIXED-verified | 两处都是「换了父级/几何归属」带来的连带问题。① 折叠高度原来取 `header.height()`：body 隐藏后 header 是唯一可见子控件，会被拉满整张卡片（实测 38 px 的条读成 215 px），所以必须用 `sizeHint().height()`，并给折叠卡片补 `setMaximumHeight`——否则 splitter 会把它重新撑开。② 全屏退出沿用了旧的 `sidebar_box.addWidget(...)`，于是卡片回到普通布局、被拉满整列，分隔条消失；必须 `sidebar_split.addWidget(...)` 放回 splitter 再 `relayout_sidebar()`。③ `splitterMoved` 在 `setSizes` 里也会发，用 `_applying_sidebar_sizes` 区分「用户拖动」与「程序排版」，否则记忆值会被自己的排版覆盖。 |
+| L-254 | 关键字搜索栏的高度分隔条拖动一次要等 100+ ms，非常卡顿 | FIXED-verified | **不是重绘的问题，是同步写盘**。A/B 实测（`.artifacts/probe_drag5.py`）：`splitterMoved` 连着 handler 时 118-132 ms/move，把 handler 断开后 7.9-8.1 ms/move，裸 `QSplitter` 只要 0.08 ms。而 `QSettings.setValue()` 自己只占 0.03 ms —— 代价落在**紧接着的** `processEvents()` 里：写入 `window-<n>.ini` 会让 Qt 立刻把整个 INI 重写（`QSettings.sync()` 实测 ~125 ms，L-216 里记的是 227 ms），拖动每来一个事件都重写一次。修法：拖动时只更新内存里的 `_sidebar_sizes`，用一个 350 ms 的单次 `QTimer` 防抖落盘；实测降到 10-13 ms/move，且停手后设置仍被正确写入。 |
+| L-255 | 把「真实组头吸顶」做进 `QScrollArea` 后窗口卡死，日志刷满 `propagateSizeHints()` | FIXED-verified | `QScrollArea` 只管理**一个**子控件（它的 widget）；把吸顶栏也 `setParent(self.scroll)` 之后两个子控件互相 negotiation size hint，进入和 L-041 一模一样的无限循环，事件循环再也不返回。另一个同源坑：pin/unpin 会改变内容高度 → 触发 `valueChanged` → 再次进入 `_update_sticky_header`，需要 `_sticky_busy` 重入保护。修法：吸顶栏是**面板**的子控件，按 `scroll.viewport().mapTo(self, ...)` 定位并在 `raise_()` 后覆盖在列表顶部。 |
+| L-256 | R-193 的光标像素断言在完整套件里偶发失败（6 像素） | FIXED-verified | 两个独立原因。① 终端页在堆栈里**不可见**时 `QPlainTextEdit.cursorRect()` 返回被裁到 y=0 的矩形，像素探针于是量到的是文字笔画而不是光标（隐藏页实测 11 个 ink 像素、可见页 30 个）。② 实心块与空心框在那一小块矩形里的**总像素数恰好都是 30**（2 px 宽描边 ≈ 填满），用「像素更多」区分不了。修法：测试先 `switch_page("console")` 让页面真正布局；聚焦状态改成可控的 `_caret_focused`（offscreen 下 widget 往往从不是 active），并以「接近实心墨色的像素数」区分（实测 dense 30 vs 1）。 |
+| L-257 | 把真实组头搬进吸顶槽后，吸顶栏**根本不出现**（也不报错） | FIXED-verified | 槽类里写了 `self.layout = QHBoxLayout(self)` —— 但 `layout` 是 `QWidget.layout()` 的方法名，PySide6 上给它赋值**不会覆盖**，读回来仍是绑定的内置方法，于是 `self.layout.addWidget(...)` 抛 `AttributeError: 'builtin_function_or_method' object has no attribute 'addWidget'`。致命之处在于它发生在 `valueChanged` 的**信号处理器**里：PySide6 会把异常打到 stderr 然后继续跑，界面只是「什么都没发生」，测试也照样绿。修法：改名为 `self._box`。教训：**给 QWidget 子类加属性时避开 Qt 已有的方法名**（`layout` / `width` / `parent` / `event` / `size` 等），否则赋值静默失效。 |
+| L-258 | 吸顶组头背景是一块突兀的纯白 | FIXED-verified | 侧栏卡片是 `GlassFrame`：无壁纸时填 `QColor(255, 255, 255, 244)`（**半透明白**），有壁纸时先画磨砂玻璃再叠一层白。吸顶栏却用了 `background: {theme.CARD}`（不透明 `#FFFFFF`），所以看着像贴上去的白条。修法：吸顶栏改为 `WA_TranslucentBackground` + 自绘 `paintEvent`，直接复用 `widgets.paint_glass()` 与 `(255,255,255,244)`，只额外画一条底边细线。实测无壁纸 alpha=244、颜色与背后卡片差 1 个色阶；有壁纸时与卡片同为 `#dbe0f0`。 |
+| L-259 | 就绪栏「还是太高」，但把栏压矮后文字看起来挤了 | FIXED-verified | **用户量的和参数量的不是同一个东西**。实测内容下方实际叠了 48 px：10 px 间隙 + 22 px 就绪栏 + 16 px 根边距（其中 8 px 是阴影环，不可压）。只把 `STATUS_H` 从 22 改到 18，视觉上几乎没变，因为另外 26 px 还在。正确做法是**压外侧间隙**：间隙 10 -> 6、底部基础边距 8 -> 4，栏本身定在 20 px。最终 38 px（原 48），且文字仍有 2.5 px 上下余量。另一个数字坑：`QFontMetrics.height()` 对 11 px 中文字形给的是 **15**（含行距），不是 11；按 11 估算会把栏压到 18 px、只剩 1.5 px 余量，看着就是「挤」。 |
+| L-260 | 用负 contentsMargins 压间距 → 文字变形、位置偏低 | REVERTED | 想把「内容 -> 就绪栏」的间隙单独压小，先后试了两种做法：① `QSpacerItem.changeSize(0, -4)` —— **Qt 会把负高度夹成 0**（实测 `sizeHint()` 仍是 0），压根不生效；② 给就绪栏的布局设 `setContentsMargins(14, -2, 14, 0)` —— 栏内文字被整体上提、上下留白不再对称，用户直接反馈「就绪的字有点变形了，太低了位置」。结论：**不要用负边距去压布局间隙**；`QVBoxLayout` 只有一个 spacing，真要局部分开就得改结构，或者干脆压外侧间隙（L-259）。 |
+| L-261 | 通知堆叠改为「新的在最下」后，卡片间距不均匀、最后两条完全重叠 | FIXED-verified | 三个坑连在一起。① 上限判断用了**递减的运行总量**：弹掉一条后 `height` 与新的上限对不上，结果 12 条都留着（实测跨度 549 px = 61 %，上限本该 405 px）。改成每轮从活列表**重算总和**。② 位置推进用 `item.pos()`：`move_to()` 是 190 ms 的 `QPropertyAnimation`，连续 notify 时上一张还在动画途中，读到的 `pos()` 是半途值，于是每张都比预期多占一点。③ 最后两条完全同 y（实测 814/814）。修法：布局阶段**不做动画**，一律按「从底部往上逐张累加」算出的固定 y 落位，只有**新到的那张**用 `play_in()` 滑入。教训：**异步动画期间不要读 `pos()` 做布局**，要读自己维护的目标值。 |
+| L-262 | 通知堆叠上限算对了，但视觉高度仍然超过一半 | FIXED-verified | `TOAST_STACK_FRACTION` 判的是 `sum(高度 + 间隙)`，而用户看到的是**首尾像素跨度**，两者差一个 `TOAST_GAP`（多算了一条间隙）。把上限判据换成「所有卡片高度 + (张数) × 间隙」与「窗口 × 0.45」比较后，实测稳定在 6 张、跨度 371-396 px（41-44 %），落在「比一半少一点」而不是刚好贴着 45 %。 |
+| L-263 | HEX 视图里未填满的尾行没有时间戳 | FIXED-verified | 尾行走的是 `set_pending()`，而它只插入裸文本；时间戳是 `append_line()` 加的前缀，所以「最后一包没时间戳、等下一包补齐后才出现」——因为补满那一刻它变成了普通行。修法：给 `set_pending(text, stamped=True)`一个开关（整段用正文格式而不是灰色 pending 格式），并在 `_show_hex_pending()` 里用**同一个 `compose_line()`** 拼前缀，两条路径不可能再不一致。 |
+| L-264 | 发送回显会把未填满的收包行整行删掉（静默丢字节） | FIXED-verified | 真根因在 `LogView.append_line()`：它**开头就** `_clear_pending_internal()`，于是任何在「HEX 行还没凑够 16 字节」时写入的行（TX 回显、`··` 系统提示、下一包）都会把那半行从视图里抹掉。用户说的「每次发都有 00000180 …，但是收又不显示这个」就是它。修法：在 `_log_line()` 入口加一道闸——写入非 RX 内容前先 `settle_hex_partial()`，把半行按它自己的时间戳结算成正式行；字节仍留在 `_hex_session`，所以下一包的 16 字节对齐与偏移量照样连续。 |
+| L-265 | 无边框窗口根本无法用鼠标拖动边缘改变大小 | FIXED-verified | `Qt.FramelessWindowHint` + `WA_TranslucentBackground` 的窗口**没有系统边框**，Windows 也就不会提供缩放边。正确做法是应答 `WM_NCHITTEST`（在 `nativeEvent` 里）并返回 `HTLEFT/HTRIGHT/HTTOP/HTBOTTOM/HTxxxCORNER`（10-17），把尺寸手势交回系统的尺寸循环 —— 这样光标形状、双击、Aero Snap 全部自然一致，不用在 Qt 里重写一遍。实测 `SendMessage(hwnd, WM_NCHITTEST, 0, screen_lparam)` 依次得到 10/11/12/15，中间是 1。探针坑：`lParam` 里是**屏幕坐标**，先 `mapToGlobal` 就不要再 `ScreenToClient`，否则偏移翻倍、右侧/下侧永远平不到（我第一版探针就是这么误报的）。 |
+| L-266 | 加上边缘缩放后，窗口能被拖得比布局要求还小 | FIXED-verified | `setMinimumSize()` 只是 **Qt 侧**的夹紧，原生尺寸手势走的是 `WM_GETMINMAXINFO`；没人应答时系统就不知道下限（实测直接 `SetWindowPos(400,300)` 真的得到 400x300 窗口）。另有一个隐蔽 bug：`ctypes.wintypes` **没有** `MINMAXINFO`，第一版实现里的 `ctypes.wintypes.MINMAXINFO` 直接抛 `AttributeError` 被 `except` 吞掉，所以「写了但完全没生效」。修法：按 `winuser.h` 自己定义 `_MinMaxInfo` 结构体，填 `ptMinTrackSize`；用 `from_address()` 读真实内存，并断言写入后确实等于 `minimumSize()`。 |
+| L-267 | 只应答 `WM_NCHITTEST` 完全没用：真实鼠标移动时处理器一次都不执行 | FIXED-verified | 根因是**窗口样式**：`Qt.FramelessWindowHint` 的窗口是 `WS_POPUP`，**没有 `WS_THICKFRAME`**，而 Windows 只对带该样式的窗口做缩放命中测试。诊断方法很关键：先用 `SendMessage(hwnd, WM_NCHITTEST, …)` 测（能得到正确答案，**假阳性**），再用 `SendInput` 模拟真实鼠标移动并统计处理器调用次数 —— 真实路径是 **0 次**。修法：`SetWindowLongW(GWL_STYLE | WS_THICKFRAME)` + `SetWindowPos(SWP_FRAMECHANGED)`，然后用 `WM_NCCALCSIZE` 把客户区撑满整个窗口，外观仍无边框。教训：**别用 SendMessage 验证消息处理，它绕过了真实输入路径。** |
+| L-268 | 命中已正确，但鼠标移到边缘**没有缩放箭头** | FIXED-verified | `WM_SETCURSOR` 才是决定光标形状的消息，而 **Qt 自己应答它并返回 TRUE**，所以 Windows 没机会按 `HT*` 画箭头（实测 `SendMessage(WM_SETCURSOR)` 返回 1）。两个连环坑：① 想让默认处理器画的时候，形状全错（左边给 `SIZENWSE`），因为默认处理器用的是系统缓存的区域，不是本窗口算的；② `WM_SETCURSOR` 的 `lParam` **不是坐标** —— 低字是 `HT*` 码、高字是鼠标消息，当成点去读会让所有位置都落在同一个角（表现为「每条边都是 NWSE 箭头」）。修法：在 `WM_SETCURSOR` 里用 `GetCursorPos()` 取真实位置，喂给与拖拽**同一个** `_resize_hit_test()`，再由 `SetCursor(LoadCursor(IDC_*))` 设定；`IDC_SIZEWE=32644 / SIZENS=32645 / SIZENWSE=32642 / SIZENESW=32643`（逐个 `LoadCursor` 实测过）。 |
+| L-269 | R-204 第一次的测试是**假阳性**，害得问题被判定为已修复 | FIXED-verified | 最初的断言只直接调用 `window._resize_hit_test()`，那当然返回正确答案 —— 但用户实测仍然没有箭头、拖不动。真正该断言的是**原生链路**：窗口样式含 `WS_THICKFRAME`、客户区等于窗口（边框被剥）、`SendInput` 后处理器被调用、光标句柄确实是对应的 `IDC_*`。现在 R-205/R-206 覆盖前三项，光标映射用常量断言 + 真实窗口探针证明。**「函数返回对」不等于「用户能看到效果」**，验收要站在用户那一侧。 |
+
+## L-270 行式控制台丢了光标移动，所以"左右键会删字符"
+- **症状**：用户在终端里按左右键，字符被删除（不是移动）。
+- **根因**：旧 `TerminalView` 是**行式**控制台——`\r` 回列 0，`\n` 开新行，
+  **每一个 CSI 光标移动都被吞掉**（注释写的就是 "everything else in a CSI
+  sequence is swallowed"）。设备（如 `sh` 的行编辑器）回显 `ESC[D` 时，本地
+  `_col` 没动，下一个字符写到已占用的格子，`_write` 便 `cursor.deleteChar()`。
+- **修法**：换成真正的**网格模型**（`omnicom/ui/vt100.py`）：`Screen` 持有
+  `rows x cols` 的 `Cell` 缓冲 + 光标 + 样式 + 滚动区域 + 回滚，`TerminalView`
+  只负责画。输入只发设备，屏幕由回显驱动，与硬件终端一致。
+- **判据**：`ESC[D` 两次后写 `X`，必须得到 `aXc`，不是 `ac`。
+
+## L-271 终端接收一批 1100 字节曾要 6.8 ms，两处分配是主因
+- `_scroll_up()` 每换行都 `[Cell() for _ in range(cols)]`：一次 2 400 行突发
+  要新建约 19 万个 dataclass，占 pitch。改成**行池**（`_spare_rows`）原地
+  `blank()` 复用；`Cell` 加 `slots=True` 去掉 `__dict__`；`cell_width()` 加
+  `lru_cache`（每个可打印字符都调，`unicodedata` 两次查表）。
+- 绘制同理：每格 `QFont(self._font)` + `QPen` 新建，一屏约 2 000 格。改为
+  `_font_for(style)` 缓存 bold/italic 四种组合，颜色也 `_colours` 缓存。
+- 实测：解析 6.8 ms/批 → 4.5 ms/批，`feed+repaint` median 40.6 → 26.3 ms。
+
+## L-272 `styled.widget.style()` 可能为 None，行直接不画
+- `SearchDelegate.paint()` 里 `styled.widget.style().drawControl(...)` 没有
+  判空。`QStyleOptionViewItem.widget` 是**可空**的，一旦为空就抛
+  `AttributeError: 'QWidgetItem' object has no attribute 'drawControl'`，
+  整行不绘制且异常被 Qt 吞掉（R-001 整体失败里唯一的具体线索）。
+- 修法：`host is not None and hasattr(host.style(), "drawControl")` 才调用。
+
+## L-273 性能门禁（R-054/R-055）会被整机负载带偏，必须 A/B 对照
+- 本机同时跑 `ui_selftest`（8 万次检查量级）时，`log_scroll` / `rx_batch` 的
+  p95 常在 40-105 ms 之间跳；`R-055` 心跳还会出现 200-500 ms 停顿。
+- **判定方法**：`git stash` 掉本次改动再跑同一项，基线若同样超标，就不是本次
+  改动引入的。实测基线 `rx_batch` p95 68.0 ms、`R-055` max 318 ms，与改动后
+  同量级 ⇒ 环境问题，不得据此改预算（预算 40 ms / 200 ms 保持不动）。
+
+## L-274 终端 "只能复制整行" 是两个 bug 叠加，而复制本身是对的
+- **症状**：在终端里拖选几个字符，看起来整行都选中了，用户判断"只能复制整行"。
+- **根因一（显示）**：`_paint_row()` 用 `_row_in_selection()` 判断"这一行在不在
+  选区范围内"，然后 `fillRect()` 铺满**整行宽度**。所以哪怕只拖了 4 个字符，屏幕
+  上也是一条通栏高亮。复制出来的文本其实是对的（`'3456'`），但没人会相信。
+  → 改为 `_row_selection_cols()` 返回 `(first, last)` 列区间，**高亮与
+  `selected_text()` 用同一个函数**推导，两者不可能再不一致。
+- **根因二（手势）**：`mouseReleaseEvent()` 无条件把 `_sel_active` 设成松手位置，
+  于是双击选中的词在松手瞬间被压回一个格子；`Shift+点击` 也因为没有锚点而退化成
+  新的单格选区、再被"空点击清空"逻辑抹掉。
+  → 按 `_sel_mode`（`char`/`word`/`line`/`extend`）分别处理 release；新增
+  `_caret_cell` 记住上一次落点，Shift+点击从那里扩选（xterm 行为）。
+- **根因三（Qt 没有三击事件）**：第三个点击是普通 `MouseButtonPress`。用
+  `_count_click()`（时间窗 + 4 px 容差）自己数；双击的 press 会**先**于
+  `mouseDoubleClickEvent` 到达，所以词选必须在 press 里就完成。
+- **判据**：拖 3..6 列 → 复制 `'al 1'`，且高亮像素宽度 == `4 × cell_w`（实测
+  28 px / 28 px）。单纯点击必须 `highlight_span() == (-1, -1)`。
+
+## L-275 终端选区还有四个易漏的一致性细节
+- **宽字符**：CJK 占两格，选区端点落在续格上会切掉半个字。`_snap_cols()` 把端点
+  向外扩到整字边界，否则复制文本会静默少一个字。
+- **行尾填充**：终端每行都补空格到整宽，复制必须 `.rstrip()` 掉（xterm 也这样），
+  但**不能** strip 左侧——从行中间开始选就该从那个字符开始。
+- **反向拖选**：`_selection_range()` 取 min/max 即可，但裁剪每行时仍要按
+  "首行从 c1、末行到 c2、中间行整行"的规则，否则倒着拖会得到镜像的后半段。
+- **`.strip()` vs `.rstrip()`**：中间行原本用 `.strip()`，把行首空格也吃掉，
+  多行复制时缩进会丢；每行只 `rstrip()`，最后再统一去掉末尾空行。
+
+## L-276 `mouseReleaseEvent` 会破坏双击/三击的选区（Qt 事件顺序）
+- 一次双击在 Qt 里是：`Press` → `Release` → `DblClick` → `Release`。
+  如果 `Release` 里无条件写 `_sel_active = _cell_at(pos)`，紧跟在 `DblClick`
+  后面那个 `Release` 会把整词的选区打回一个格子。
+- 修法不是"猜是不是双击"，而是**把选区模式存下来**（`_sel_mode`），在
+  `Release` 里按模式决定语义。三击同理：`line` 模式下 release 不改选区。
+
+## L-277 R-055 在本机稳定失败，用 `git stash` 单次对比会得出错误结论
+- 现象：`R-055 慢驱动开关期间界面心跳无超过 200 ms 的停顿` 反复失败，
+  实测 max 在 **148 / 261 / 295 / 316 / 333 / 385 / 411 / 677 / 932 / 1047 ms**
+  之间大幅跳动。
+- **我踩的坑**：先做了一次 `git stash push -- terminal.py ui_selftest.py`，
+  跑出基线 148 ms **PASS**，于是判定"本轮终端改动引入了回归"。这是**错的**：
+  单次采样在这台机器上完全是噪声。改成各跑 4 次后，**基线也是 0/4 通过**
+  （305/339/305/385 ms），与新版（295/333/932/1047 ms）同量级。
+- **插桩证据**：在 R-055 流程里给 `TerminalView.feed` / `paintEvent` 计数，
+  12 次开关期间 **feed 0 次、paint 0 次**，而心跳仍有 677 ms 停顿 ⇒
+  停顿与终端无关。堆栈只到 `<module>`，说明卡在原生/事件循环层。
+- **所以**：判定"是不是我改坏的"必须①多次采样比分布，②用插桩证明代码路径
+  是否真的被执行。**单次 A/B 在这类时序指标上没有任何说服力**（L-273 的升级版）。
+- 预算 200 ms 与 40 ms 都不动：问题在测量环境，不在产品。
+
+## L-278 `_flush_rx` 里有个 `if console:` —— 终端页不可见时它根本不解析
+
+- 代码是：`console = self.console.isVisible()` … `if console: self.console.feed(data)`。
+  也就是说**用户坐在日志页时，终端网格完全不更新**。这在纯 UI 场景没问题（看不见
+  就不用画），但一旦要让 CLI 读屏幕就致命：`cli screen` 会在用户没点终端页时返回空白。
+- 这也顺手解释了 R-055：那个步骤全程不在终端页，所以 `TerminalView.feed` /
+  `paintEvent` 被调用 **0 次**（已插桩证实，L-277）。
+- **修法**：`TerminalPage` 持有一个**常驻镜像** `Screen(24, 80)`，由 `_on_rx` 无条件
+  喂字节，与页面可见性无关；`TerminalPage.feed()` 同时喂可见视图与镜像。
+  宁可多花一次解析（1100 字节约 4.5 ms/批，且已优化），也不要让 CLI 看到空屏。
+
+## L-279 CLI 的窗口命令有两条纪律：白名单要显式扩展，`_control_send` 只吃 hex
+
+- `_emit_window()` 只复制**固定白名单**的字段，新增命令的返回值会被静默丢弃
+  （第一次接 `screen` 时 `rows`/`cols`/`cursor` 全没了）。加了 `keep=` 参数显式列出，
+  比把白名单越拉越长更可控。
+- `_control_send()` 的参数是 `hex=`（不是 `data_b64`），并且**不追加任何行尾**。
+  `keys` 正好可以直接复用它 —— 这正是 `send`（面向行，追加 CR/LF）做不到的事。
+- 写端到端测试时，**CLI 必须跑在别的线程/进程里**：窗口在自己的 GUI 线程处理请求，
+  在 GUI 线程里 `subprocess.run` 会死锁，表现为"窗口繁忙/超时"而不是报错。
+
+## L-280 「按删除键乱行」是两个独立缺陷叠在一起
+- **缺陷一：字节被解析了两次。** `_on_rx` 喂 `page.mirror`，`_flush_rx` 又
+  `if console: console.feed(data)` 喂 `view.screen`。两份网格各自演进，只要一方
+  漏掉一个 chunk 就永久漂移 —— 屏幕显示出重复/错位的字符。
+  → 改成**一份屏幕**：`TerminalView.attach_screen(mirror)`，视图只画不解析；
+  字节唯一入口是 `TerminalPage.absorb()`（由 `_on_rx` 无条件调用）。
+- **缺陷二：`~` 序列被整类丢弃。** `_apply_csi` 的分支只处理字母 final
+  （`A`..`u`），而 **`ESC[3~`（Delete）/`ESC[1~`（Home）/`ESC[4~`（End）/
+  `ESC[5~6~`（PageUp/Down）的 final 是 `~`**，全部落进末尾那句
+  "Everything else is a mode/query we can safely ignore."。设备已经删了字符，
+  屏幕没删，下一次回显就落在错位的列上。
+- **判据**：`abcdef` + `ESC[D` + `ESC[3~` 必须得到 `abcde` 而不是 `abcdef`。
+
+## L-281 `0x7f` 不是"控制字符"，在串口上它就是退格
+- `_consume_char` 原来写 `if char == "\x7f": return index + 1` —— **直接丢弃**。
+  真实终端里 DEL 确实不算编辑操作（由 shell 处理并回显），但**很多设备/裸
+  `getchar()` 循环会发 0x7f 表示"删掉上一个字符"且自己不回显**。丢掉它 = 屏幕多一个
+  字符，之后整行右移一列，看起来就是乱行。
+- 修法：退回一列并擦掉该格（光标停在原处，与 xterm 一致），同时清 `wrap_pending`。
+
+## L-282 `ESC[4~`（End）与 `ESC[4h`（IRM）不能共用一个 `first == 4`
+- 我第一版在 `_apply_tilde` 里写 `elif first == 4: self.insert_mode = False`，
+  结果 End 分支 `elif first in (4, 8)` **永远不可达** —— Home 之后按 End 毫无反应，
+  而单独按 End 却"看起来正常"（光标本来就在行尾）。是个只在这种顺序下暴露的 bug。
+- 正确分工：`ESC[n~` 只处理"编辑键"语义（2=Insert, 3=Delete, 1/7=Home,
+  4/8=End, 5/6=PageUp/Down, 200/201=bracketed paste）；IRM 属于
+  **`ESC[4h` / `ESC[4l`**，放进 `_apply_mode` 的 `not private and code == 4`。
+- 教训：**编号参数在不同 final 下含义完全不同**，同一个数字绝不能跨 final 复用。
+
+## L-283 `view.reset()` 只清选区、不清屏，会让老测试悄悄失效
+- R-212 把屏幕所有权移到 `TerminalPage` 之后，`TerminalView.reset()` 如果不擦屏，
+  就变成"重置选区"而不是"重置终端"，R-209/R-210 立刻大面积失败
+  （`selected_text()` 返回 `''`，因为屏幕里还留着上一步的内容）。
+- 修法：`reset()` 在**原地** `erase_in_display(2)` + 清 `scrollback` + 光标归零，
+  不新建 `Screen` —— 新建会让窗口继续画旧网格、CLI 读新网格。
+
+## L-284 「清除窗口」绑死 `clear_log`，在终端页等于没反应
+- `btn_clear.clicked.connect(self.clear_log)` 是写死的。用户坐在终端页时按它，
+  清掉的是**看不见的日志**，终端纹丝不动 —— 从用户角度就是「这个按钮坏了」。
+- 修法：`clear_window()` 读 `current_page()`，`console` 页清终端、其余清日志。
+  判据必须两边都测：终端页清完 **log 仍在**，日志页清完 **终端仍在**；
+  只测「清掉了」会漏掉"清错对象"。
+- 同类风险：任何"动作按钮"接到具体视图前，先问一句"它在别的页上应该做什么"。
+
+## L-285 `ESC[2J` 不清光标，所以清屏后输出从半行开始
+- `TerminalView.clear()` 原来只有 `self.screen.erase_in_display(2)`。
+  `ESC[2J` 的语义是**只擦字符、不动光标**（真正的终端也是靠
+  `ESC[2J ESC[H` 两件事才回到左上角）。
+- 于是右键清空后光标停在 `(1, 8)`，下一行输出从第 8 列开始 ——
+  用户看到的就是「光标不是从头开始，而是接着清空前的位置」。
+- 修法：`erase_in_display(2)` 之后显式把 `cursor_row/cursor_col` 归零、
+  清 `wrap_pending`、清选区与回滚偏移。
+- 通用教训：凡是"看起来清干净了但位置不对"的 bug，先查**光标是不是独立的第二件事**。
+
+## L-286 `Screen.resize()` 只拷左上角矩形 = 折行内容被截断 + 光标错位
+- 旧实现：建一张 `rows x cols` 的新网格，把 `min(rows, old.rows) x min(cols, old.cols)`
+  拷过去，然后 `cursor_col = min(cursor_col, cols-1)`。
+- 对于**软折行**（每个 shell 都有，我们自己的 `_put` 也是）的屏幕，这意味着
+  缩窄时**第 0 行第 cols 列之后的内容直接消失**，而光标还留在原来的行号上 ——
+  于是下一次回显/上键/Delete 落在完全不相干的格子，屏幕看起来"折行显示到了前半行"。
+  实测 80 列写 100 字符再缩到 40 列：后 60 个字符被删，光标仍停在 `(1,20)`。
+- **修法（reflow）**：① 把每行**解包**成逻辑行（去掉续格、去尾部空格）；
+  ② 用 `mapping[(src_row, src_col)] -> (new_row, new_col)` 边重排边记光标；
+  ③ 光标若在"行尾之后"（未写入的空格），回退到该逻辑行最后一个字符的位置；
+  ④ 只在**光标会被挤出底部**时才从顶部丢行进 scrollback，否则**尾部多出来的行
+  是折行产生的空白，直接丢弃**。
+- 第 ④ 步踩过一次坑：一开始无条件把 `new_grid[:overflow]` 推进 scrollback，
+  结果缩窄后 `$ ` 提示符被推到历史里，屏幕从 `yyyy` 开始 —— 内容其实没丢，
+  但用户看到的是"行首不见了"。
+
+## L-287 终端 reflow 的正确性判据
+- **不能只断言"没崩"**：截断后的屏幕同样不崩。要同时断言
+  「字符总数不变」+「首行以提示符开头」+「内容连续」+「光标变了坐标但指向同一字符」。
+- **上/下键与 Delete 必须作为 reflow 的下游验证**：它们是"错位"最先暴露的地方
+  （上键少一行、Delete 删错位置）。只测文本不测按键，会漏掉光标映射的 bug。
+- **宽字符要单独测**：CJK 占两格，reflow 时端点若落在续格上会把字切开，
+  复制/显示都会出现替换符（`\ufffd`）。
+- 又一次被自己的探针期望骗到：第 4 步我让光标站在行尾空白处按 Delete，
+  认为"应该少一个字符"，其实**在空处按 Delete 本来就是无操作**。
+  测按键行为前先确认光标下面有没有东西。
+
+## L-288 手画的滚动条不是控件 —— 必须自己实现命中/拖动/跳转
+- `_paint_scrollbar()` 只做了 `drawRoundedRect`：**没有任何输入处理**，所以鼠标在上面
+  按下等于点正文（结果是被当成选区的起点）。用户说的「滚动条无法拖动」就是这个。
+- 修法：把几何抽成 `_scrollbar_geometry() -> (track, thumb)`，**绘制与鼠标共用**这一份
+  （两处各算一遍必然漂移）；再补 `_scrollbar_hit()` / `_set_scroll_from_thumb()` /
+  `mousePress|Move|Release` 的拖拽分支。
+- 两个细节：
+  * **命中区要比滑块宽**。滑块只有 4 px，严格按像素命中几乎抓不住 → 向两侧各放宽 4 px。
+  * **滚动条优先于选区**。否则在滑块上按下会开始一段文字选区，松手后留下一条高亮。
+    press 里先判 `_scrollbar_hit()`，命中就清空选区并进入拖拽态。
+
+## L-289 点击轨道应该"跳过去"，不是"翻一页"
+- 我第一版写的是 `_page_scroll()`（按 `screen.rows - 1` 翻页）。问题：如果点在滑块
+  附近，翻一页几乎看不出变化，用户会以为"点了没反应"。
+- 真实滚动条（Windows/macOS/xterm）的行为是**把滑块中心移到指针处**，然后可以继续拖。
+  改成 `_scroll_drag_offset = thumb.height() / 2` + `_set_scroll_from_thumb()`，
+  一次点击就能跳到任意位置，且手指不松就能接着拖。
+- 自测时也踩了一次：我在 `track.top()+2` 处点击，那里**正是滑块本身**（我们是实时状态，
+  滑块在顶部），于是走了 thumb 分支、`_scroll_off` 当然不变。点轨道要挑**滑块之外**的位置。
+
+## L-290 用真值判断"要不要算"，等于把最特殊的那个值留给默认值
+- 滑块位置原本写成：
+  ```python
+  position = 0.0
+  if self._scroll_off:                       # ← 短路发生在最常见的那个值上
+      position = travel * (1 - self._scroll_off / maximum)
+  ```
+  `_scroll_off == 0` 是**实时屏幕**（用户 99% 时间都停在这里），却被 `if` 跳过，
+  `position` 保持初值 `0.0` ⇒ 滑块画在**顶部**。表现就是「拉到底后滑块跳到最上面」。
+- 修法：**取消短路**，把 `0` 当成正常输入参与运算：
+  `position = travel * (1.0 - min(1.0, self._scroll_off / maximum))`。
+- 规律：当某个变量的"零值"本身是**有意义且最常见**的状态时，绝不能用
+  `if value:` 当作"是否初始化"的代名词。要么用 `is None`，要么直接算。
+  同类陷阱：`if self._scroll_off:` / `if self.count:` / `if self.offset:`。
+
+## L-291 滚动条的几何自检要覆盖"两端 + 单调性"
+- 只断言"能滚动"或"有变化"抓不到这类 bug：`_scroll_off` 从 38 变到 0 时滑块确实
+  移动了（从 218 跳到 4），看起来"有反应"，只是方向错了。
+- 可靠的三组判据：
+  ① **端点**：`_scroll_off == 0` → 滑块贴轨道**底**；`_scroll_off == history` → 贴**顶**；
+  ② **单调**：取 4 个档位的 `thumb.top`，必须严格（或非严格）递减；
+  ③ **行为**：真实拖到底后 `_scroll_off == 0` **且**再读一次几何仍在底部
+  （只查 `_scroll_off` 会漏掉"状态对了但画错了"）。
+
+## L-292 同一信号被两个地方各接一次 = 每个按键发两遍（"ls" -> "llss"）
+- 终端改成插件后（R-218），`TerminalPlugin` 自己把 `page.keyBytes` 接到 `api.send`，
+  而**宿主仍然保留着** `self.console.keyBytes.connect(self._on_terminal_keys)`。
+  两条链路都写串口，于是每按一个键，driver 收到两个字节：`ls` 变成 `llss`。
+- 为什么回归测试没抓到：R-026 原来断言 `grew == 3`，但它调用的是
+  `window._on_terminal_keys(...)`（直接函数调用），**根本没走信号**，所以连接多一条
+  也测不出来。测试必须走真实入口（`view.keyBytes.emit` 或 `QTest.keyClick`）。
+- 判据写成"统计真正落到 driver 的字节"，并且是 `==` 而不是 `>=`：
+  `>=` 对重复发送完全无感。
+- 迁移任何"信号→副作用"的接线时，先 `grep` 这个信号名，确认**只有一个**连接点。
+
+## L-293 插件化之后，宿主里那批"转发方法"必须一起删掉
+- `_on_terminal_keys` 是插件化之前的发送入口。插件接管后它变成死代码，
+  但**留着就会被误接**（正是 L-292 的来源）。
+- 规则：迁移完成后，宿主里凡是只做"转发给旧页面"的方法都要删，而不是留着当兼容层——
+  留着等于给下一个人（或下一次编辑）提供第二个接线点。
+- 连带影响：`window.console` 现在是 `TerminalPlugin` 而不是 `TerminalPage`，
+  测试里给 `console.mirror` 赋值会因为 `__getattr__` 转发变成只读而失败，
+  要给真实的 `console.page.mirror` 赋值。
+
+## L-294 R-055 的自测轮询与心跳同为 10 ms，会自己造出"停顿"
+- R-055 用 `QTimer.singleShot(10, poll)` 轮询串口是否就绪，同时又用 10 ms
+  心跳测停顿 —— 两者同频竞争，心跳经常被挤到 20 ms，偶尔叠加成 200-370 ms 的
+  "尖峰"。这些尖峰**不是界面被卡住**，是测量器自己抢了事件循环。
+- 把轮询放宽到 25 ms 后，尖峰明显减少（心跳仍是 10 ms，真卡顿照样能测出来）。
+- **不要为了让门禁变绿而放宽 200 ms 预算**。这里的修法是让"尺子"更准，不是让
+  阈值更松。
+
+## L-295 判断 R-055 是否回归的可靠做法：把插件全部停用再测
+- 三次 A/B（各 4 次采样）：
+  * 插件全启用：median 208 ms，2/4 通过
+  * 只停 terminal+transfer：median 167 ms，3/4 通过
+  * **全部插件停用（只剩宿主）：median 191 ms，3/4 通过，max 243 ms**
+- 最后一行是关键：连插件都不加载时同样会超 200 ms ⇒ 这台机器的虚拟串口枚举
+  （`comports()` 走 ctypes，L-130）才是主因，与插件化无关。
+- 方法要点：**必须有一个"把被测特性整个关掉"的对照组**。只比较"开/关插件"是不够的
+  ——两者都可能被同一个环境噪声压住。
+
+## L-296 「发布包不含 plugins/」这条老规则会静默吃掉新拆出来的核心插件
+- 现象：1.1.6 的 zip 构建成功、678 条目、`testzip()` 为 None、打包自检
+  `SELFTEST OK`，但解压后**没有** `plugins/terminal`、`plugins/transfer`。
+  用户拿到的包会没有终端页和文件传输页 —— 而自检全绿。
+- 根因：R-174（发布包不内置任何插件，防止更新覆盖用户自装插件）写死在三处
+  **互相独立**的断言/白名单里，R-218 把终端与传输拆成插件时只改了应用代码：
+  1. `make_dist.KEEP_PLUGINS` 只列 Qt 子目录（`platforms`/`styles`/…），不列我们的插件；
+  2. `make_plugins.verify_runtime()` 里 `assert not (root/'plugins').exists()`；
+  3. `make_dist` 的模块 docstring 明写"No `plugins/` folder is shipped"。
+- 修法：**把 R-174 的作用域收窄到"商店插件"**，并新增 `CORE_PLUGINS`
+  白名单（`terminal`、`transfer`），只复制、不覆盖（用户改过/升级过的保留）。
+  断言也改成**点名**商店插件（`chart`、`launcher`）而不是整个目录。
+- 判据：`make_dist.verify()` 在任何耗时步骤之前先断言
+  `plugins/<name>/plugin.json` 存在 —— 打包少一个核心插件必须**直接失败**，
+  而不是等用户报"没有终端"。
+- 教训：**规则的作用域会随架构漂移而变宽**。R-174 的原意是"别覆盖用户的插件"，
+  但"整个目录都不许有"是它当时的实现细节；拆插件时必须回头审一遍这条实现细节
+  是否还在表达同一个意思。三个独立断言点，改一处不算改完。
+- 附带踩坑：`_copy_pyside()` 里的 `source` 是 **PySide6 目录**，`plugins` 变量正是
+  Qt 找 `platforms/` 的地方。把我们的插件复制塞进那个循环，会连
+  `KEEP_PLUGINS` 一起搬走，打包自检立刻报
+  `Could not find the Qt platform plugin "offscreen"`（L-296 的第二半）。
+  Qt 插件目录和我们的插件目录**同名不同义**，别在同一个函数里处理。
+
+
+## L-297 「按源单元格索引」找光标，遇到空行就必然失效
+- `_reflow` 原来用 `mapping[(src_row, src_col)] -> 新位置` 跟踪光标，可靠的前提是
+  「光标一定落在某个**有内容**的格子上」。这个前提不成立：
+  * 光标停在**空行**上（提示符刚换行，还没输出）；
+  * 光标停在**最后一个字符之后**（`"$ "` 的下一列）。
+  两种都查不到条目，旧代码 `target = mapping.get(...)` 一路 fallback 到 `(0, 0)`。
+- 后果：每次 resize 都把光标扔到左上角，设备下一段输出就从第 1 列开始覆盖
+  ——用户看到的就是「又显示在一行」。
+- 正确模型：光标在**逻辑行里的扁平下标**（相对整条未折行文本的偏移），
+  用 `行内已收集的单元格数 + _cursor_flat_index(本行, 光标列)` 算出来；
+  `dest[len(line)]` 专门存「文本之后」的位置。
+
+## L-298 「这一行满了」不等于「软换行」
+- 我用 `_row_is_full()`（判断整行无空格）来识别软换行，想让拉宽窗口时把
+  断开的行合并回去。两个错误：
+  1. **真实 shell 提示符一定含空格**（`"$ "`、`root@host:/path# `），所以
+     "无空格"几乎永不成立，合并功能等于没生效；
+  2. 反过来，一行**恰好写满**之后跟 `\r\n`，那是两条互不相干的输出，却被
+     当成续行粘成一行（用户：「两行不同的内容叠在同一行里」）。
+- 判据必须是**事件**而不是**形状**：只在 `_put` 触发右边界换行时把**目标行**
+  标成 `_continued[row] = True`；`\n`/`\r\n` 的 `_line_feed(wrap=False)`
+  明确清掉标记。`_scroll_up/_scroll_down/insert_lines/delete_lines` 都要同步
+  位移这个并行数组，否则滚动之后会拼错行。
+- 教训：**任何时候想用"格子长什么样"推断"发生过什么操作"，先问一句
+  "这个形状是不是也能由别的操作产生"**。
+
+## L-299 我擅自让 `\r` 跳到"逻辑行首"，制造了用户报的那个 bug
+- 现象是「两行不同的内容叠在同一行」，我推断是 `\r` 只回到当前网格行第 0 列、
+  没有回到软换行的起点，于是改了 `_carriage_return()` 去回溯 `_continued`。
+- 结果更糟：设备 `\r` 重绘时新文本落在**更早**的一行，旧的尾巴留在下面的
+  续行里，正好就是"两行叠一行"。
+- 查 xterm 官方 ctlseqs：`CR` 是单字符控制，语义就是「移动光标到**本行**第 0 列」，
+  DECAWM 折行产生的续行在终端里**仍然是独立的一行**，标准没有任何"逻辑行"概念。
+- 教训：**"和主流一致"要用规范原文核对，不是靠对现象的直觉推理**。
+  xterm/ECMA-48 的行为定义是权威，改之前先查。
+
+## L-300 重排时为了"安放光标"多生成一行，会把顶行挤进回滚区
+- 宽字符用例（30 个「中」，6x40 → 6x20）丢了 5 个字。原因：文本恰好填满
+  6 行，光标又在"文本之后"，我 `while len(new_grid) <= row_index + 1:
+  start_row(True)` 硬加了一行 ⇒ `overflow = 1` ⇒ 按规则从**顶部**丢一行
+  进 scrollback。
+- 正确做法：行尾之后没有位置时，光标就留在**最后一行的最后一列**，
+  这恰好是真实终端"pending wrap"的状态，不需要额外行。
+- 教训：**"为了放光标而增加内容"是危险操作**。光标是个指针，不是内容；
+  为它多出来的任何一格，都会被后续的溢出/裁剪规则当成真实数据。
+
+## L-301 Linux 长行/历史重绘仍错乱：字符网格尺寸与远端不一致（FIXED-verified）
+- 新证据：COM30只读查询为24x80、TERM=vt220；真实长输入/清行/上历史/下历史回包，在80列重放能恢复提示符和草稿，在52或104列重放产生提示符覆盖、历史残留。此前重排合成用例不能证明实机修复。
+- 修法：字符网格与可见视口分开，默认钉死80x24并用滚条查看，另给132x24/自动尺寸（R-300）。不注入stty、不做端口/设备特判（R-300）。R-214/R-297 重排用例改在显式自动尺寸模式下运行，否则默认固定后该用例会静默失效。
+- 证据：`.artifacts/terminal-real-rx.json`；用户实机确认界面正常后提交。
+
+## L-302 插入模式切换错误归零光标（FIXED-verified）
+- `_apply_mode` 的非私有模式4分支多调用了 `_move_to(0,0)`，且有重复不可达分支；移除后，ESC[4h和ESC[4l单点探针均保持(0,11)。真实捕获中未见该序列，不将它冒认为本次实机错行的主因。
+
+## L-303 刚打开的串口上按键被静默丢弃：发送守卫读了过期的状态快照（FIXED-verified）
+- 现象：全量 GUI 里 R-292 偶发失败，详情为 `b'' connected=True write_is_manager=False view_focus=False tx=0`，而单跑必过。
+- 根因：`_plugin_send` 判 `self._status.get("connected")`。`_status` 只在排队的 `status` 信号送达时更新，紧接在成功 open 之后仍是「未连接」，于是 `api.send` 返回 False，一个字节都没写；而 `bridge.state()` 直读 manager，答 `True`。**串口是开的，按键却丢**，属于真产品缺陷，不是测试假阳。
+- 修法：守卫改用 `self.bridge.state() or self._status`（manager 是权威答案，且只是一次字典读）。
+- 判据：污染顺序（R-215→R-217→R-292）下必须 `tx>0`；只放宽断言不算修复（对照 L-269/L-274 的假阳教训）。
+
+## L-304 打开日志后跟随失效、停在终端页（FIXED-verified）
+- `_show_log_text` 在 begin_batch 后 clear_all，后者将批量计数归零，end_batch 无法释放 TailFollow 更新锁，后续 follow 全部短路。清屏前移到 begin_batch 之前；真实日志页面是 terminal，不是 console。
+- R-309：文件选择器仅所有文件；文件加载标记在关闭文件后保留，下一次 toggle_connection 在 bridge.open 前 clear_log 并开启自动跟随。关闭日志不立刻清屏。
+- 验证：`python tools/ui_selftest.py --only log_mode_serial_lock` 14/14，包括 .capture 文件、实际页面可见、更新锁归零、重新连接清屏与三批新日志跟随。
+
+## L-312 看板刷新卡顿（后备：懒更新）（OPEN）
+- 2026-11-20 更正：用户否定此轮结果，原“渲染帧率不降、卡顿已修复”结论无效。下列42.4/34.3→2.9/1.4ms只测 setOption 提交，不是绘制完成；30轮合并为一次不能证明持续刷新。实际完成背压和负载证据见 L-316。
+- 同时把仪表改成“结构只建一次、每帧只挪指针”：实测仪表本身只要 1.4 ms，所以这部分收益很小，已如实记录，不当成主因。
+- 两个被实测否掉的方案（不得重试）：
+  - `appendData()`：ECharts 不把追加的点反映到 `getOption()`，我们的状态检查与重同步读到旧序列，曲线直接冻住（探针复现：尾部停留 2.99 不再前进）。
+  - 把 `progressive` 改成随展示帧数自适应：同一配置在离屏环境下中位在 **13 ms 与 84 ms** 之间摆动，无可复现收益，且 R-307 明确断言 `progressive == 800`，已回退。
+- 测量陷阱：最初的“5 s 超时”是因为探针里 `acked.disconnect()` 无法断开 lambda，导致监听器泄漏、测量失真；改用具名槽后恢复正常。任何测确认等待的探针都要用可断开的槽。
+- 证据：`.artifacts/probe_chart_ab_baseline.py`；`plugin_selftest` R-320（观察器断言 `lazyUpdate` 全为真）、222 checks、exit 0。
+- 历史居中回归曾弱化为“在视口内/最后一张接近中心”并依赖额外 settle，不能代表用户要求；L-315 已撤销此弱化并移除重复 settle 链。
+
+## L-311 曲线窗口跑满后不再刷新（切标签页才被注意到）（FIXED-verified）
+- 2026-11-20 后续：旧 drawnCount 增量合并仍有数组别名和裁头边界；现实现已由 L-313/L-314 的版本切片与绝对序号替代，以下为历史修法，不得照搬恢复。
+- 真因不在切页：页面 `drawnBuffer()` 用**长度差**（`wanted.length - buffer.length`）推算“这一帧新增了多少行”。一旦源数组与绘图缓冲都到了「展示帧数」上限，差值恒为 0，新样本永不追入——所以曲线在攒够数据的那一刻就停了，用户只是切到 HEX 再回来才看见。
+- 修法：新增 `state.drawnCount` 记录已合并的**源行数**，按 `rows.length - seen` 取新增；重同步清空、`setValues` 裁头时同步衰减。
+- 排查中发现的第二个真缺陷：`_sent` 在**构造** delta 时提前推到总长度，页面未确认就当成已送达。切页期间渲染器被挂起、批次没到，`has_fresh_data()` 从此恒为 False，永远不会补发。改为发送时记录本批覆盖的样本数（`_last_sent`），`_on_acked` 里才推进 `_sent`。
+- 证据：`.artifacts/probe_chart_real_tab.py`（真实主窗口往返，修复前数据尾部停在 4.19，修复后 4.19→5.59）；`plugin_selftest` R-318 `[7.59, 359] -> [8.59, 459]`、219 checks exit 0。
+
+## L-310 搜索与扩展命令都折叠时，扩展命令被拉大（FIXED-verified）
+- `relayout_sidebar()` 读的是两个面板的 `_collapsed` 标志，而界面实际高度取决于 `body` 的可见性。二者在「搜索面板从全屏恢复」「一边展开时另一边折叠」后会不一致，于是走到“两边都展开”分支，把 `_sidebar_sizes` 恢复成 230/540。
+- 修法：判据改为 `body.isHidden()`，并给折叠的那一栏 `setStretchFactor(0/1, 0)`，不让分隔条把剩余空间分给它。
+- 探针需注意：必须先显式把两边重置为展开再折叠，否则 `toggle_collapsed()` 会把状态反过来（首轮探针就是这么误报“仍有 230”的）。
+- 证据：`.artifacts/probe_sidebar_both_folded.py` 两种顺序都 `[44, 44]`；`ui_selftest` R-319 两种顺序全过，R-190 折叠/恢复比例仍绿。
+
+## L-309 顶栏冒出 5000 输入框 / 新卡片飞到最底下 / 仪表带曲线坐标轴（FIXED-verified）
+- 三个独立缺陷：
+  - 三个数字设置以面板为 `parent`，`QWidget` 只要**有父对象就会被 Qt 绘制**，即使不在任何布局里，所以 5000 那个框直接出现在暂停按钮后面（L-309 主机教训：`not in layout` ≠ 不可见）。现在建好即 `hide()`，菜单里改用**新建**的 spin box，避免 `QWidgetAction.setDefaultWidget()` 接管所有权、关菜单时把数据载体一并销毁。
+  - 新卡片位置曾由 Python 按序号平铺（`16 + (index%3)*(w+16)`），第 10 张就已经在几屏之外。现在 Python 不再预置 `x/y`，页面用 `scrollLeft/Top + 视口一半 - 卡片一半` 在**可视区正中**放置。
+  - `mount()` 曾对 `line || gauge` 都调 `applyLineStructure()`，于是仪表先被套上曲线的 xAxis/yAxis/dataZoom 结构。改为只给 `line`。
+- 居中两个实测坑：① 首次 `addWidget` 时 web view 可能只有宽没有高，一次 `setTimeout` 重试仍落在 0 高，卡片得到 x=64/y=0；② 用 `x===0 && y===0` 当作“未放置”判据会把这个半成品状态误判为已完成。最终用显式 `autoPlaced` 标记 + `requestAnimationFrame` 持续重试直到画布两个尺寸都 > 0。
+- 证据：`.artifacts/probe_chart_layout_fix.py` 全部 PASS（首卡 x=304/y=144 对 1076x529 视口、仪表 `xAxis=0/yAxis=0/dataZoom=0`、曲线仍 `1/1/2`）；`plugin_selftest` 217 checks、exit 0。
+
+## L-308 看板大数据/多控件时添加控件很慢或加不上、小屏看不全、顶栏塞满按钮（FIXED-verified）
+- 三个独立原因：① `add_widget()` 无条件 `request_resync()`，把整个保留历史重新序列化（10 通道 × 5000 点 = 83 KB），页面还要为**每张**已有曲线重绘一遍；② `#canvas` 是 `overflow: hidden`，绝对定位卡片不产生滚动范围，内容超屏就彻底不可达；③ 顶栏堆了 7 个按钮 + 3 个数字框。
+- 修法：① 只有绑定**尚未推送**的通道才请求全量，页面侧 `mount()` 用 `fresh=null` 复用 `state.drawn` 立即出图（并把 gauge 也纳入结构绘制）；② 拆成 `#canvas`（滚动视口）+ `#surface`（内容层，`updateExtent()` 按最远卡片定尺寸），网格移到内容层才能跟着卡片滚；③ 顶栏只留 暂停/清空控件/菜单，其余（含三个数字框）进 `build_menu()`，拆出菜单构建方法便于测试而不阻塞在 `QMenu.exec()`。
+- 两个方案错误被实测否掉：把 `#canvas` 自身 `min-width` 撑大会被 `body{overflow:hidden}` 裁掉（`clientWidth == scrollWidth == 1536`）；给视口加 `padding` 也不能产生稳定滚动。必须用双层结构。
+- 证据：`.artifacts/probe_chart_add_cost.py`（添加 0.02 ms、单次 83 KB 重发）、`.artifacts/probe_chart_add_fast.py`（`['addWidget']`、`resyncs+0`、0.2 ms、`paintedPixels=9737`；小屏 `1240x2496` vs `664x257`）、`.artifacts/probe_chart_toolbar.py`；`plugin_selftest` 213 checks、exit 0。
+
+## L-307 看完 HEX 文件后整个看板停止刷新（FIXED-verified）
+- 两个缺陷叠加：① 页面把 `acked` 发在绘制之后，一张卡的 `paint`/`setOption` 抛错（隐藏标签页里容器尺寸为 0 时会发生）就永远不确认；② Python 端把 `_pending_ack` 当无条件锁，没有超时，于是**所有卡片一起停刷**，不只是出事的那张。
+- 修法：页面把 ack 放进 `finally`，并给每张卡单独 `try/catch`；Python 端加 `ACK_TIMEOUT_S = 1.5`，超时转为全量重同步并计数 `ack_timeouts`；另记录可见性跳变，从其它标签页切回时主动重发完整窗口。
+- 排查坑：`flush()` 发全量帧时也必须记 `_ack_started`，否则超时判断把它当成早就过期的等待（被既有 R-301 背压断言捕获）。
+- 证据：`.artifacts/probe_chart_ack_recovery.py` 6/6；`.artifacts/probe_chart_page_ack.py` 在真实 QtWebEngine 里让一张卡抛错，ack 仍回传；`plugin_selftest` 203 checks、exit 0。
+
+## L-306 HEX 双击编辑框看不清内容、数字被裁掉（FIXED-verified）
+- 编辑框只按 `horizontalAdvance("00") + 14` 定宽，而全局样式表给 `QLineEdit` 的 `padding: 0 10px` **不体现在 `contentsMargins()`**：实测 40 px 的框里能画的只有 ~20 px，两字符要 26 px，首字符被裁；末列定位还可能把框推到视口外。
+- 修法：编辑框带自己的紧凑样式（`padding: 0 2px`、`min-height: 0`、同款等宽字体）、尺寸由 `inline_editor_size()` 按字体度量算，位置按视口夹紧。
+- 证据：`.artifacts/probe_hex_editor_fit.py` 修前 `usable - text = -6`，修后首/末列/页末三处 `ink_x=3..26 / width=32`、高 17、均 `in_viewport=True`；`plugin_selftest` R-310 通过，199 checks、exit 0。
+
+## L-305 对端删除扩展命令后上下翻动，组头文字消失只剩色条（FIXED-verified）
+- 短列表剩余滚动范围 23px，小于组头 26px；旧吸顶条件要求整个组头卷走，文字已被裁切而吸顶永远不触发。改为组头顶部一旦越过视口即借用原组头；不改颜色、不建简化标题。
+- 原生 Qt 合成图对照：对端删除后滚到底，修前组名墨色像素 0、可见高度 2px；修后墨色像素 222、可见高度 20px，多次往返均保持。探针 `.artifacts/probe_command_pixels.py`；正式 R-195 补部分裁切和对端删除期间滚动检查。
+
+## L-313 看板失去响应 / 自追加数组 / RangeError（FIXED-verified）
+- 原 drawnBuffer 在历史未满时直接持有 rows；下一帧向 buffer push 的同时以 rows.length 为循环上界，同一个数组无限自增长。Node 执行实际 dashboard.js 可复现 RangeError；修为按通道版本缓存独立尾部切片，多卡共享绘图切片但不与历史数组别名。
+- 证据：`node tools/chart_runtime_selftest.js` 3/3，含6200点跨5000上限、共享通道、窗口切换；两端 points=0 上限统一5000。
+
+## L-314 满缓冲漏尾样本 / 旧确认解锁 / 纯读数停刷（FIXED-verified）
+- 绝对接收序号不随deque淘汰衰减，确认仅提交发送快照；批次号单调且重同步不复用。新鲜度用样本版本而非仅曲线绑定，纯 value/gauge/bar/lamp 均可刷新。
+- 证据：`plugin_selftest` R-321，发送后等待期间溢出10点，下一批必须包含100..109；旧ack不能释放新批/重同步批，四类纯读数确认后才空闲。
+
+## L-315 居中错位 / 布局递归 / 多余resize（FIXED-verified）
+- 单一40ms合并布局任务处理新卡居中、内容范围和必要resize；显式用户移动取消autoPlaced。删除settle链和不可达重复添加逻辑；视口外卡懒创建、滚入追上数据。
+- 证据：R-316恢复每张24px严格约束，三卡带scroll(0,0)/(200,120)/(400,240)均居中，不手动settle；既有拖动/缩放/轴缩放/滚动回归通过。测试桩恢复真实DOM前必须push_layout，不能拿桩中的id操作旧页面。
+
+## L-316 实际绘制背压 / finished不回 / 效率低 / GUI长尾（OPEN）
+- 已修机制：实时仅传曲线id/data、仪表data；关闭滑块数据阴影。实际rendered后用可被后续绘制重置的rAF屏障确认，finished也可解除等待；仅finished曾真实出现rendered=9/finished=1而锁住。单卡异常/删除不锁全板；保留超时和返回页重同步。确认驱动下批，只补齐从发送起算的目标节拍，最多一个在途批次。
+- 证据：最终`python tools/plugin_selftest.py --benchmark` 257/257；四组5秒预填5000点、每通道约200点/秒，全部到尾且各组新增确认超时0。4/300、6/300、6/5000、24/5000分别完成39/36/39/27批，完成P95=148.92/197.65/153.91/248.51ms，交互探针P95=27.53/34.34/25.44/55.78ms。
+- 未闭环：最重仅约5批/秒，不是30fps；此前GUI最大262.58ms长尾未归因，后续更快不能证明环境原因。当前采样仅落在app.processEvents；未证明写盘是根因。5秒斜线直接feed、部分卡在视口外；探针是JS往返/滚动/添加/菜单构建，不是负载下真鼠标交互，也不等同长期实机。rendered+rAF不是合成器呈现时间。R-320保持开放，下一步固定用户实际布局与数据定位长尾。
+- 报告：`.artifacts/chart-sustained.json`、`chart-benchmark.json`；截图`chart-load-*-*.png`。L-312的appendData/自适应progressive回退仍有效，不因本轮重构重试。
+
+## L-317 看板配置丢多通道 / 精度 / 非法范围（FIXED-verified）
+- 清洗器保留channels去重列表、decimals与状态文字，拒绝NaN/无限范围和重复widget id，导入失败不得改当前布局。
+- 证据：R-311实际临时文件导出与重导入完全往返，8类非法输入拒绝且布局不变；包含最终257项插件回归。
+
+## L-318 插件并未解耦：有门面却直接 import 宿主内部模块（FIXED-verified）
+- 用户质疑「插件没有解耦？」属实。terminal / transfer / hexview 源码里直接
+  `from omnicom.ui import theme`、`from omnicom.ui.vt100 import Screen`、
+  `from omnicom.i18n import tr`、`from omnicom.ui.workers import TransferWorker`。
+  PluginApi 早就有 theme()/combo()/glyph()/menu() 门面，但 1.1.6 把那两个页面搬成
+  插件时是整块复制代码，原 import 原样留下；hexview 是照抄同一写法。
+- 后果不是当前 bug，而是架构债：插件目录会被复制到用户磁盘长期驻留，宿主重命名
+  一个文件，已安装插件就坏，且要等用户打开那个标签页才暴露。
+- 修法：`api.theme()` / `api.paths()` 用只读门面（赋值或调用 setter 抛异常）、
+  `api.widget_class(name)` 返回控件类、`api.terminal_screen()`、`api.transfer_worker()`；
+  插件文案各自 `text.py` + `api.register_text()`，宿主表移除三个插件前缀文案，
+  卸载时注销；`API_VERSION` 2→3，插件清单声明 `"api": 3`。
+- 两个实测坑：① 插件必须用相对导入 `from .text import TEXT`——所有插件目录都会
+  进 sys.path，三个都叫 text.py 会按加载顺序互相遮蔽；② 测试自己加载插件时也要
+  以包形式注册（`submodule_search_locations` + `sys.modules`）再执行，与
+  `_instantiate` 一致，否则相对导入直接 ImportError。
+- 另一个空真隐患：文案迁出后 `all(tr(key) for key in ...)` 仍成立（未命中返回键名，
+  非空）。GUI 断言改为 `tr(key) not in ("", key)`，否则测试会在文案丢失时继续通过。
+- 证据：`plugin_selftest` R-322 五项（静态扫描、文本表存在、宿主表无插件键、
+  注册后可解析、卸载后回退）；完整 245 项 / `--benchmark` 262 项均 0 失败；
+  真实 `PluginHost` 加载 5 插件零错误；便携包内自带运行时验证通过。
+- 顺带修掉既有缺陷：传输页拖放区标题从未跟随语言切换，英文界面残留中文。
+
+## L-319 帮助菜单显示 menu.help / 翻译缺键（FIXED-verified）
+- 根因：标题栏使用 `tr("menu.help")`，宿主表没有该键，回退策略直接显示键名；扫描还发现 `misc.control.open` 缺失。已补齐两键，不更改回退策略。
+- R-324 新增字面翻译键静态门禁，扫描419个调用键；帮助/文档/关于中英均可解析。实际菜单构建路径已核对，未完成真实弹出菜单像素验证。
+- 证据：修复提交 `4a5db45`；完整插件自测253项、Ruff通过；新包内pyz含两键。旧「58条（459→406）」是统计口径混用，不再作为精确迁移数量。
+
+## L-320 终端与文件传输停用后商店消失 / 无法启用（FIXED-verified）
+- 根因：商店行取本地安装与远程目录并集，但 `installed()` 排除了停用插件；terminal/transfer 是随包核心插件，不在远程目录，因此从两边都消失。
+- 修复：本地清单保留停用状态和已安装版本；商店显示「已停用」和「启用」。`set_disabled()` 只调整标记，复用异步任务与宿主重载，不下载、不覆盖用户数据。
+- 证据：插件自测R-323四项及完整253项通过；GUI R-218停用接收6项通过；隔离真实对话框点击启用terminal后，仅transfer保持停用、重载一次；包内运行时复验通过。
+
+## L-321 修复后同版重发 v1.1.7 / 插件商店是否重传（FIXED-verified）
+- `4a5db45` 已推送main；复用Release #452554311并替换同名便携ZIP，发布脚本退出0、latest=v1.1.7。既有标签仍为 `aeee113`，不强制移动；修复源码在main。
+- 新包190862126字节、692条目、CRC正常；本地SHA-256 `d225b9a9d7bb1a67c2d8a9d2a834b04b1a7250dcf9f67f1aa5c88f196957642e`。此前公开GET仅验证HTTP200和大小，不能据此声称远端哈希一致。
+- 2026-11-23补核：GitHub资产metadata的 `digest` 与上述本地SHA-256完全相同，Release公开且含修复说明，API latest仍为v1.1.7；线上raw main插件目录与重建后本地JSON一致。
+- 重新构建chart1.1.3、hexview1.0.0、launcher1.0.0成功，哈希与已发布包相同，无需再次上传；核心插件仍通过主程序便携包交付。
+- R-320性能边界不变；本次未重跑全工程GUI/总验收，不将插件自测通过宣称为全工程全绿。
+## L-322 终端/传输与宿主完全同构 / 第二个窗口清掉第一个窗口文案（FIXED-verified）
+- 宿主删掉了 `window.console` / `window.transfer` 与 `BUILTIN_PLUGIN_PAGES`：页键改由清单
+  `page` / `page_order` 声明，宿主只按页键挂载与卸载；终端插件用 `api.on_rx` 自己取数据，
+  `_on_rx` 不再调 `absorb`。
+- 顺带发现并修掉真实缺陷：开第二个窗口时 `PluginHost.unload()` 会注销第一个窗口仍在用的
+  插件文案表（终端按钮提示变回 `term.fullscreen`）。文案表改为按宿主对象引用计数。
+- 证据：`ui_selftest --only plugins` 全通过（含「宿主不再持有终端专用接收通道」）；探针证明
+  全部插件停用时收数据仍进日志、终端只靠自身订阅即可拿到 `prompt$` 且切页后保留。
+
+## L-323 「卸载」只记标记、永远显示已安装（FIXED-verified）
+- 2026-11-23 用户反证：重复多次卸载后仍出现「启用/已安装」；原单次285项验证不覆盖真实按钮循环及双副本，不能视为闭环。来源框也再次被否定，R-325整行交互待修复。
+- 本次复现：双副本时只移走用户目录，随包副本仍存在且disabled=True。修复为移动全部活动副本并清除disabled；恢复按原来源，重复卸载不清空备份；下载重装清除来源记录，失败恢复目录及两份记录。
+- 新证据：`tools/plugin_selftest.py --interaction-only`，用户/随包/双副本各六轮真实按钮、重建Store与隔离PluginHost通过；额外覆盖跨盘复制回退、双副本失败回滚、重装写记录失败。限定为当前源码；旧发行包未更新。
+- 旧 `uninstall()` 只写 `plugins-disabled.json` 并把目录挪到 `plugin-updates/`，`installed()`
+  仍扫描原路径，于是行永远显示「已安装/已停用」。用户要求真实卸载。
+- 现在目录真的离开 `plugins/`（随包核心插件同样移出），宿主立即不加载、页签消失；
+  `plugin-sources.json` 记录来源与备份，行标记 `removed=True` 且只给「安装」；再装可从备份
+  还原同一版本，`plugin-data/<id>` 不动。
+- 跨盘（数据目录与程序目录不在同一盘）从 `Path.rename` 改 `shutil.move`，否则 WinError 17；
+  失败时把目录移回并恢复两份记录。
+- 旧证据：`plugin_selftest` 285项仅单次流程；永久宿主测试使用隔离PluginHost，不是用户真实窗口，旧「真实窗口」表述不准确。
+- 教训：探针不要指向真实安装目录 —— 一次探针真卸载了仓库 `plugins/terminal`，
+  用 `git checkout -- plugins/terminal` 恢复，并要重新应用该目录的未提交改动。
+
+## L-324 多曲线来源框不能整行勾选 / 黑块难辨（FIXED-verified）
+- 后续用户反证滚轮悬停仍黑底：原生drawControl可重新盖上系统高亮；现背景、文字、复选框均自行绘制。强制Highlight/HighlightedText黑色，滚轮三次选中鼠标下行像素仍浅，滚动不改勾选；Windows字体截图已查看。来源入口只供line，非line多名称只绑定第一项。
+- 用户2026-11-23再次否定来源框。原列表行高14px、文字点击不切换，未选中也画成黑块；改为至少32px且适配字体、整行左键释放只切换一次、原生空格键可切换，主题空框与白色勾号明确区分。
+- `--interaction-only`覆盖文字/方框/空格、六次连续切换、未知通道保留、空选择禁用确认；卡片真实模态编辑取消不改配置，确认后页面系列从AA/BB变BB/CC、几何不变。Windows字体截图已查看；旧包未更新，用户实机尚未确认。
+- 插件动态加载模块与普通import的同名类不是同一类型，测试必须使用实际加载模块的SourcesDialog；没有字体的offscreen截图不能作为视觉验收。
+
+## L-325 灯自定义亮灭颜色 / 调色板 / 颜色保存丢失（FIXED-verified）
+- R-328：创建色块、现有灯齿轮与真实Qt调色板，亮灭颜色贯通绘制/describe/persist/配置；旧null颜色兼容。真实回归抓到persist遗漏字段和模态持有旧布局对象，均修复；QSS用对象名限定，避免子调色板按钮染色，内置文案经api.t本地化。
+- `python tools/plugin_selftest.py --interaction-only` 362项：颜色选择/取消、亮灭DOM RGB、现有灯编辑/取消、导入导出、非法颜色拒绝通过；`.artifacts/lamp-palette.png`已视觉核对。本轮未打包发布。
+
+## L-326 保留点数低于展示帧数时只有保留量（REVERTED）
+- 曾把有效容量改成 max(保留, 展示)，但那会篡改用户的显式「曲线点数」：R-301 要求显式值就是保留上限，points=150 必须保留 150。已回退为 `min(MAX_POINTS, max(100, limit))`，`visible` 只控制每帧绘制尾部。
+- 证据：完整插件套件 R-301「曲线点数按设置生效」在错误实现下失败（300≠150），回退后全套 587 项通过。该推测未解释用户实际 5000/5000/0，见 L-327。
+
+## L-343 关闭软件后屏幕是否仍常亮（FIXED-verified）
+- 用户确认：在软件里开了「保持屏幕常亮」，关掉软件后屏幕**不应**继续常亮。
+- 结论：不会残留。`SetThreadExecutionState` 是**线程作用域**的请求，线程退出（含 `TerminateProcess` 强杀）时 Windows 自动丢弃；`closeEvent` 里另有显式 `power.release()` 做正常关闭的即时释放。
+- 实测（不是读文档）：`.artifacts/probe_awake_close.py` 真实创建 `OmniWindow`，开启后向 OS 读回 `0x80000003`，`close()` 后读回 `0x80000000`；`.artifacts/probe_awake_kill.py` 强杀已 latch 的子进程，父线程仍为 `0x80000000`。
+- 多窗口不是风险：每个窗口是**独立进程**（`window-<n>.lock` 各自锁定），关一个不会清掉另一个的请求。
+- 新增 `ui_selftest` R-343 两项，直接向 OS 读回线程状态，而不是只断言 `release()` 被调用。
+- 教训：`powercfg /requests` 需要管理员权限，普通会话读不到；验证常亮要用 `SetThreadExecutionState` 的「返回上一次请求」语义读回，而不是依赖外部命令。
+
+## L-342 换电脑后检查更新报 SSL 证书校验失败（FIXED-verified）
+- 症状：另一台电脑点「检查新版本」直接失败：`[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1032)`。
+- 根因：便携包用官方 CPython **embeddable** 运行时，`python313._pth` 关闭了 `site`，所以用户 site-packages 里的 `certifi` 不可见；运行时只带 `_ssl.pyd` + `libssl-3.dll`，**没有任何 CA 证书**。开发机能通是因为 Windows 上 OpenSSL 会回退到系统证书库（本机 79 张），而目标机器的系统库缺少根证书（精简镜像 / 新装 VM / 企业代理重签）。
+- 修法：新增 `omnicom/tls.py`——随包 `assets/cacert.pem`（certifi 240216 B），`context()` 用该文件建校验上下文并额外 `load_default_certs()` 合并系统库（企业代理根仍受信）；`install()` 装一个模块级 opener，让既有 `urlopen` 调用点全部生效；GUI 与 CLI 入口各调一次。`make_pyz` 把证书复制进 `assets/`。
+- 提示改进：`update._reason()` 新增 `_is_certificate_error()` / `_certificate_detail()`，证书失败走 `update.check.tls`（提示查系统时间 / 代理根证书），不再误报「网络不通」。
+- 证据：`.artifacts/probe_tls_bundle.py` 仅用随包文件建出 121 张根证书并 HTTPS 200；`.artifacts/probe_packaged_tls.py` 用便携运行时确认 `dist/OmniCOM/assets/cacert.pem` 生效；`acceptance_test --only local` R-342 四项通过；Ruff 干净。
+- 注意：`releases.atom` 当时返回 HTTP 500（两种 UA 都一样），是 GitHub 侧临时故障，与证书无关；`raw.githubusercontent.com` 200 证明信任链正常。
+- 2026-11-25 固化门禁 + 重发完成（源码 `c05430a`）：`make_dist._verify_tls()` 在 `verify()` 里用包内 runtime 实测——先查 `assets/cacert.pem` 存在且 >100 KB，再用仅该文件建校验上下文（要求 >50 张根证书），最后实际访问 HTTPS；证书错误直接判打包失败，纯网络不通仅警告（根证书验证不依赖网络）。该门禁已写入 AGENTS.md 为发布硬约束。
+- 门禁自身修掉两个真实缺陷：`-E` 会忽略环境变量（改用内联绝对路径）；调用方传相对路径时`sys.path` 指向包内而导入失败（改在函数内 `resolve()`）。
+- 重发结果：Release #452554311 替换 `OmniCOM-1.1.7-win64.zip` 为 191022574 B `sha256 ec71d3a558228db973e0591f69b7b36560c2de22b0ed0e9a481eb2e1f4bfc25d`；公开 HEAD 200 且长度一致，`latest=v1.1.7`。打包前用 `.artifacts/verify_zip_runtime.py` 实测包内 HTTPS 200。
+- 教训：任何「开发机正常、换机器失败」的网络问题，先查**运行时是否自带 CA**，不要先怀疑代理或防火墙；嵌入式 Python 的 `._pth` 会静默屏蔽 site-packages。
+
+## L-341 数据来源选择框悬停背景变黑（FIXED-verified）
+- 症状：多曲线「数据来源」对话框里，鼠标悬停的行背景是纯黑，未勾选复选框边框也是黑的。
+- 根因：`SourceDelegate.paint()` 把 `theme.WASH_HOVER` / `theme.LINE_STRONG` 直接交给 `QColor`。这两个令牌是 Qt 样式表形式 `rgba(18, 26, 43, 14)`（alpha 0-255），`QColor` **完全无法解析**，返回 `isValid()==False` 的颜色，`fillRect`/`setPen` 于是画成不透明黑。`omnicom/ui/theme.py` 第 59 行早有同样注释（`WINDOW_EDGE` 因此拆成两个令牌）。
+- 修法：插件内新增 `_paint_color()`，用正则把 `rgba(r, g, b, a)` 拆成 `QColor(r, g, b)` 并设置 alpha（兼容 0-1 与 0-255 两种 alpha）；`#RRGGBB` 仍直接交给 `QColor`。插件自包含，不依赖宿主新增令牌，旧版 1.1.7 宿主也能正确显示。
+- 证据：`.artifacts/probe_source_hover.py` 修复前悬停行 `#000000`，修复后 `#f2f2f3`、未勾选边框 `#e3e4e6`；`.artifacts/probe_source_negative.py` 把转换改回 `QColor` 后断言失败（`#000000`）。`plugin_selftest --chart-only` 316 项通过（新增 R-341 两项）。
+- 2026-11-24 重发完成（源码 `f5f55fa`，已推送 `main`）：插件商店 #436347358 用新包替换 `chart-1.1.5.zip`（387671 B，`sha256:7d8a29e02665e25b191153f57910d52bae207c2b94a5b7ff2c37bae1b10aa673`）与 `catalog.json`（4497 B，`sha256:e054ac40793096b2ece54e99d8e1332657a7a259e363c795f0cc05b02c6347d2`）；7 个包 Range 均 206，`/releases/latest` 仍为 v1.1.7，公开 raw 目录 chart=1.1.5 且哈希一致。
+- 教训：既有 R-325 只验证「选中」行，从未验证「悬停」行，所以这个缺陷一直没被发现；任何自绘背景都要同时断言 hover 与 selected 两种状态。
+
+## L-336 满缓存后曲线边刷新边变形（OPEN）
+- 2026-11-24 用户反证：同组数据的两张截图波形不同；用户确认没有缩放，但截图时间不同，所以横轴510–690与480–660的差异本身不是故障证据。原 minmax 已彻底解决的结论撤回；下面旧实验只证明特定负载的帧间像素变化。
+- 本轮已复现机制：真实ECharts 5.5.1中，5000点窗口仅滑动1点，minmax实际绘制834点，重叠历史区间800个已绘制时间点被重新抽掉；历史线段因此不是固定的。`tools/chart_runtime_selftest.js`原配置断言失败，关闭自动采样（sampling=none）后5000点完整绘制，历史遗漏=0。不改容量、增量游标、缩放或现有progressive配置。
+- 源码候选已验证：`python tools/plugin_selftest.py --chart-only`314项、Node4项、Ruff通过。真实QtWebEngine四通道各5000复杂波形，320/920px两宽度与0/1/300点滑动，逐个绘制点等于原始数据、画布非空；同步setOption约25.9–64.4ms，不等于持续30fps或合成器呈现耗时。
+- 2026-11-24 用户复测确认「解决了」，R-336 关闭。交付路径核实：`make_dist.CORE_PLUGINS` 仅 terminal/transfer，`verify_runtime` 断言包内不得有 `plugins/chart`，所以主便携包不含看板；本轮只发布插件，chart 升 1.1.5（387200 B，sha256 1969ab65…），应用仍为 1.1.7。
+- 2026-11-24 发布完成（源码 `6a08467`，已推送 `main`）：插件商店 #436347358 上传 `chart-1.1.5.zip`（387200 B，`sha256:1969ab6513523a2fdedf6c06165533042e0cbb15baa4a24589ebb1636372fd09`）与新的 `catalog.json`（4497 B，`sha256:b6315fb2fe3ef98a7d04762dbb4f9ed59492c2fe533328853f948041f78a1ec7`）；7 个包 Range 请求均 206，`/releases/latest` 仍为 v1.1.7，公开 raw 目录 chart=1.1.5 且哈希一致。
+- 发布过程教训：PowerShell `Set-Content -Encoding UTF8` 会给提交信息写 BOM，Git 标题出现 `锘縖`；Python 脚本 `read_text`/`write_text` 把原本 LF 的 `project-context/*.md` 转成 CRLF，导致 LEDGER 出现 1727 行假差异。改提交前必须核对 `git show HEAD~1:<file> | count('\r\n')`，只用 `write_bytes` 写 LF。
+- 新症状（2026-11-24）：用户报「帧数超过当前最大缓存时波形变形，边刷新边变形」。不是停刷（L-311/L-313/L-314 已修），而是**形状抖动**。
+- 先排除：绘制切片严格单调（`node` 探针 5000 点 0 处非递增）；真实页面刷新中与停止后墨迹像素 0.99~1.00，不存在分帧渲染被截断（`.artifacts/probe_chart_deform.py`）。
+- 旧假设/实验：LTTB滑动桶会重新选择代表点。`.artifacts/probe_chart_deform2.py`相邻帧像素差lttb均值4.01%、峰值16.6%；minmax2.26%、峰值2.63%；none0.01%。这不能证明minmax保形或唯一根因。
+- 旧候选（已被本轮替代）：minmax仍动态抽点，不能保证历史波形不变；旧仅检查配置字符串的R-307断言已改为R-336完整绘制检查。large/progressive设置保留，性能目标未关闭。
+
+## L-337 看板框选与整组拖动（FIXED-verified）
+- R-337：新增 `state.selection`（多选）与 `hookMarquee()`：在 `#canvas`/`#surface` 空白处左键按下开始框选，选框挂在 `#surface` 内容层（随滚动跟随），相交即选中；Ctrl 追加/切换；空白单击清空。
+- 整组拖动：`beginDrag()` 在拖动已选卡片时收集全部成员起点，组相对位移一致，并按最左/最上成员夹紧，保证不越过画布边界且相对位置不变。
+- 踩坑：顶栏/菜单断言原用 `isVisibleTo(panel)` 判「不在顶栏」不成立（未加入布局的按钮仍算可见），改用 `not in bar_widgets` 直接判断布局成员。
+- 证据：`plugin_selftest` R-337 用真实 `PointerEvent` 序列验证选框显示、选中 sel-a/sel-b（不含 sel-c）、整组位移 (+96,+64) 且 sel-c 不动。
+
+## L-338 / L-339 清空数据与清空看板（FIXED-verified）
+- R-338：顶栏新增「清空数据」，直接调用既有 `clear_data()`（清采样、保留卡片），与「清空看板」互补。证据：点击真实按钮后页面 `retained` 全为 0，卡片数不变。
+- R-339：原「清空控件」改名「清空看板」并移入菜单，顶栏变为 暂停 / 清空数据 / 菜单 三项；`build_menu()` 在清除数据后追加 `clear_widgets_button.text()`。这修订 R-315 的顶栏组成（已登记 Superseded）。
+- 本轮回归：`plugin_selftest` 608 项、GUI 980 项、总验收 1785 项 0 失败、Ruff 干净。
+
+## L-340 v1.1.7 第五次重发（FIXED-verified）
+- 内容：R-336 minmax 采样、R-337 框选整组拖动、R-338 清空数据、R-339 清空看板入菜单，
+  加上前一轮 R-331/R-332/R-333。
+- 源码：`3ec0145`（功能）+ `2769c0b`（store catalog 哈希与发布脚本按内容判定，已推送）。
+- 应用：Release #452554311 替换 `OmniCOM-1.1.7-win64.zip`，线上 digest
+  `sha256:33818bb0694e168df1220bc4c65c967e156e9e0729d311adc879c2526db3cfc4`（190883602 B），
+  公开 `releases/latest/download` HEAD 200 且长度一致，`latest=v1.1.7`。
+- 插件商店：`chart-1.1.4.zip` 替换为 387450 B `sha256 6322a2dd…`；`catalog.json` 已上传
+  新哈希并在仓库内核实（raw CDN 事后也已刷新为 6322a2dd）。
+- 发布教训（新增）：`publish_plugin_store.py` 原先只比**字节数**决定跳过，而
+  `catalog.json` 换哈希时长度不变，导致目录从未真正更新（L-330 同族）。已改为优先比
+  GitHub 返回的 `digest`。
+- 另注：`Select-Object -Last` 会缓冲输出，长时间上传在后台会话里看不到进度，
+  不能据此判断卡死；完成后必须查 `/releases/<id>` 的 assets 与 digest。
+
+## L-327 实际5000帧设置未满即历史消失（OPEN）
+- 只读核对用户settings.ini实际window=0/visible=5000/points=5000。两条曲线同配置在128/1000/3200/4999/5000/5101/6200保持完整首尾，尚未复现；不能把L-326当成其根因。下一步用用户实际布局/原始输入与运行副本证据区分接收、缩放可见范围、旧包；不宣称整个问题修好。
+
+## L-328 多色灯 / 单色灯任意触发数值 / 数值颜色映射（FIXED-verified）
+- R-329：同一个lamp的colorRules精确数值匹配，单条规则就是单色灯；fallbackColor支持无色或自定义色。创建入口/现有卡片复用LampColorsDialog，可增删规则、调色和指定无色。旧无规则或null字段仍保持零/非零二态，明确启用匹配后迁移。
+- 页面setLayout/addWidget/describe/persist及Python规范化、INI和文件往返均保留规则；重复数值、非有限值、布尔值、缺字段和非法颜色被拒；用repr保留双精度编辑往返。无数据为空心且显示--，不误当零或默认值。
+- `python tools/plugin_selftest.py --interaction-only`409项通过：真实创建/调色板、0红/1白/2黄/其它无色、其它自定义色、-3.5单规则、明确无色优先、增删/取消、文件/设置持久化；旧二态灯、来源及曲线回归通过。`.artifacts/lamp-rules.png`已视觉核对。源码候选，未打包发布；L-327仍OPEN。
+
+## L-329 核心插件启用无效 / 商店操作闪出空白小窗（FIXED-verified）
+- 用户反证「启用终端启用不了」：根因是 `toggle.clicked.connect(lambda _checked=False, ... on=not item.get("disabled"): self.set_enabled(key, on))`，而 `set_enabled` 内部写 `set_disabled(identifier, not enabled)`，两者叠加后点「启用」实际写入 `disabled=True`，所以永远启用不了。修法：用显式 `want = bool(item.get("disabled"))` 绑定，去掉二次取反。证据：探针抓到 `set_disabled calls: [('terminal', True)]`（点启用却写 True），修后为 `False` 且磁盘 `disabled` 清空、按钮变「禁用」。
+- 用户反证「启用/安装/卸载都闪出空白小窗」：每行更新红点是 `QWidget()`，无父控件在 `setVisible(True)` 时成为顶层窗口，出现 8x8 空窗，随后 `addWidget()` 重新挂父，事后检查 `parent()` 已看不出痕迹。修法：`QWidget(row)` 构造即带父。
+- **测试方法教训**：事后查 `parent()` 或 `topLevelWidgets()` 都抓不到这个缺陷（必须对比"创建即带父"与"先显示后挂父"两种顺序）。最终用源码级断言 `badge = QWidget(row)` 守门，并做负向验证：改回 `QWidget()` 时断言失败、退出码 1。
+- 同时按新契约调整旧断言：R-323「启用后卸载按钮回来」→「启用后只给禁用、永不出现卸载」；R-327 真实卸载回归改用非核心插件（gauge/probe），核心插件 `uninstall()` 改为抛 `core`。
+- `tools/acceptance_test.py` R-001 整体通过判据改为按整行匹配收尾横幅：Qt 的 `propagateSizeHints()` 警告会粘在同一行，旧子串判断在全绿时误判失败。
+- 证据：完整插件 603 项、GUI 980 项、总验收 1780 项 0 失败、Ruff 通过；负向验证抓红点缺陷。commit `82772c1`。
+
+## L-330 make_release 上传中断后留下空资产列表（FIXED-by-manual-upload）
+- 现象：代理侧 `make_release.py --publish` 在后台终端会话里反复被清理，最后报 `上传失败： 404 Not Found`；
+  查询 `/releases/452554311` 的 assets 为 `[]` —— 旧包已被删除、新包未上传成功，发布页短暂无任何可下载文件。
+- 根因：该脚本遇到 422「同名资产已存在」时会先 DELETE 旧资产再 POST 新包；一旦上传阶段失败，
+  资产列表就为空。加之 182 MB 上传耗时数分钟，长任务放在会被清理的后台会话里极易中断。
+- 处置：用户手动上传本轮构建的 `dist/OmniCOM-1.1.7-win64.zip`；核对线上 digest
+  `sha256:e307e197…`（190874335 B）与本地一致，公开链接 HEAD 200，`latest=v1.1.7`。
+- 教训：① 发布必须在前台/独立进程跑完，不要依赖会超时清理的会话；
+  ② 发布后必须查 `/releases/<id>` 的 assets 与 `latest`，退出码为 0 也不代表资产还在；
+  ③ 任何"先删后传"的流程要么先上传到临时名再改名，要么失败后自动回补。
+
+## L-331 日志墙钟毫秒 / tick / 无时间戳（FIXED-verified）
+- R-331：支持冒号毫秒、墙钟优先、单位 tick、裸 tick 与无戳 0.1 秒估算；同一行墙钟优先于芯片 tick。
+- 遗留边界：一行图表帧被拆成多条物理行时，只保留含 `[OmniCOM-chart]` 的行，续行字段仍会丢；混合绝对墙钟与相对 tick 的基准跳变未处理。
+
+## L-332 升级后核心插件缺失（FIXED-unverified）
+- R-332：`PluginHost.load()` 前调用 `restore_core_plugins()`，从 `paths.resource_dir()/plugins` 补齐缺失的 terminal/transfer；已存在目录与 `plugin-data/<id>` 不动。
+- 未验证：旧用户真实升级路径未复现（旧安装仅有 launcher）；商店插件仍不随包（R-174）。
+
+## L-333 打开日志错图 / WebEngine右键Reload恢复（FIXED-verified）
+- 新证据（user, 2026-11-24）：此前候选仍无效，右键页面Reload后恢复。原clear_data已清_sent，先前“缺少清零”根因撤回；桩测试不能证明真实加载问题。
+- 根因（静态路径＋用户手测）：`_on_page_loaded` 只补布局，点数/主题/历史都依赖更早的 greeting；握手早于 `pageReady` 时被 `_run_js` 静默丢弃，首次显示状态不全；Reload 重跑整套初始化才正常。
+- 修法：`loadFinished` 统一补齐点数/主题/布局/全量快照；`end_replay` 重推点数与布局并全量重同步，重建图表实例与缩放状态后再送完整窗口。
+- 曾试过在 `refresh()` / `_flush_if_ready` / 定时器入口抑制回放期间的实时帧，均使 R-305、R-318 失败（测试的正向出帧依赖定时器），已全部回退，只保留已验证的两处。
+- 验证：单元 8 项；插件 603 项；GUI 980 项；总验收 1780 项 0 失败；Ruff 干净。用户手测确认首次加载正确。

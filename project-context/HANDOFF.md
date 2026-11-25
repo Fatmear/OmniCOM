@@ -1,99 +1,60 @@
 # Current handoff
+Updated: 2026-11-25 (source: session that rebuilt the context files)
 
-Updated: 2026-11-25
+## Now
 
-## Shipped
+- **Objective:** keep the project record trustworthy. The context files were just
+  restructured into global truth (`CAPABILITIES`, `REQUIREMENTS`), local record
+  (`WORKLOG`, `LEDGER`) and a snapshot (`HANDOFF`).
+- **Shipped:** app **v1.1.7** (Release #452554311, `OmniCOM-1.1.7-win64.zip`
+  191022574 B, `sha256 ec71d3a5…`, public HEAD 200, `latest=v1.1.7`) and plugin
+  **chart 1.1.5** (`387671 B`, `sha256 7d8a29e0…`) in plugin-store #436347358.
+- **Requirement ids to check before touching delivery:** R-019, R-083, R-174,
+  R-293, R-335, R-342.
+- **Working tree:** the context rebuild is uncommitted; verify with `git status`.
 
-- **v1.1.7 第五次重发（看板三项 + 日志/加载修复）**：源码 `3ec0145` + `2769c0b` 已推送 `main`；
-  Release #452554311 替换 `OmniCOM-1.1.7-win64.zip`，线上 digest
-  `sha256:33818bb0694e168df1220bc4c65c967e156e9e0729d311adc879c2526db3cfc4`（190883602 B），
-  公开链接 HEAD 200、`latest=v1.1.7`。
-- 插件商店上一版为 `chart-1.1.4.zip`（387450 B `sha256 6322a2dd…`）。
-- **`chart-1.1.5` 已重发（版本不变）**：修复数据来源选择框悬停背景变黑（R-341），关闭绘制层自动抽点（R-336）。387671 B `sha256 7d8a29e0…`，源码 `f5f55fa` 已推送；`/releases/latest` 仍为应用 v1.1.7。
-- 应用 1.1.7 主便携包不含 chart（`make_dist.CORE_PLUGINS` 只有 terminal/transfer），本轮不重发应用。
-- 旧发布内容：R-336 minmax 采样候选（用户再次否定，未解决）、R-337 框选与整组拖动、R-338 清空数据按钮、
-  R-339 清空看板改名并入菜单，以及前一轮 R-331/R-332/R-333。
-- 发布教训：`publish_plugin_store.py` 只比字节数会漏掉 `catalog.json`（换哈希不改长度），
-  已改为优先比 GitHub `digest`（L-340）。
+## In flight
 
-## Active Goal
+| When | Area | What changed | Status |
+| --- | --- | --- | --- |
+| 11-25 | docs | Rebuilt `project-context/` into seven layered files + `archive/` | **in-progress** |
+| 11-25 | docs | Optimised the `project-continuity` skill: three layers, worklog contract, budget rules | done |
+| 11-25 | tls | Bundled CA proven in-package; release gate added | done `c05430a` |
+| 11-25 | power | Keep-awake proven released on close | done `9102f6d` |
 
-- **R-342 已修复并重发 1.1.7**：新增 `omnicom/tls.py` + `assets/cacert.pem`（240216 B），GUI/CLI 入口安装信任；证书失败改报信任问题。Release #452554311 新资产 191022574 B `sha256 ec71d3a5…`，公开 HEAD 200，latest=v1.1.7。
-- **打包门禁已固化**：`make_dist._verify_tls()` 在每次 `--check` 时用包内运行时实测 HTTPS，证书错误直接失败；该约束已写入 `AGENTS.md`，检查更新失败不得再回归。
-- **R-336 已关闭**：用户复测确认解决了；`sampling=none` 源码已并入 chart **1.1.5** 插件包，应用版本保持 1.1.7（主便携包不含 chart）。
-- 保留 Python + QtWebEngine + 离线 ECharts；保留五种控件、双轴独立缩放、拖动缩放、滚动、居中添加、配置导入导出。
-- 不构建自制 exe（R-019）；真实用户设置和数据不得被测试改写。
+## Last verified
 
-## Implemented
+- `make_dist.py --check --zip` passed, including the new in-bundle HTTPS probe
+  (`roots 121`, `https 200`) and the 5-cycle installer suite.
+- `acceptance_test --only local`: R-342 four checks pass; `ruff check .` clean.
+- Extracting the old ledger produced **340 entries, 0 unparsed, no duplicates**
+  (L-334/335/339 never existed in the source).
+- **What this did not prove:** the rebuilt files were not yet read back by a
+  fresh session, and no test asserts the new budgets.
 
-- **插件真正解耦（R-322）**：`hexview` / `terminal` / `transfer` 不再 `import omnicom.*`，
-  改走 `api.theme()` / `api.paths()` / `api.widget_class()` / `api.terminal_screen()` /
-  `api.transfer_worker()`；两个门面只读，赋值或调用 setter 会抛异常。插件文案各自
-  `text.py` + `api.register_text()`，宿主表不再保留三个插件前缀的文案，卸载时注销。
-  `API_VERSION` 升 3，`plugin_selftest` 新增静态门禁（解析语法树，任何 `omnicom.*` 导入即失败）。
-- **帮助菜单（R-324）**：补齐 `menu.help` 和扫描发现的 `misc.control.open`，新增字面翻译键解析门禁；帮助/文档/关于中英均不回退键名。
-- **停用插件恢复（R-323）**：本地清单保留停用插件，商店显示「已停用」和「启用」；启用只清除标记并热重载，不重新下载、不改插件数据。停用行不再显示「卸载」。
-- **插件与宿主完全解耦（R-326）**：`window.console` / `window.transfer` 已删除；页签由清单
-  `page` / `page_order` 声明（terminal→`console`、transfer→`transfer`），宿主按页键挂载；
-  终端改用 `api.on_rx` 自取数据，`_on_rx` 不再调 `absorb`。插件文案表改为**按宿主引用计数**，
-  修复了「开第二个窗口后第一个窗口终端文案变键名」的真实缺陷。
-- **真实卸载（R-327）**：此前只移动一份且写停用标记，双副本残留会显示「启用/已安装」。现在移走用户/随包全部活动副本，清除停用标记；无活动副本时重复卸载保留恢复记录，按原来源恢复一份。重装失败回滚目录与记录，用户数据保留。
-- **升级安装补齐核心插件**：安装器只补缺失的 terminal/transfer，已有目录整体保留，商店插件仍不随包。
-- **曲线多来源（R-325）**：曲线通道栏可填 `AA, BB` 并出图例；只有曲线显示多来源入口，非曲线保持类型且只绑定第一个通道。卡片齿轮可重新勾选/手输来源，
-  改完保留几何，来源随「导出看板」保存。
-- 来源列表整行点击切换一次、空格切换、行高至少32px并适配字体；主题空框/勾号替代难辨的黑块。已实际查看Windows字体截图 `.artifacts/sources-dialog-fixed.png`。
-- 悬停/选中行完全自行绘制背景与文字，不再调用原生 ItemView 高亮；强制黑色系统高亮后滚轮三次仍浅底深字。
-- **统一数值灯（R-328/R-329）**：灯设置框可增删数值→颜色规则，支持调色板与无色，未匹配值可指定颜色；单规则为单色灯，不增加控件类型。新灯默认单条1匹配规则，创建设置按钮和卡片齿轮复用同一编辑器。
-- 旧无规则配置仍走零/非零亮灭行为，启用“按数值匹配”并确认才迁移。规则与默认颜色贯通页面两处序列化、INI、配置导入导出；重复/非有限数值和非法颜色拒绝。`.artifacts/lamp-rules.png`和调色板截图已查看。
-- R-329：同一个lamp的colorRules精确数值匹配，单条规则就是单色灯。**已随 v1.1.7 重发**。
-  - 功能路径：colorRules（精确数值）+ fallbackColor（未匹配值，None=无色）；旧 onColor/offColor 无规则仍走零/非零二态，需显式启用匹配才迁移。
-  - 编辑器：创建控件按钮与卡片齿轮共用 LampColorsDialog，可增删规则行/逐行调色板/逐行无色/未匹配值无色或自定义色；数值用 repr 保留精度，重复或非法值禁用确认。
-  - 页面：无数据为空心并显示 `--`，不会把缺数据当成 0；出规则描述/persist/INI/导出导入全链路。
-  - 证据：`plugin_selftest --interaction-only` 409 项真实验证；完整插件套件 587 项；GUI 980 项；总验收 1764 项 0 失败；Ruff 通过。
-- **来源悬停与入口（R-325）**：悬停/选中行完全自绘，系统黑色高亮不再遮盖文字；非曲线不显多来源入口，手输多名称只绑定第一个通道。均已发布。
-- 曲线保留量只由「曲线点数」决定（0=5000）；「展示帧数」只控制每帧绘制的尾部长度，不反向抬高保留量（R-301）。曾试过取两者较大值，已回退，见 L-326。
-- 单在途批次、rendered+rAF屏障、40ms合并布局、R-311配置往返保持不变；采样配置本轮改为none，见L-336。
+## Open blockers
 
-## Verified
+- R-320 (dashboard refresh rate under load) — still ~5 batches/s, P95 ~249 ms.
+- L-327 — history reported lost before the retention cap; direct feed does not
+  reproduce it, so a real capture is still needed.
+- R-331 — wrapped chart frames lose continuation fields.
+- R-332 — core-plugin recovery path not verified on a real upgrade.
 
-- 本轮：`node tools/chart_runtime_selftest.js`4项、`python tools/plugin_selftest.py --chart-only`314项、Ruff通过。未运行完整GUI/发布验收。
-- 旧minmax负向检查：5000点窗口仅前进1点，绘制834点，重叠历史800个时间点不再绘制；候选完整绘制5000点，遗漏0。
-- 真实QtWebEngine四通道各5000复杂波形、320/920px宽度与0/1/300点滑动：逐个绘制点等于原始数据、画布非空。同步setOption约25.9–64.4ms，不等于持续帧率/交互延迟/合成器呈现耗时。
-- 未缩放持续更新图与最新快照图数据、横轴相同，不支持普通增量更新留下旧轴假设。
-- 补丁工具两次增加Python缩进；随后按精确匹配机械修正7处缩进，真实套件已通过。
-- 旧发布验证：插件608/GUI980/总验收1785，见L-340；不能作为本轮候选的验证。
-- 旧采样帧间像素差只能证明特定实验结果，不能证明用户场景保形；R-336未现场闭合。
-- 既有加载、框选、清空与插件解耦验证见台账；不恢复已回退的回放期帧抑制。
+## Environment facts (recheck on a new machine)
 
-## Open Boundaries
+- Portable runtime is CPython embeddable; `._pth` disables `site`, so user
+  `certifi` is invisible. That is why `assets/cacert.pem` must ship.
+- `powercfg /requests` needs elevation; read keep-awake state back through
+  `SetThreadExecutionState` instead.
+- PowerShell 5.1 cannot write UTF-8 without BOM via `Set-Content`; write commit
+  messages from Python (`write_bytes`) and keep `project-context/*.md` as LF.
+- `dist/client-1.1.4/` and `.artifacts/plugin-bundle/` are stale 1.1.4 copies
+  without the CA file — do not test with them.
 
-- 关闭采样后最重持续性能仍未验收（同步 setOption 约 26–64 ms / 4×5000 点）；R-336 正确性已由用户确认关闭。
-- R-331 遗留：一行图表帧被拆成多条带时间前缀的物理行时，只保留含 `[OmniCOM-chart]` 的行，续行字段仍丢；混合绝对墙钟与相对 tick 的基准可能跳变。
-- R-332 未在旧用户真实升级路径复现，属固定式修复而非根因定位。
-- R-320 性能目标尚未完整验收：最重负载仍约 5 批/秒、完成 P95 约 249 ms，不是稳定 30 fps。
-- 用户实际设置已只读核对 window=0/visible=5000/points=5000；最新直送回归不能复现其“未满就消失”。需采集真实布局、原始输入及运行副本来源，区分采样缺失、缩放范围和旧包；L-327保持OPEN。
-- 负载直接 feed，不是长期真实串口；斜线不是噪声/复杂波形。24卡测试有视口外懒绘制，不代表24张同时可见。
-- 负载交互探针是 JS 往返/滚动、添加卡片与构建菜单，不是负载下的真实鼠标拖动/菜单点击。
-- rendered+rAF 屏障确认了实际绘制事件，不是浏览器合成器/显示器呈现时间；隐藏页 rAF 暂停靠超时和返回页面重同步恢复。
-- 停顿采样仅落在 `app.processEvents()`，未定位 Qt 内部具体工作；未证明写盘是根因，不引入猜测性的异步存储层。
-- 上一轮曾出现「`--chart-only` 因 `plugins/hexview` 被删而失败」；实际是卸载探针把真实仓库插件移走。**已两次复现**：`hexview` 与 `launcher` 都被 `omnicom-data/plugin-updates/*-removed-*` 接过。已按 SHA-256 与 `HEAD` 核对后 `git checkout` 恢复。今后任何涉及真实卸载的测试必须只用临时目录；发布前先 `git status` 确认没有 `D plugins/*`。
-- R-322~R-330 的检查在插件自测中；总验收脚本尚无它们的逐项映射。帮助菜单只核对了构建路径与双语解析，未做真实弹出菜单像素验证。
-- 真实卸载会改动程序目录 `plugins/`，本轮只用临时目录验证；**不要用真实安装目录跑探针**（曾误删仓库 `plugins/terminal`，已用 git 恢复）。
-- `chart` 插件 `plugin.json` 声明 `icon.png` 但文件缺失（HEAD 即如此），宿主优雅降级；本次未补。
-- 三个插件已解耦，但 `launcher` 仍直接调用 `api.t()` 内联文案（不依赖宿主表，可接受），`chart` 同样用 `api.t()`；两者未拆 `text.py`。
-- 历史日志回放仍受live5000点容量限制；旧版看板需求定义/验收注册仍有缺口，命令并发合并、文件模式CLI旁路、HEX大文件内存/撤销等旧边界未在本轮处理。
+## Next safe check
 
-## Preserve Other Work
-
-- 日志加载/跟随/串口锁定（R-309）、HEX插件编辑（R-310）、组头裁切和侧栏折叠（R-195/R-319）、命令跨窗口同步、商店优先已安装版本均已随 v1.1.7 提交，不要再当成未提交改动。
-- 旧终端手测门禁 R-299 已由用户确认关闭。
-
-## Next Check
-
-- 用户在应用内更新看板后复测同一真实输入；D 盘旧安装需先在商店更新 chart，不能假定已获得本轮改动。
-- 若仍异常，比较同一历史时间区间的原始数据、实际绘制点、轴与缩放状态；不再仅凭整图帧间差判定保形。
-- 应用版本约束：应用仍 1.1.7，插件按修复单独升版本（R-335 修订）。
-- L-327 与 R-331 的续行边界仍 OPEN；不要以解析或桩测试通过替代真实加载验证。
-- 已知偶发：总验收并行负载下 R-055 串口切挺停顿可能瞬时超 200 ms；单独重跑若通过则判为环境抖动，不得靠放宽阈值掩盖。
-- **发布教训**：长时上传不要用会被清理的后台终端会话；`make_release.py` 是"先删同名资产再上传"，
-  上传中断会留下空资产列表。发布后必须核对 `/releases/<id>` 的 assets 与 latest，不能只看命令退出码。
+1. `python .artifacts/report_context.py` — expects every index file within its
+   budget and `CR 0` for the LF files.
+2. `git status --short` — expects only `project-context/` and the skill change.
+3. Commit, then confirm a fresh session can answer the five self-check questions
+   from `CAPABILITIES` + `WORKLOG` + `HANDOFF` alone.

@@ -1,7 +1,22 @@
 # OmniCOM — Agent entry
 
-Read `project-context/README.md` first, then:
-REQUIREMENTS.md (binding) → LEDGER.md (search the reported symptom keywords) → HANDOFF.md (current state).
+Read `project-context/README.md` first, then, in this order:
+`CAPABILITIES.md` (what works today) → `WORKLOG.md` (what the last sessions changed) →
+`HANDOFF.md` (current state) → `REQUIREMENTS.md` (only the ids the task touches) →
+`LEDGER.md` (**search** by symptom keyword; never read it end to end).
+
+Record discipline — this is not optional:
+- **Every non-trivial change appends a `WORKLOG.md` row in the same turn**, with a status:
+  `done <sha>` / `open` / `in-progress` / `reverted <sha>` / `shipped <version>`.
+  Never defer it to the end of the session; a worklog written at the end loses exactly the
+  steps that most needed recording.
+- Every investigated symptom gets one `LEDGER.md` line, including the ones you ruled out or
+  reverted. Those lines are what stop the next session repeating the work.
+- When behaviour changes, refresh the matching `CAPABILITIES.md` row. `partial` / `broken` /
+  `planned` rows must cite an `R-` or `L-` id.
+- Before ending a session, rewrite `HANDOFF.md` (replace-in-place) and confirm no file is over
+  budget — `python .artifacts/report_context.py` prints every file against its limit.
+- `REQUIREMENTS.md` has no line cap and is never "compressed" by moving a live rule out.
 
 Rules
 - Before diagnosing or changing code, search `project-context/LEDGER.md` for the symptom keywords.
@@ -35,7 +50,8 @@ Rules
   Both harnesses set `OMNICOM_DATA_DIR` to a wiped `.artifacts/test-data/<suite>` folder, so a run
   never touches the repo `omnicom-data/` (command library, captures) and stays repeatable (L-116).
   Test harnesses use `OMNICOM_SETTINGS_SUFFIX` so they never touch the real UI settings.
-- Before ending a session: replace `HANDOFF.md`, append closed items to `LEDGER.md`.
+- Before ending a session: replace `HANDOFF.md`, append closed items to `LEDGER.md`, and add
+  the matching `WORKLOG.md` rows (they are written as you go, not here).
 - CLI for agents: `python -m omnicom.cli <ports|info|send|read|monitor|send-file|transfer|session|selftest>`,
   stdout is **one** JSON document (R-022/R-122) and the exit code equals `ok`; full reference in `docs/CLI.md`.
   Use `--port DEMO` without hardware.

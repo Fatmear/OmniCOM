@@ -1,5 +1,13 @@
 # Current requirements
-Updated: 2026-11-24
+Updated: 2026-11-25
+
+**This is the binding contract, and it is deliberately the one long file.** Ids
+are immutable; a superseded rule is listed as superseded, never deleted. Treat
+it as a reference, not a briefing: open only the ids the current task touches
+(`grep "R-342"`), and never dump it into a prompt.
+
+Read `CAPABILITIES.md` for "what works today"; come here when you need to know
+*why a rule exists*, who asked for it, and what proves it.
 
 ## Log Replay Candidate (2026-11-24)
 
