@@ -1137,7 +1137,31 @@ class OmniWindow(QMainWindow):
                            self.row_echo, self.row_scroll, self.row_awake):
             layout.addWidget(row_widget)
         layout.addWidget(self._divider())
-        # ---- capture
+        # ---- window actions first: they act on what is on screen right now,
+        # so they belong above the file-capture block (user, 2026-11-25:
+        # 「窗口那节和数据记录那节顺序对调一下，窗口在上，数据记录在下」).
+        # A hairline keeps them visually separate from the capture actions below
+        # (the log window is not part of the file capture - R-102), and they get
+        # their own heading so the pair is not mistaken for more capture buttons
+        # (R-118).
+        self.sec_window = SectionTitle(tr("rail.window"))
+        layout.addWidget(self.sec_window)
+        row3 = QHBoxLayout()
+        row3.setSpacing(6)
+        self.btn_clear = QPushButton(tr("log.clear.btn"))
+        self.btn_clear.setObjectName("Ghost")
+        self.btn_clear.setCursor(Qt.PointingHandCursor)
+        self.btn_clear.setToolTip(tr("log.clear.tip"))
+        row3.addWidget(self.btn_clear, 1)
+        self.btn_save_log = QPushButton(tr("log.save.btn"))
+        self.btn_save_log.setObjectName("Ghost")
+        self.btn_save_log.setCursor(Qt.PointingHandCursor)
+        self.btn_save_log.setToolTip(tr("log.save.tip"))
+        row3.addWidget(self.btn_save_log, 1)
+        layout.addLayout(row3)
+
+        # ---- capture, straight under 清除窗口 / 保存日志
+        layout.addWidget(self._divider())
         self.sec_record = SectionTitle(tr("rail.record"))
         layout.addWidget(self.sec_record)
         self.btn_record = QPushButton(tr("rail.record.start"))
@@ -1162,27 +1186,6 @@ class OmniWindow(QMainWindow):
         self.btn_clear_capture.setEnabled(False)
         row2.addWidget(self.btn_clear_capture, 1)
         layout.addLayout(row2)
-
-        # ---- window actions, straight under 打开目录 / 清空记录文件.  A hairline
-        # keeps them visually separate from the capture actions above (the log
-        # window is not part of the file capture - R-102), and they get their own
-        # heading so the pair is not mistaken for more capture buttons (R-118).
-        layout.addWidget(self._divider())
-        self.sec_window = SectionTitle(tr("rail.window"))
-        layout.addWidget(self.sec_window)
-        row3 = QHBoxLayout()
-        row3.setSpacing(6)
-        self.btn_clear = QPushButton(tr("log.clear.btn"))
-        self.btn_clear.setObjectName("Ghost")
-        self.btn_clear.setCursor(Qt.PointingHandCursor)
-        self.btn_clear.setToolTip(tr("log.clear.tip"))
-        row3.addWidget(self.btn_clear, 1)
-        self.btn_save_log = QPushButton(tr("log.save.btn"))
-        self.btn_save_log.setObjectName("Ghost")
-        self.btn_save_log.setCursor(Qt.PointingHandCursor)
-        self.btn_save_log.setToolTip(tr("log.save.tip"))
-        row3.addWidget(self.btn_save_log, 1)
-        layout.addLayout(row3)
 
         # The port / flow / version rows that used to sit here duplicated the
         # status bar, the combo and the About dialog, so they were removed.

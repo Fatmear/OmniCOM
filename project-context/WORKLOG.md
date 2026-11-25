@@ -6,6 +6,7 @@ Keep the newest ~40 rows live; move older blocks to `archive/worklog-YYYY.md`.
 
 | When | Area | What changed | Status |
 | --- | --- | --- | --- |
+| 11-25 | ui | 左栏顺序对调：窗口节移到数据记录之上（清除窗口/保存日志在上，开始记录/打开目录/清空记录在下） | done |
 | 11-25 | docs | Added `PRODUCT.md`: scope tables (`S-1.1`..`S-9.4`, 45 rows), 6 `OUT` rows, scope-change log | done |
 | 11-25 | docs | Scope discipline written into skill + `AGENTS.md`: add a feature = new `S-` row with a criterion; cancel a feature = **delete the row** + one change-log line | done |
 | 11-25 | docs | `PRODUCT.md` wired into `README` read order, report budget (200), validator, and `templates.md` | done |

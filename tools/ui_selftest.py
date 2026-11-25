@@ -4905,12 +4905,15 @@ def main() -> int:
         app.processEvents()
         app.processEvents()
 
-        # They belong to the capture block: directly under 打开目录 / 清空记录文件,
-        # not in a footer at the far bottom of the rail.
+        # They follow the 窗口 block: 窗口 acts on the visible log, so it sits on
+        # top and the file capture block comes after it (user, 2026-11-25:
+        # 「窗口那节和数据记录那节顺序对调一下，窗口在上，数据记录在下」).
+        # The old order was capture -> window; both the gap and the heading check
+        # now assert the new vertical order instead of the old one.
         capture_y = window.btn_open_dir.mapTo(rail, QPoint(0, 0)).y()
         log_y = window.btn_clear.mapTo(rail, QPoint(0, 0)).y()
-        gap = log_y - (capture_y + window.btn_open_dir.height())
-        check("R-102 清空/保存视图紧挨在打开目录/清空记录文件下面（间距小于 40 px）",
+        gap = capture_y - (log_y + window.btn_clear.height())
+        check("R-102 窗口按钮在上、打开目录/清空记录文件在下（间距小于 40 px）",
               0 < gap < 40, f"gap={gap} px")
         check("R-102 两行左对齐且宽度一致（左清空、右保存）",
               window.btn_clear.mapTo(rail, QPoint(0, 0)).x()
@@ -4942,9 +4945,9 @@ def main() -> int:
         if heading is not None:
             head_y = heading.mapTo(rail, QPoint(0, 0)).y()
             clear_y = window.btn_clear.mapTo(rail, QPoint(0, 0)).y()
-            check("R-118 标题夹在记录按钮与「清除窗口」之间",
-                  capture_y < head_y < clear_y,
-                  f"capture_y={capture_y} head_y={head_y} clear_y={clear_y}")
+            check("R-118 窗口标题在「清除窗口」上方，且整节位于数据记录之前",
+                  head_y < clear_y < capture_y,
+                  f"head_y={head_y} clear_y={clear_y} capture_y={capture_y}")
         check("R-118 多出一行标题后左栏仍无需滚动",
               area.verticalScrollBar().maximum() == 0,
               f"scroll_max={area.verticalScrollBar().maximum()}")
