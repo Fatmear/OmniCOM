@@ -23,9 +23,11 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import time
+import urllib.error
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -286,6 +288,7 @@ TITLES = {
     "R-319": "搜索与扩展命令都折叠时不拉大任一栏",
     "R-320": "看板实际绘制完成、交互响应与有界缓冲持续负载测量",
     "R-321": "看板有界同步、实际绘制背压、按需布局与持续负载回归",
+    "R-342": "便携包随带 CA 证书，HTTPS 证书失败提示为信任问题",
 }
 
 
@@ -976,6 +979,32 @@ def suite_local() -> None:
             os.environ.pop("OMNICOM_DATA_DIR", None)
         else:
             os.environ["OMNICOM_DATA_DIR"] = previous
+
+    # ---- R-342: the portable runtime ships no CA store of its own, so a
+    # machine whose system store lacks the roots failed every HTTPS call with
+    # CERTIFICATE_VERIFY_FAILED.  The bundle must carry a CA file, and a
+    # certificate failure must be reported as a trust problem (clock / proxy
+    # root), never as "network unavailable".
+    from omnicom import tls
+
+    bundle = tls.ca_bundle()
+    add("R-342", "便携包随带 CA 证书文件",
+        bool(bundle) and Path(bundle).is_file() and Path(bundle).stat().st_size > 100000,
+        bundle)
+    add("R-342", "随包 CA 能独立建立校验上下文（不依赖系统证书库）",
+        ssl.create_default_context(cafile=bundle).cert_store_stats().get("x509_ca", 0) > 50,
+        ssl.create_default_context(cafile=bundle).cert_store_stats())
+    cert_error = ssl.SSLCertVerificationError(
+        1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+           "unable to get local issuer certificate (_ssl.c:1032)")
+    reason = update._reason(urllib.error.URLError(cert_error))
+    add("R-342", "证书失败提示为信任问题而不是网络不通",
+        ("证书" in reason or "certificate" in reason.lower())
+        and "网络不通" not in reason and "Network unavailable" not in reason,
+        reason)
+    add("R-342", "GUI 与 CLI 入口都安装随包 CA 信任",
+        "tls.install()" in Path(ROOT / "omnicom" / "ui" / "__init__.py").read_text(encoding="utf-8")
+        and "tls.install()" in Path(ROOT / "omnicom" / "cli.py").read_text(encoding="utf-8"))
 
 
 def suite_installer(bundle: str, older_package: str | None = None) -> None:

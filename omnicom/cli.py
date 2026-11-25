@@ -1960,6 +1960,11 @@ SERIAL_COMMANDS = ("send", "read", "monitor", "send-file", "transfer")
 
 def main(argv: list[str] | None = None) -> int:
     _utf8_streams()
+    # Same trust as the GUI: the portable runtime has no CA store of its own
+    # (R-342), and the CLI can reach the network for updates/plugins.
+    from . import tls
+
+    tls.install()
     parser = build_parser()
     args = parser.parse_args(argv)
     ports = [item for item in parse_ports(args) if item] \

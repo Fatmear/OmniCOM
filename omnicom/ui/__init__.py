@@ -129,7 +129,11 @@ def run(argv: list[str] | None = None, demo: bool = False) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from .. import __version__
+    # The portable runtime ships no CA store of its own; install the bundled
+    # roots before anything can make an HTTPS request (R-342).
+    from .. import __version__, tls
+
+    tls.install()
 
     argv = list(sys.argv[1:] if argv is None else argv)
     # Agents get the JSON CLI through the very same entry point: the shipped

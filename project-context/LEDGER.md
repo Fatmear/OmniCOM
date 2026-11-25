@@ -786,6 +786,15 @@ Status: OPEN | FIXED-verified | FIXED-unverified | REVERTED | RULED-OUT
 - 曾把有效容量改成 max(保留, 展示)，但那会篡改用户的显式「曲线点数」：R-301 要求显式值就是保留上限，points=150 必须保留 150。已回退为 `min(MAX_POINTS, max(100, limit))`，`visible` 只控制每帧绘制尾部。
 - 证据：完整插件套件 R-301「曲线点数按设置生效」在错误实现下失败（300≠150），回退后全套 587 项通过。该推测未解释用户实际 5000/5000/0，见 L-327。
 
+## L-342 换电脑后检查更新报 SSL 证书校验失败（FIXED-verified）
+- 症状：另一台电脑点「检查新版本」直接失败：`[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1032)`。
+- 根因：便携包用官方 CPython **embeddable** 运行时，`python313._pth` 关闭了 `site`，所以用户 site-packages 里的 `certifi` 不可见；运行时只带 `_ssl.pyd` + `libssl-3.dll`，**没有任何 CA 证书**。开发机能通是因为 Windows 上 OpenSSL 会回退到系统证书库（本机 79 张），而目标机器的系统库缺少根证书（精简镜像 / 新装 VM / 企业代理重签）。
+- 修法：新增 `omnicom/tls.py`——随包 `assets/cacert.pem`（certifi 240216 B），`context()` 用该文件建校验上下文并额外 `load_default_certs()` 合并系统库（企业代理根仍受信）；`install()` 装一个模块级 opener，让既有 `urlopen` 调用点全部生效；GUI 与 CLI 入口各调一次。`make_pyz` 把证书复制进 `assets/`。
+- 提示改进：`update._reason()` 新增 `_is_certificate_error()` / `_certificate_detail()`，证书失败走 `update.check.tls`（提示查系统时间 / 代理根证书），不再误报「网络不通」。
+- 证据：`.artifacts/probe_tls_bundle.py` 仅用随包文件建出 121 张根证书并 HTTPS 200；`.artifacts/probe_packaged_tls.py` 用便携运行时确认 `dist/OmniCOM/assets/cacert.pem` 生效；`acceptance_test --only local` R-342 四项通过；Ruff 干净。
+- 注意：`releases.atom` 当时返回 HTTP 500（两种 UA 都一样），是 GitHub 侧临时故障，与证书无关；`raw.githubusercontent.com` 200 证明信任链正常。
+- 教训：任何「开发机正常、换机器失败」的网络问题，先查**运行时是否自带 CA**，不要先怀疑代理或防火墙；嵌入式 Python 的 `._pth` 会静默屏蔽 site-packages。
+
 ## L-341 数据来源选择框悬停背景变黑（FIXED-verified）
 - 症状：多曲线「数据来源」对话框里，鼠标悬停的行背景是纯黑，未勾选复选框边框也是黑的。
 - 根因：`SourceDelegate.paint()` 把 `theme.WASH_HOVER` / `theme.LINE_STRONG` 直接交给 `QColor`。这两个令牌是 Qt 样式表形式 `rgba(18, 26, 43, 14)`（alpha 0-255），`QColor` **完全无法解析**，返回 `isValid()==False` 的颜色，`fillRect`/`setPen` 于是画成不透明黑。`omnicom/ui/theme.py` 第 59 行早有同样注释（`WINDOW_EDGE` 因此拆成两个令牌）。

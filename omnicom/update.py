@@ -25,6 +25,7 @@ import os
 import queue
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -239,10 +240,40 @@ def _reason(error: BaseException) -> str:
         if error.code == 403:
             return tr("update.check.forbidden")
         return f"HTTP {error.code} {error.reason}"
+    # A certificate failure is a *trust* problem, not a dead network: the user
+    # needs a different action (clock / proxy root), so it gets its own text
+    # instead of the generic "network unavailable" (R-342).
+    if _is_certificate_error(error):
+        return tr("update.check.tls", err=_certificate_detail(error))
     if isinstance(error, urllib.error.URLError):
         return tr("update.check.network", err=error.reason)
     text = str(error) or type(error).__name__
     return text[:160]
+
+
+def _is_certificate_error(error: BaseException) -> bool:
+    """True for ``CERTIFICATE_VERIFY_FAILED`` anywhere in the chain."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        if "CERTIFICATE_VERIFY_FAILED" in str(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _certificate_detail(error: BaseException) -> str:
+    """The short OpenSSL reason, without the ``[SSL: …]`` wrapper noise."""
+    text = str(error) or type(error).__name__
+    match = re.search(r"\[SSL: [A-Z_]+\]\s*(.*?)(?:\s*\(_ssl\.c:\d+\))?\s*$", text)
+    if match:
+        detail = match.group(1).strip().rstrip(">").strip()
+        if detail:
+            return detail[:120]
+    return text[:120]
 
 
 class DownloadCancelled(Exception):

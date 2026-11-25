@@ -433,6 +433,8 @@ _TABLE: dict[str, tuple[str, str]] = {
     "update.check.assets": ("资产列表读取失败，沿用约定文件名（{err}）", "Asset list unavailable; using the standard filename ({err})"),
     "update.check.forbidden": ("HTTP 403 访问被拒绝", "HTTP 403 access denied"),
     "update.check.network": ("网络不通（{err}）", "Network unavailable ({err})"),
+    "update.check.tls": ("HTTPS 证书校验失败（{err}）。请确认系统时间正确；若在公司网络，请让代理信任 GitHub 的根证书。",
+                         "HTTPS certificate verification failed ({err}). Check the system clock; on a corporate network, make sure the proxy trusts GitHub's root certificate."),
     "update.check.no.entries": ("发布页没有版本条目", "Release feed has no entries"),
     "update.check.no.version": ("发布条目没有版本号", "Release entry has no version"),
     "update.page": ("打开下载页", "Open the release page"),

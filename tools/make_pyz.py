@@ -110,6 +110,14 @@ def build(target: Path, *, stubs_only: bool = False) -> Path:
     for asset in ("logo.png", "README.md", "README.en.md", "LICENSE"):
         if (ROOT / asset).is_file():
             shutil.copy2(ROOT / asset, target / asset)
+    # The portable runtime ships no CA store of its own, so the bundle carries
+    # one.  Without it every HTTPS call fails on a machine whose system store
+    # lacks the roots (R-342).
+    ca_source = ROOT / "assets" / "cacert.pem"
+    if ca_source.is_file():
+        shutil.copy2(ca_source, target / "assets" / "cacert.pem")
+    else:
+        print(f"WARNING: missing CA bundle {ca_source}; HTTPS may fail on some machines")
     # The CLI contract has to travel with the program: an agent that only has the
     # unzipped folder must be able to learn the whole interface from it (R-086).
     for doc in ("CLI.md", "AI-GUIDE.md", "PLUGINS.md"):
