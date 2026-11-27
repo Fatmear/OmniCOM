@@ -15,6 +15,8 @@ a symptom. Do not read it end to end.
 
 | ID | Symptom keywords | Area | Status | Conclusion (one line) | Evidence |
 | --- | --- | --- | --- | --- | --- |
+| L-344 | 导入扩展命令 重复 / duplicate import / 命令越导越多 | ui | FIXED-verified | `import_from` 无条件追加，同一文件导两次就翻倍。改为按「正文 + HEX 模式」判定重复并跳过，返回 (added, skipped) 供界面提示；分组/备注/延时/行尾/勾选不参与判定 | R-344；`.artifacts/probe_import_dedupe.py` 15/15；负向去掉判定后失败 |
+| L-345 | GUI 自测假通过 / ALL PASSED 但大量步骤没跑 / 只跑 43 步 | build | OPEN | 套件设 `quitOnLastWindowClosed` 默认 True，`step_keep_awake` 关掉最后一个窗口就让 `app.exec()` 返回，150 步只跑 43 步却仍报 ALL PASSED（判定只统计已执行项）。已在创建 QApplication 后设 `setQuitOnLastWindowClosed(False)`；修复后暴露 37 项被掩盖的既有失败（18 项 C++ 对象已删除、16 项数值断言、2 项 NoneType、1 项插件发现），A/B 证明与 R-344 无关（有 R-344 37 项，撤回后 39 项） | R-344 提交；`.artifacts/ab_failures.py` |
 | L-002 | 拔插不重连 / replug reconnect / 串口消失 | cli | FIXED-unverified | `PortManager._monitor_loop` reopens the same path (or matches serial/VID-PID); needs a real unplug test | `omnicom/serial_port.py` monitor loop |
 | L-005 | zmodem 传不过 / 卡在 ZRINIT / 帧校验失败 | core | FIXED-unverified | CRC16 was implemented reflected (wrong) and the FCS "seal" appended two zero bytes; fixed to plain big-endian `crc16(data)`. Sender now ignores stale ZRINIT instead of r… | `protocol_selftest` 23/23; no lrzsz interop yet |
 | L-006 | exe 无法运行 / 拒绝访问 / Access denied / 打包失败 | build | RULED-OUT | PyInstaller build itself succeeded (2.0 MB, no errors) but Windows refuses to launch the produced exe ("程序无法运行: 拒绝访问", `cmd` returns rc=0 with no window). Corporate endp… | R-019, session 2026-10-27 |

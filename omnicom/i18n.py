@@ -345,6 +345,8 @@ _TABLE: dict[str, tuple[str, str]] = {
     "cmd.dialog.exportgroup": ("导出这个分组", "Export this group"),
     "cmd.exported": ("已导出 {n} 条命令到 {name}", "Exported {n} commands to {name}"),
     "cmd.imported": ("已导入 {n} 条命令", "Imported {n} commands"),
+    "cmd.imported.skipped": ("已导入 {n} 条命令，跳过 {skipped} 条重复命令",
+                             "Imported {n} commands, skipped {skipped} duplicate(s)"),
     "cmd.importfail": ("导入失败：{err}", "Import failed: {err}"),
     "cmd.sent": ("已发送：{text}", "Sent: {text}"),
     "cmd.group.keep": ("删除分组，保留里面的命令", "Delete the group, keep its commands"),

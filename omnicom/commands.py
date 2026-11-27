@@ -695,8 +695,17 @@ class CommandStore(QObject):
             json.dump(payload, handle, ensure_ascii=False, indent=2)
         return len(payload["items"])
 
-    def import_from(self, path: str) -> int:
-        """Merge a bundle. Imported ids are always regenerated (no collisions)."""
+    def import_from(self, path: str) -> tuple[int, int]:
+        """Merge a bundle, skipping commands that identical to one already present.
+
+        Imported ids are always regenerated (no collisions).  A command counts as
+        "the same" when its text **and** hex flag match an existing command -
+        ``AT`` sent as ASCII and ``AT`` sent as HEX are different commands, so the
+        hex flag is part of the identity (R-344).
+
+        Returns ``(added, skipped)`` so the caller can tell the user how many were
+        already there instead of silently inflating the library on every import.
+        """
         with open(path, encoding="utf-8") as handle:
             raw = json.load(handle)
         if isinstance(raw, list):
@@ -719,7 +728,14 @@ class CommandStore(QObject):
             self.groups.append(created)
             group_map[group["id"]] = created["id"]
 
+        # Snapshots taken before any append: new items must not dedupe against
+        # each other only within this batch, they are all distinct entries from
+        # the file, so a repeated pair inside one file is still imported twice
+        # exactly as the file said.  The comparison set is updated as we go so a
+        # file that itself repeats a command does not duplicate it either.
+        seen = {self.identity(item) for item in self.items}
         added = 0
+        skipped = 0
         for entry in payload.get("items") or []:
             if not isinstance(entry, dict) or not entry.get("text"):
                 continue
@@ -728,11 +744,28 @@ class CommandStore(QObject):
             item["id"] = uuid.uuid4().hex[:10]
             item["timer"] = False
             item["group"] = group_map.get(entry.get("group") or UNGROUPED, UNGROUPED)
+            signature = self.identity(item)
+            if signature in seen:
+                skipped += 1
+                continue
+            seen.add(signature)
             self.items.append(item)
             added += 1
         if added or group_map:
             self._commit()
-        return added
+        return added, skipped
+
+    @staticmethod
+    def identity(item: dict) -> tuple[str, bool]:
+        """What makes two commands "the same" for import de-duplication (R-344).
+
+        Text plus the hex flag.  Deliberate exclusions: ``group`` (moving a
+        command between groups is not a new command), ``note`` / ``delay`` /
+        ``interval`` (per-command settings, not identity) and ``enabled`` (runtime
+        state).  ``AT`` in ASCII and ``AT`` in HEX stay distinct because they put
+        different bytes on the wire.
+        """
+        return (str(item.get("text") or ""), bool(item.get("hex", False)))
 
     # ------------------------------------------------------------------ help
     def enabled_items(self) -> list[dict]:

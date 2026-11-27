@@ -176,6 +176,13 @@ def main() -> int:
     webengine_ready = prepare_webengine()
     print(f"webengine  available={webengine_ready}", flush=True)
     app = QApplication(sys.argv)
+    # Several steps create extra top-level windows (keep-awake, close paths,
+    # resize edges) and close them again.  Qt's default "quit when the last
+    # window closes" then ended app.exec() in the middle of the suite: the
+    # remaining 100+ steps never ran while the verdict still said ALL PASSED,
+    # because it only counts checks that produced a result (L-137 class).
+    # The harness owns the event loop, so it must survive having no window open.
+    app.setQuitOnLastWindowClosed(False)
     for filename in ("segoeui.ttf", "msyh.ttc", "consola.ttf"):
         font_path = os.path.join(os.environ.get("WINDIR", "C:/Windows"), "Fonts", filename)
         if os.path.isfile(font_path):
@@ -2408,13 +2415,23 @@ def main() -> int:
         target = os.path.join(tempfile.mkdtemp(), "group-export.json")
         with open(target, "w", encoding="utf-8") as handle:
             json.dump(grouped, handle, ensure_ascii=False)
+        # A brand-new store ships three demo commands (AT / AT+CGMR / AT+CSQ).
+        # With R-344's de-duplication those three would be skipped, so the round
+        # trip must be measured on a bundle whose texts are unique; otherwise the
+        # check would silently be asserting the demo defaults, not the export.
+        unique = {"format": grouped["format"], "version": grouped["version"],
+                  "groups": grouped["groups"],
+                  "items": [{**item, "text": item["text"] + "-EXPORTED"}
+                            for item in grouped["items"]]}
+        with open(target, "w", encoding="utf-8") as handle:
+            json.dump(unique, handle, ensure_ascii=False)
         fresh = CommandStore(os.path.join(tempfile.mkdtemp(), "commands.json"))
-        added = fresh.import_from(target)
+        added, skipped = fresh.import_from(target)
         os.unlink(target)
         check("R-031 导出的文件可以导入回来",
-              added == len(grouped["items"]) and
+              added == len(unique["items"]) and skipped == 0 and
               "回归测试组" in [g["name"] for g in fresh.groups],
-              f"{added} 条")
+              f"{added} 条，跳过 {skipped}")
         store.remove_group(group["id"])
         panel.rebuild()
         app.processEvents()
@@ -3485,10 +3502,66 @@ def main() -> int:
             export_path = Path(directory) / "import.json"
             export_path.write_text(json.dumps(bundle), encoding="utf-8")
             count = len(store.groups)
-            added = store.import_from(str(export_path))
+            added, skipped = store.import_from(str(export_path))
             check("R-056 导入同名分组合并而不再创建",
-                  added == 1 and len(store.groups) == count
-                  and store.items[-1]["group"] == first["id"])
+                  added == 0 and skipped == 1 and len(store.groups) == count
+                  and store.items[-1]["group"] == first["id"],
+                  f"added={added} skipped={skipped}")
+
+        # ---- R-344: importing a command that is already in the library must be
+        # skipped instead of appended again.  The identity is text + hex flag;
+        # group / note / delay / line_end / enabled are not identity, so a file
+        # that only changes those is still "the same command".
+        #
+        # NOTE: this uses its own temporary directory.  Reusing the `directory`
+        # of the block above crashed R-056 because `TemporaryDirectory` had
+        # already removed it - the suite then reported a FileNotFoundError, which
+        # is exactly the kind of collateral damage a shared scratch path causes.
+        import json as _json
+
+        r344_dir = Path(tempfile.mkdtemp(prefix="omnicom-r344-"))
+
+        def _imp(store_obj, items, groups=(), name="r344.json"):
+            path = r344_dir / name
+            path.write_text(_json.dumps(
+                {"format": "omnicom.commands", "version": 1,
+                 "groups": list(groups), "items": items}, ensure_ascii=False),
+                encoding="utf-8")
+            return store_obj.import_from(str(path))
+
+        r344 = CommandStore(str(r344_dir / "r344-store.json"))
+        base_at = sum(1 for i in r344.items if i["text"] == "AT" and not i["hex"])
+        added, skipped = _imp(r344, [{"text": "AT"}], name="r344-same.json")
+        check("R-344 导入与已有命令相同的条目会被跳过",
+              added == 0 and skipped == 1
+              and sum(1 for i in r344.items if i["text"] == "AT" and not i["hex"]) == base_at,
+              f"added={added} skipped={skipped}")
+
+        added, skipped = _imp(r344, [{"text": "AT", "hex": True}], name="r344-hex.json")
+        check("R-344 正文相同但 HEX 模式不同算不同命令",
+              added == 1 and skipped == 0
+              and sum(1 for i in r344.items if i["text"] == "AT" and i["hex"]) == 1,
+              f"added={added}")
+
+        added, skipped = _imp(r344, [{"text": "AT", "note": "改备注", "delay": 999,
+                                      "line_end": "lf"}], name="r344-meta.json")
+        check("R-344 只改分组/备注/延时/行尾仍视为同一条命令",
+              added == 0 and skipped == 1, f"added={added} skipped={skipped}")
+
+        before_count = len(r344.items)
+        added, skipped = _imp(
+            r344, [{"text": "AT"}, {"text": "AT", "hex": True}, {"text": "R344-NEW"}],
+            name="r344-mixed.json")
+        check("R-344 混合文件只导入真正新增的那条",
+              added == 1 and skipped == 2 and len(r344.items) == before_count + 1,
+              f"added={added} skipped={skipped}")
+
+        added, skipped = _imp(r344, [{"text": "R344-DUP"}, {"text": "R344-DUP"}],
+                              name="r344-inner.json")
+        check("R-344 同一份文件内部的重复也只导入一次",
+              added == 1 and skipped == 1
+              and sum(1 for i in r344.items if i["text"] == "R344-DUP") == 1,
+              f"added={added} skipped={skipped}")
 
         panel = window.commands_panel
         store = panel.store
@@ -4908,13 +4981,14 @@ def main() -> int:
         # They follow the 窗口 block: 窗口 acts on the visible log, so it sits on
         # top and the file capture block comes after it (user, 2026-11-25:
         # 「窗口那节和数据记录那节顺序对调一下，窗口在上，数据记录在下」).
-        # The old order was capture -> window; both the gap and the heading check
-        # now assert the new vertical order instead of the old one.
+        # The gap now spans the divider + the「数据记录」heading + the 开始记录
+        # button + its hint, so the bound is thematic ("one short block apart")
+        # rather than the old 40 px that assumed two adjacent button rows.
         capture_y = window.btn_open_dir.mapTo(rail, QPoint(0, 0)).y()
         log_y = window.btn_clear.mapTo(rail, QPoint(0, 0)).y()
         gap = capture_y - (log_y + window.btn_clear.height())
-        check("R-102 窗口按钮在上、打开目录/清空记录文件在下（间距小于 40 px）",
-              0 < gap < 40, f"gap={gap} px")
+        check("R-102 窗口按钮在上、打开目录/清空记录文件在下（同一栏内，间距小于 120 px）",
+              0 < gap < 120, f"gap={gap} px")
         check("R-102 两行左对齐且宽度一致（左清空、右保存）",
               window.btn_clear.mapTo(rail, QPoint(0, 0)).x()
               == window.btn_open_dir.mapTo(rail, QPoint(0, 0)).x()

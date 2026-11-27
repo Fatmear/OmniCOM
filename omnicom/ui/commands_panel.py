@@ -2109,11 +2109,12 @@ class CommandsPanel(QWidget):
         if not path:
             return
         try:
-            count = self.store.import_from(path)
+            count, skipped = self.store.import_from(path)
         except (OSError, ValueError) as exc:
             self.notify(tr("cmd.importfail", err=exc), "error")
             return
-        self.notify(tr("cmd.imported", n=count), "ok")
+        self.notify(tr("cmd.imported.skipped", n=count, skipped=skipped)
+                    if skipped else tr("cmd.imported", n=count), "ok")
 
     # ----------------------------------------------------------------- timers
     def sync_timers(self) -> None:
